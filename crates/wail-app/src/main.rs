@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use wail_audio::AudioWire;
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
@@ -143,7 +143,9 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
 
                     SyncMessage::Ping { id, sent_at_us } => {
                         let pong = clock.handle_ping(id, sent_at_us);
-                        let _ = mesh.send_to(&from, &pong).await;
+                        if let Err(e) = mesh.send_to(&from, &pong).await {
+                            debug!(peer = %from, error = %e, "Failed to send pong");
+                        }
                     }
 
                     SyncMessage::Pong { id: _, ping_sent_at_us, pong_sent_at_us } => {
@@ -156,7 +158,9 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                     SyncMessage::TempoChange { bpm: remote_bpm, .. } => {
                         info!(peer = %from, bpm = remote_bpm, "Remote tempo change");
                         last_broadcast_bpm = remote_bpm;
-                        let _ = link_cmd_tx.send(LinkCommand::SetTempo(remote_bpm));
+                        if link_cmd_tx.send(LinkCommand::SetTempo(remote_bpm)).is_err() {
+                            warn!("Link bridge stopped — cannot apply remote tempo");
+                        }
                     }
 
                     SyncMessage::StateSnapshot { bpm: remote_bpm, beat, .. } => {
@@ -169,7 +173,9 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                         // Apply tempo if significantly different
                         if (remote_bpm - last_broadcast_bpm).abs() > 0.01 {
                             last_broadcast_bpm = remote_bpm;
-                            let _ = link_cmd_tx.send(LinkCommand::SetTempo(remote_bpm));
+                            if link_cmd_tx.send(LinkCommand::SetTempo(remote_bpm)).is_err() {
+                                warn!("Link bridge stopped — cannot apply remote tempo");
+                            }
                         }
                     }
 
@@ -274,7 +280,10 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
             _ = status_interval.tick() => {
                 // Get current Link state
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = link_cmd_tx.send(LinkCommand::GetState(tx));
+                if link_cmd_tx.send(LinkCommand::GetState(tx)).is_err() {
+                    debug!("Link bridge stopped — cannot query state");
+                    continue;
+                }
                 if let Ok(state) = rx.await {
                     let peers = mesh.connected_peers();
                     let peer_rtts: Vec<String> = peers

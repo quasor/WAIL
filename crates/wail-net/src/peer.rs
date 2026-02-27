@@ -31,11 +31,11 @@ pub struct PeerConnection {
     dc_sync: Option<Arc<RTCDataChannel>>,
     /// "audio" DataChannel for binary interval audio
     dc_audio: Option<Arc<RTCDataChannel>>,
-    /// Incoming sync messages (JSON)
-    pub incoming_rx: mpsc::UnboundedReceiver<SyncMessage>,
+    /// Incoming sync messages (JSON) — taken via `take_sync_rx()` for forwarding
+    pub incoming_rx: Option<mpsc::UnboundedReceiver<SyncMessage>>,
     incoming_tx: mpsc::UnboundedSender<SyncMessage>,
-    /// Incoming audio data (binary)
-    pub audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    /// Incoming audio data (binary) — taken via `take_audio_rx()` for forwarding
+    pub audio_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
     audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// ICE candidates that arrived before remote description was set
     pending_candidates: Vec<RTCIceCandidateInit>,
@@ -79,9 +79,9 @@ impl PeerConnection {
             pc,
             dc_sync: None,
             dc_audio: None,
-            incoming_rx,
+            incoming_rx: Some(incoming_rx),
             incoming_tx,
-            audio_rx,
+            audio_rx: Some(audio_rx),
             audio_tx,
             pending_candidates: Vec::new(),
             remote_desc_set: false,
@@ -219,17 +219,27 @@ impl PeerConnection {
 
     /// Send a sync message over the "sync" DataChannel (JSON text).
     pub async fn send(&self, msg: &SyncMessage) -> Result<()> {
-        if let Some(dc) = &self.dc_sync {
-            let text = serde_json::to_string(msg)?;
-            dc.send_text(text).await?;
+        match &self.dc_sync {
+            Some(dc) => {
+                let text = serde_json::to_string(msg)?;
+                dc.send_text(text).await?;
+            }
+            None => {
+                debug!(peer = %self.remote_peer_id, "Sync DataChannel not ready — message dropped");
+            }
         }
         Ok(())
     }
 
     /// Send binary audio data over the "audio" DataChannel.
     pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
-        if let Some(dc) = &self.dc_audio {
-            dc.send(&Bytes::copy_from_slice(data)).await?;
+        match &self.dc_audio {
+            Some(dc) => {
+                dc.send(&Bytes::copy_from_slice(data)).await?;
+            }
+            None => {
+                debug!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
+            }
         }
         Ok(())
     }
@@ -285,6 +295,18 @@ impl PeerConnection {
         }));
 
         self.dc_audio = Some(dc);
+    }
+
+    /// Take the sync message receiver for forwarding to a unified channel.
+    /// Can only be called once — returns None on subsequent calls.
+    pub fn take_sync_rx(&mut self) -> Option<mpsc::UnboundedReceiver<SyncMessage>> {
+        self.incoming_rx.take()
+    }
+
+    /// Take the audio data receiver for forwarding to a unified channel.
+    /// Can only be called once — returns None on subsequent calls.
+    pub fn take_audio_rx(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+        self.audio_rx.take()
     }
 
     pub async fn close(&self) -> Result<()> {

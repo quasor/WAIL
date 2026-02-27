@@ -50,11 +50,17 @@ pub struct IpcRecvBuffer {
     buf: Vec<u8>,
 }
 
-impl IpcRecvBuffer {
-    pub fn new() -> Self {
+impl Default for IpcRecvBuffer {
+    fn default() -> Self {
         Self {
             buf: Vec::with_capacity(64 * 1024),
         }
+    }
+}
+
+impl IpcRecvBuffer {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Append received bytes from a socket read.

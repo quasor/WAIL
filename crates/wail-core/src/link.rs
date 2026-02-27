@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use rusty_link::{AblLink, SessionState};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Events emitted by the Link bridge when local session state changes.
 #[derive(Debug, Clone)]
@@ -34,6 +34,7 @@ pub struct LinkBridge {
 const TEMPO_CHANGE_THRESHOLD: f64 = 0.01; // BPM
 const ECHO_GUARD_DURATION: Duration = Duration::from_millis(150);
 const POLL_INTERVAL: Duration = Duration::from_millis(20); // 50 Hz
+const SNAPSHOT_INTERVAL_TICKS: u32 = 10; // ~200ms at 50Hz polling
 
 impl LinkBridge {
     pub fn new(initial_bpm: f64, quantum: f64) -> Self {
@@ -129,21 +130,27 @@ impl LinkBridge {
                     _ = interval.tick() => {
                         // Check for tempo change
                         if let Some(event) = self.check_tempo_change() {
-                            let _ = event_tx.send(event);
+                            if event_tx.send(event).is_err() {
+                                warn!("Link event receiver dropped — stopping poller");
+                                break;
+                            }
                         }
 
                         // Send periodic state snapshot (every ~200ms = 10 ticks)
                         snapshot_counter += 1;
-                        if snapshot_counter >= 10 {
+                        if snapshot_counter >= SNAPSHOT_INTERVAL_TICKS {
                             snapshot_counter = 0;
                             let s = self.state();
-                            let _ = event_tx.send(LinkEvent::StateUpdate {
+                            if event_tx.send(LinkEvent::StateUpdate {
                                 bpm: s.bpm,
                                 beat: s.beat,
                                 phase: s.phase,
                                 quantum: s.quantum,
                                 timestamp_us: s.timestamp_us,
-                            });
+                            }).is_err() {
+                                warn!("Link event receiver dropped — stopping poller");
+                                break;
+                            }
                         }
                     }
                     cmd = cmd_rx.recv() => {
@@ -152,7 +159,9 @@ impl LinkBridge {
                                 self.set_tempo(bpm);
                             }
                             Some(LinkCommand::GetState(tx)) => {
-                                let _ = tx.send(self.state());
+                                if tx.send(self.state()).is_err() {
+                                    debug!("GetState caller dropped receiver");
+                                }
                             }
                             None => break, // channel closed
                         }

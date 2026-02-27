@@ -127,6 +127,24 @@ cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
 - **Adjust ring buffer crossfade**: `IntervalPlayer::new()` crossfade_ms param
 
+## Trade-off Preferences
+
+When encountering code quality trade-offs, follow these principles (derived from owner decisions):
+
+### Error handling
+- **Never panic in production paths.** Replace `unwrap()` with match/`?`/log-and-continue. Mutex poison → handle gracefully (return error to host, not crash).
+- **Make failures observable.** Silent `.ok()` that discards errors must log at `warn!` level. If something can fail and the caller won't notice, add a log line.
+- **Defensive clamping over error propagation** for internal numeric inputs. Bad values (zero divisors, negative durations) → clamp to safe minimums. Don't bubble `Result` for things that should just work.
+- **TDD safety-critical fixes.** Division-by-zero, overflow, NaN — write the failing test first, then fix.
+
+### Scope and priorities
+- **Batch obvious fixes, discuss complex ones.** If a fix has no real trade-off (dead code, misleading labels, redundant imports), just do it. Only pause for decisions that involve architectural choices or behavioral changes.
+- **Defer infrastructure hardening in early development.** Authentication, rate limiting, TLS, connection limits, reconnection logic — track in `tradeoffs.md` but don't implement until the core product works end-to-end.
+- **Fix code, don't add process.** Prefer actual code changes over adding TODOs, lint suppressions, or documentation-only fixes. Exception: `#[allow(dead_code)]` is fine for fields that are structurally needed but not yet read.
+
+### Trade-off log
+All deferred decisions and remaining code quality items are tracked in `tradeoffs.md` at the repo root. When making a trade-off decision during development, record it there with the rationale.
+
 ## Future: Link Audio Integration
 
 Ableton Link 4.0.0 beta (vendored at `vendor/link`) introduces Link Audio — native audio streaming between Link peers on a LAN. The Link Audio API (LinkAudio.hpp) provides:

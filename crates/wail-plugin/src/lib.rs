@@ -69,18 +69,22 @@ impl Plugin for WailPlugin {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
+        audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
 
-        let channels = 2u16; // TODO: derive from audio_io_layout
+        let channels = audio_io_layout
+            .main_input_channels
+            .map(|c| c.get() as u16)
+            .unwrap_or(2);
         let bridge = AudioBridge::new(
             buffer_config.sample_rate as u32,
             channels,
             self.params.bars.value() as u32,
             self.params.quantum(),
+            self.params.bitrate_kbps.value() as u32,
         );
 
         match self.bridge.lock() {

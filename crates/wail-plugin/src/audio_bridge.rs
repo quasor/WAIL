@@ -23,8 +23,8 @@ pub struct AudioBridge {
 }
 
 impl AudioBridge {
-    pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64) -> Self {
-        let encoder = match AudioEncoder::new(sample_rate, channels, 128) {
+    pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64, bitrate_kbps: u32) -> Self {
+        let encoder = match AudioEncoder::new(sample_rate, channels, bitrate_kbps) {
             Ok(enc) => Some(enc),
             Err(e) => {
                 tracing::warn!(error = %e, sample_rate, channels, "Failed to create Opus encoder — audio encoding disabled");
@@ -51,7 +51,7 @@ impl AudioBridge {
             bpm: 120.0,
             sample_rate,
             channels,
-            bitrate_kbps: 128,
+            bitrate_kbps,
         }
     }
 

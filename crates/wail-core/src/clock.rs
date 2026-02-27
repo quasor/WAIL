@@ -22,13 +22,19 @@ struct PeerClock {
     rtt_us: i64,
 }
 
-impl ClockSync {
-    pub fn new() -> Self {
+impl Default for ClockSync {
+    fn default() -> Self {
         Self {
             epoch: Instant::now(),
             per_peer: HashMap::new(),
             next_ping_id: 0,
         }
+    }
+}
+
+impl ClockSync {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Current local time in microseconds since epoch.

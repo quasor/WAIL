@@ -211,7 +211,7 @@ impl PeerMesh {
                         continue;
                     }
                 };
-                let _ = outgoing.send(SignalMessage::Signal {
+                if outgoing.send(SignalMessage::Signal {
                     to: remote_id.clone(),
                     from: our_id.clone(),
                     payload: SignalPayload::IceCandidate {
@@ -219,7 +219,10 @@ impl PeerMesh {
                         sdp_mid: json.sdp_mid,
                         sdp_mline_index: json.sdp_mline_index,
                     },
-                });
+                }).is_err() {
+                    warn!(peer = %remote_id, "Signaling channel closed — ICE candidate lost");
+                    break;
+                }
             }
         });
     }
@@ -229,12 +232,13 @@ impl PeerMesh {
         let sync_tx = self.sync_tx.clone();
         let rid = remote_id.to_string();
 
-        // Swap the receiver out of PeerConnection so we can forward to the unified channel
-        let (_new_tx, new_rx) = mpsc::unbounded_channel();
-        let mut old_rx = std::mem::replace(&mut pc.incoming_rx, new_rx);
+        let Some(mut rx) = pc.take_sync_rx() else {
+            warn!(peer = %remote_id, "Sync receiver already taken");
+            return;
+        };
 
         tokio::spawn(async move {
-            while let Some(msg) = old_rx.recv().await {
+            while let Some(msg) = rx.recv().await {
                 if sync_tx.send((rid.clone(), msg)).is_err() {
                     break;
                 }
@@ -247,11 +251,13 @@ impl PeerMesh {
         let audio_tx = self.audio_tx.clone();
         let rid = remote_id.to_string();
 
-        let (_new_tx, new_rx) = mpsc::unbounded_channel();
-        let mut old_rx = std::mem::replace(&mut pc.audio_rx, new_rx);
+        let Some(mut rx) = pc.take_audio_rx() else {
+            warn!(peer = %remote_id, "Audio receiver already taken");
+            return;
+        };
 
         tokio::spawn(async move {
-            while let Some(data) = old_rx.recv().await {
+            while let Some(data) = rx.recv().await {
                 if audio_tx.send((rid.clone(), data)).is_err() {
                     break;
                 }

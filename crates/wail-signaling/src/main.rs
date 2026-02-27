@@ -102,8 +102,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, rooms: Rooms) ->
                 // Notify existing peers
                 let join_msg =
                     serde_json::to_string(&SignalMessage::PeerJoined { peer_id: pid.clone() })?;
-                for (_id, sender) in room_map.iter() {
-                    let _ = sender.lock().await.send(Message::Text(join_msg.clone().into())).await;
+                for (id, sender) in room_map.iter() {
+                    if let Err(e) = sender.lock().await.send(Message::Text(join_msg.clone().into())).await {
+                        warn!(peer = %id, error = %e, "Failed to notify peer of join");
+                    }
                 }
 
                 // Add new peer to room
@@ -121,7 +123,9 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, rooms: Rooms) ->
                                 payload,
                             };
                             let msg = serde_json::to_string(&relay)?;
-                            let _ = target.lock().await.send(Message::Text(msg.into())).await;
+                            if let Err(e) = target.lock().await.send(Message::Text(msg.into())).await {
+                                warn!(peer = %to, error = %e, "Failed to relay signal to peer");
+                            }
                         }
                     }
                 }
@@ -140,8 +144,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, rooms: Rooms) ->
 
             let leave_msg =
                 serde_json::to_string(&SignalMessage::PeerLeft { peer_id: pid.clone() })?;
-            for (_id, sender) in room_map.iter() {
-                let _ = sender.lock().await.send(Message::Text(leave_msg.clone().into())).await;
+            for (id, sender) in room_map.iter() {
+                if let Err(e) = sender.lock().await.send(Message::Text(leave_msg.clone().into())).await {
+                    warn!(peer = %id, error = %e, "Failed to notify peer of departure");
+                }
             }
 
             if room_map.is_empty() {
