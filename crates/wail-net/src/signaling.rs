@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use awail_core::protocol::SignalMessage;
+use wail_core::protocol::SignalMessage;
 
 /// WebSocket signaling client that connects to the signaling server,
 /// joins a room, and relays WebRTC signaling messages.

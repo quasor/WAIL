@@ -16,7 +16,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
-use awail_core::protocol::SyncMessage;
+use wail_core::protocol::SyncMessage;
 
 /// A single WebRTC peer connection with a DataChannel for sync messages.
 pub struct PeerConnection {

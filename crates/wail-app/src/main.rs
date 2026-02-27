@@ -4,11 +4,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
-use awail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
-use awail_net::PeerMesh;
+use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
+use wail_net::PeerMesh;
 
 #[derive(Parser)]
-#[command(name = "awail", about = "Sync Ableton Link sessions across the internet via WebRTC")]
+#[command(name = "wail", about = "WAIL - WebRTC Audio Interchange for Link")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "awail=info,awail_app=info,awail_core=info,awail_net=info".into()),
+                .unwrap_or_else(|_| "wail=info,wail_app=info,wail_core=info,wail_net=info".into()),
         )
         .init();
 
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
 
 async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f64) -> Result<()> {
     let peer_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    info!(%peer_id, %room, bpm, bars, quantum, "Starting AWAIL peer");
+    info!(%peer_id, %room, bpm, bars, quantum, "Starting WAIL peer");
 
     // Initialize Ableton Link
     let link = LinkBridge::new(bpm, quantum);
@@ -88,14 +88,14 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
 
-    info!("AWAIL peer running. Waiting for peers...");
+    info!("WAIL peer running. Waiting for peers...");
 
     loop {
         tokio::select! {
             // --- Signaling messages (peer discovery, WebRTC negotiation) ---
             event = mesh.poll_signaling() => {
                 match event {
-                    Ok(Some(awail_net::MeshEvent::PeerJoined(pid))) => {
+                    Ok(Some(wail_net::MeshEvent::PeerJoined(pid))) => {
                         info!(peer = %pid, "Peer connected - sending Hello");
                         let hello = SyncMessage::Hello { peer_id: peer_id.clone() };
                         mesh.broadcast(&hello).await;
@@ -104,7 +104,7 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                         let config = SyncMessage::IntervalConfig { bars, quantum };
                         mesh.broadcast(&config).await;
                     }
-                    Ok(Some(awail_net::MeshEvent::PeerLeft(pid))) => {
+                    Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         info!(peer = %pid, "Peer disconnected");
                     }
                     Ok(Some(_)) => {}

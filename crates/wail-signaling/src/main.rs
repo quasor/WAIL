@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use awail_core::protocol::SignalMessage;
+use wail_core::protocol::SignalMessage;
 
 type PeerSender = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<TcpStream>,
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "awail_signaling=info".into()),
+                .unwrap_or_else(|_| "wail_signaling=info".into()),
         )
         .init();
 

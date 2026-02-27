@@ -1,10 +1,10 @@
 [package]
-name = "awail-net"
+name = "wail-net"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-awail-core = { path = "../awail-core" }
+wail-core = { path = "../wail-core" }
 webrtc = "0.11"
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

@@ -1,10 +1,10 @@
 [package]
-name = "awail-signaling"
+name = "wail-signaling"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-awail-core = { path = "../awail-core" }
+wail-core = { path = "../wail-core" }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

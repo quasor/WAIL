@@ -1,5 +1,5 @@
 [package]
-name = "awail-core"
+name = "wail-core"
 version.workspace = true
 edition.workspace = true
 

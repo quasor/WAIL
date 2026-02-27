@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/awail-core",
-    "crates/awail-net",
-    "crates/awail-app",
-    "crates/awail-signaling",
+    "crates/wail-core",
+    "crates/wail-net",
+    "crates/wail-app",
+    "crates/wail-signaling",
 ]
 
 [workspace.package]

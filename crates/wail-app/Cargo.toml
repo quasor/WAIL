@@ -1,11 +1,11 @@
 [package]
-name = "awail-app"
+name = "wail-app"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-awail-core = { path = "../awail-core" }
-awail-net = { path = "../awail-net" }
+wail-core = { path = "../wail-core" }
+wail-net = { path = "../wail-net" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 
-use awail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
+use wail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
 use peer::PeerConnection;
 use signaling::SignalingClient;
 

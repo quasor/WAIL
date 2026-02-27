@@ -212,65 +212,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
-name = "awail-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "awail-core",
- "awail-net",
- "clap",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "awail-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rusty_link",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "awail-net"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "awail-core",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
- "webrtc",
-]
-
-[[package]]
-name = "awail-signaling"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "awail-core",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2502,6 +2443,65 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wail-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wail-core",
+ "wail-net",
+]
+
+[[package]]
+name = "wail-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusty_link",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "wail-net"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+ "wail-core",
+ "webrtc",
+]
+
+[[package]]
+name = "wail-signaling"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wail-core",
+]
 
 [[package]]
 name = "waitgroup"
