@@ -21,6 +21,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/cargo-nih-plug
             ~/.cargo/bin/cargo-tauri
             target
@@ -30,11 +31,14 @@ jobs:
       - name: Install opus
         run: brew install opus
 
+      - name: Install cargo-binstall
+        run: which cargo-binstall || cargo install cargo-binstall
+
       - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+        run: which cargo-nih-plug || cargo binstall cargo-nih-plug -y --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
       - name: Install tauri-cli
-        run: which cargo-tauri || cargo install tauri-cli
+        run: which cargo-tauri || cargo binstall tauri-cli -y --no-confirm || cargo install tauri-cli
 
       - name: Build CLI binary
         run: cargo build -p wail-app --release
@@ -74,6 +78,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-binstall.exe
             ~/.cargo/bin/cargo-nih-plug
             ~/.cargo/bin/cargo-tauri.exe
             target
@@ -86,17 +91,26 @@ jobs:
       - name: Install pkg-config
         run: choco install pkgconfiglite -y
 
+      - name: Install cargo-binstall
+        run: |
+          if (!(Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
+            cargo install cargo-binstall
+          }
+        shell: pwsh
+
       - name: Install cargo-nih-plug
         run: |
           if (!(Get-Command cargo-nih-plug -ErrorAction SilentlyContinue)) {
-            cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+            cargo binstall cargo-nih-plug -y --no-confirm
+            if ($LASTEXITCODE -ne 0) { cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug }
           }
         shell: pwsh
 
       - name: Install tauri-cli
         run: |
           if (!(Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-            cargo install tauri-cli
+            cargo binstall tauri-cli -y --no-confirm
+            if ($LASTEXITCODE -ne 0) { cargo install tauri-cli }
           }
         shell: pwsh
 
