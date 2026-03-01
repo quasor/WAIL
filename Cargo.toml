@@ -7,6 +7,7 @@ members = [
     "crates/wail-app",
     "crates/wail-signaling",
     "crates/wail-plugin",
+    "xtask",
 ]
 
 [workspace.package]
