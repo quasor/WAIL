@@ -46,58 +46,53 @@ async fn two_peers_exchange_audio_over_webrtc() {
     // 3. Pump signaling until WebRTC DataChannels are established
     establish_connection(&mut mesh_a, &mut mesh_b).await;
 
-    // 4. Peer A → Peer B: send audio interval over WebRTC
+    // 4. Both peers broadcast audio simultaneously
     let wire_a = produce_interval(440.0);
+    let wire_b = produce_interval(880.0);
     mesh_a.broadcast_audio(&wire_a).await;
+    mesh_b.broadcast_audio(&wire_b).await;
 
-    let (from, received) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+    // 5. Both peers receive audio from the other
+    let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await
         .expect("Timed out waiting for audio from A")
         .expect("Audio channel B closed");
 
-    assert_eq!(from, "peer-a");
-    assert!(!received.is_empty(), "Wire data should be non-empty");
-
-    // Decode and verify it's real audio
-    let sr = 48000u32;
-    let ch = 2u16;
-    let buf_size = 4096;
-    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    let silence = vec![0.0f32; buf_size];
-    let mut out = vec![0.0f32; buf_size];
-
-    bridge_b.process(&silence, &mut out, 0.0); // start interval 0
-    bridge_b.receive_wire(&from, &received);
-    bridge_b.process(&silence, &mut out, 16.0); // cross boundary — play remote
-
-    let energy = rms(&out);
-    assert!(
-        energy > 0.01,
-        "Peer B should hear Peer A's audio over WebRTC, RMS={energy}"
-    );
-
-    // 5. Peer B → Peer A: send audio interval (bidirectional test)
-    let wire_b = produce_interval(880.0);
-    mesh_b.broadcast_audio(&wire_b).await;
-
-    let (from_b, received_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+    let (from_at_a, received_at_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
         .await
         .expect("Timed out waiting for audio from B")
         .expect("Audio channel A closed");
 
-    assert_eq!(from_b, "peer-b");
-    assert!(!received_b.is_empty(), "Wire data should be non-empty");
+    assert_eq!(from_at_b, "peer-a");
+    assert_eq!(from_at_a, "peer-b");
+    assert!(!received_at_b.is_empty(), "B should receive non-empty wire data from A");
+    assert!(!received_at_a.is_empty(), "A should receive non-empty wire data from B");
 
-    // Decode and verify
+    // 6. Decode and verify both peers hear real audio
+    let sr = 48000u32;
+    let ch = 2u16;
+    let buf_size = 4096;
+    let silence = vec![0.0f32; buf_size];
+    let mut out = vec![0.0f32; buf_size];
+
+    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
+    bridge_b.process(&silence, &mut out, 0.0);
+    bridge_b.receive_wire(&from_at_b, &received_at_b);
+    bridge_b.process(&silence, &mut out, 16.0);
+    let energy_at_b = rms(&out);
+    assert!(
+        energy_at_b > 0.01,
+        "Peer B should hear Peer A's audio over WebRTC, RMS={energy_at_b}"
+    );
+
     let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
     bridge_a.process(&silence, &mut out, 0.0);
-    bridge_a.receive_wire(&from_b, &received_b);
+    bridge_a.receive_wire(&from_at_a, &received_at_a);
     bridge_a.process(&silence, &mut out, 16.0);
-
-    let energy_b = rms(&out);
+    let energy_at_a = rms(&out);
     assert!(
-        energy_b > 0.01,
-        "Peer A should hear Peer B's audio over WebRTC, RMS={energy_b}"
+        energy_at_a > 0.01,
+        "Peer A should hear Peer B's audio over WebRTC, RMS={energy_at_a}"
     );
 }
 
@@ -243,59 +238,55 @@ async fn two_peers_exchange_audio_via_turn() {
     establish_connection_timeout(&mut mesh_a, &mut mesh_b, 30).await;
     eprintln!("[test] WebRTC connected via TURN");
 
-    // 5. Peer A → Peer B: send audio over TURN
+    // 5. Both peers broadcast audio simultaneously
     let wire_a = produce_interval(440.0);
+    let wire_b = produce_interval(880.0);
     mesh_a.broadcast_audio(&wire_a).await;
+    mesh_b.broadcast_audio(&wire_b).await;
 
-    let (from, received) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+    // 6. Both peers receive audio from the other
+    let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await
         .expect("Timed out waiting for audio from A via TURN")
         .expect("Audio channel B closed");
 
-    assert_eq!(from, "peer-a");
-    assert!(!received.is_empty(), "Wire data should be non-empty");
-
-    // Decode and verify
-    let sr = 48000u32;
-    let ch = 2u16;
-    let buf_size = 4096;
-    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    let silence = vec![0.0f32; buf_size];
-    let mut out = vec![0.0f32; buf_size];
-
-    bridge_b.process(&silence, &mut out, 0.0);
-    bridge_b.receive_wire(&from, &received);
-    bridge_b.process(&silence, &mut out, 16.0);
-
-    let energy = rms(&out);
-    assert!(
-        energy > 0.01,
-        "Peer B should hear Peer A's audio via TURN, RMS={energy}"
-    );
-
-    // 6. Peer B → Peer A: bidirectional test
-    let wire_b = produce_interval(880.0);
-    mesh_b.broadcast_audio(&wire_b).await;
-
-    let (from_b, received_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+    let (from_at_a, received_at_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
         .await
         .expect("Timed out waiting for audio from B via TURN")
         .expect("Audio channel A closed");
 
-    assert_eq!(from_b, "peer-b");
-    assert!(!received_b.is_empty());
+    assert_eq!(from_at_b, "peer-a");
+    assert_eq!(from_at_a, "peer-b");
+    assert!(!received_at_b.is_empty(), "B should receive non-empty wire data from A");
+    assert!(!received_at_a.is_empty(), "A should receive non-empty wire data from B");
+
+    // 7. Decode and verify both peers hear real audio
+    let sr = 48000u32;
+    let ch = 2u16;
+    let buf_size = 4096;
+    let silence = vec![0.0f32; buf_size];
+    let mut out = vec![0.0f32; buf_size];
+
+    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
+    bridge_b.process(&silence, &mut out, 0.0);
+    bridge_b.receive_wire(&from_at_b, &received_at_b);
+    bridge_b.process(&silence, &mut out, 16.0);
+    let energy_at_b = rms(&out);
+    assert!(
+        energy_at_b > 0.01,
+        "Peer B should hear Peer A's audio via TURN, RMS={energy_at_b}"
+    );
 
     let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
     bridge_a.process(&silence, &mut out, 0.0);
-    bridge_a.receive_wire(&from_b, &received_b);
+    bridge_a.receive_wire(&from_at_a, &received_at_a);
     bridge_a.process(&silence, &mut out, 16.0);
-
-    let energy_b = rms(&out);
+    let energy_at_a = rms(&out);
     assert!(
-        energy_b > 0.01,
-        "Peer A should hear Peer B's audio via TURN, RMS={energy_b}"
+        energy_at_a > 0.01,
+        "Peer A should hear Peer B's audio via TURN, RMS={energy_at_a}"
     );
 
-    eprintln!("[test] TURN E2E test passed! A→B RMS={energy:.4}, B→A RMS={energy_b:.4}");
+    eprintln!("[test] TURN E2E test passed! A→B RMS={energy_at_b:.4}, B→A RMS={energy_at_a:.4}");
     // coturn is killed automatically when `coturn` guard drops
 }

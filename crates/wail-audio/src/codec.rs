@@ -5,6 +5,17 @@ use audiopus::coder::{Decoder as OpusDecoder, Encoder as OpusEncoder};
 use audiopus::packet::Packet;
 use audiopus::{Application, Bitrate, Channels, MutSignals, SampleRate};
 
+/// Map any sample rate to the nearest valid Opus sample rate.
+/// Opus only supports: 8000, 12000, 16000, 24000, 48000 Hz.
+/// Common DAW rates like 44100, 88200, 96000 map to 48000.
+pub fn nearest_opus_rate(rate: u32) -> u32 {
+    const VALID: [u32; 5] = [8000, 12000, 16000, 24000, 48000];
+    *VALID
+        .iter()
+        .min_by_key(|&&r| (r as i64 - rate as i64).unsigned_abs())
+        .unwrap()
+}
+
 /// Opus encoder for interval audio.
 ///
 /// Encodes f32 audio frames into Opus packets. Designed for high-quality music
@@ -248,5 +259,17 @@ mod tests {
 
         // Should decode to at least one frame (960 samples at 48kHz/20ms)
         assert!(decoded.len() >= 960);
+    }
+
+    #[test]
+    fn nearest_opus_rate_maps_common_daw_rates() {
+        assert_eq!(nearest_opus_rate(48000), 48000);
+        assert_eq!(nearest_opus_rate(44100), 48000);
+        assert_eq!(nearest_opus_rate(96000), 48000);
+        assert_eq!(nearest_opus_rate(88200), 48000);
+        assert_eq!(nearest_opus_rate(24000), 24000);
+        assert_eq!(nearest_opus_rate(16000), 16000);
+        assert_eq!(nearest_opus_rate(8000), 8000);
+        assert_eq!(nearest_opus_rate(22050), 24000);
     }
 }

@@ -11,8 +11,8 @@ mod params;
 
 use params::WailParams;
 use wail_audio::{
-    AudioBridge, AudioDecoder, AudioEncoder, AudioInterval, AudioWire, CompletedInterval,
-    IpcFramer, IpcMessage, IpcRecvBuffer,
+    nearest_opus_rate, AudioBridge, AudioDecoder, AudioEncoder, AudioInterval, AudioWire,
+    CompletedInterval, IpcFramer, IpcMessage, IpcRecvBuffer,
 };
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -52,6 +52,11 @@ pub struct WailPlugin {
     playback_buf: Vec<f32>,
     /// Pre-allocated per-peer buffers (reused every process call)
     peer_bufs: [Vec<f32>; wail_audio::MAX_REMOTE_PEERS],
+    /// Cumulative samples processed — used as fallback beat source when
+    /// the host doesn't provide `pos_beats()`.
+    cumulative_samples: u64,
+    /// Whether we've logged the pos_beats fallback warning (once per session)
+    beat_fallback_warned: bool,
 }
 
 impl Default for WailPlugin {
@@ -65,6 +70,8 @@ impl Default for WailPlugin {
             interleave_buf: Vec::new(),
             playback_buf: Vec::new(),
             peer_bufs: Default::default(),
+            cumulative_samples: 0,
+            beat_fallback_warned: false,
         }
     }
 }
@@ -128,6 +135,8 @@ impl Plugin for WailPlugin {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.cumulative_samples = 0;
+        self.beat_fallback_warned = false;
 
         let channels = audio_io_layout
             .main_input_channels
@@ -189,6 +198,7 @@ impl Plugin for WailPlugin {
     }
 
     fn reset(&mut self) {
+        self.cumulative_samples = 0;
         if let Ok(mut bridge) = self.bridge.lock() {
             if let Some(ref mut b) = *bridge {
                 b.reset();
@@ -206,10 +216,24 @@ impl Plugin for WailPlugin {
         let num_channels = buffer.channels() as u16;
         let num_samples = buffer.samples();
 
-        // Get beat position from DAW transport
-        let beat_position = transport.pos_beats().unwrap_or(0.0);
         let bpm = transport.tempo.unwrap_or(120.0);
         let playing = transport.playing;
+
+        // Get beat position from DAW transport, or derive from sample count
+        // if the host doesn't provide it. Without this fallback, the ring
+        // buffer interval index stays at 0 forever and no audio is ever
+        // sent or played back.
+        let beat_position = match transport.pos_beats() {
+            Some(b) => b,
+            None => {
+                if !self.beat_fallback_warned {
+                    self.beat_fallback_warned = true;
+                    nih_log!("WAIL: host does not provide beat position — using sample-count fallback");
+                }
+                self.cumulative_samples as f64 * bpm / (60.0 * self.sample_rate as f64)
+            }
+        };
+        self.cumulative_samples += num_samples as u64;
 
         let send_enabled = self.params.send_enabled.value();
         let receive_enabled = self.params.receive_enabled.value();
@@ -330,15 +354,27 @@ fn ipc_thread(
     channels: u16,
     bitrate_kbps: u32,
 ) {
+    // Map DAW sample rate to nearest valid Opus rate. Opus only supports
+    // 8000/12000/16000/24000/48000 — common DAW rates like 44100 would
+    // silently disable all audio without this mapping.
+    let opus_rate = nearest_opus_rate(sample_rate);
+    if opus_rate != sample_rate {
+        tracing::warn!(
+            daw_rate = sample_rate,
+            opus_rate,
+            "DAW sample rate is not a native Opus rate — encoding at {opus_rate}Hz"
+        );
+    }
+
     // Create encoder/decoder on the IPC thread (not the audio thread)
-    let mut encoder = match AudioEncoder::new(sample_rate, channels, bitrate_kbps) {
+    let mut encoder = match AudioEncoder::new(opus_rate, channels, bitrate_kbps) {
         Ok(enc) => Some(enc),
         Err(e) => {
             tracing::warn!(error = %e, "IPC thread: failed to create Opus encoder");
             None
         }
     };
-    let mut decoder = match AudioDecoder::new(sample_rate, channels) {
+    let mut decoder = match AudioDecoder::new(opus_rate, channels) {
         Ok(dec) => Some(dec),
         Err(e) => {
             tracing::warn!(error = %e, "IPC thread: failed to create Opus decoder");

@@ -285,7 +285,7 @@ async fn session_loop(
                     mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
                     let peers = mesh.connected_peers();
-                    debug!(wire_bytes = wire_data.len(), peers = ?peers, "Forwarded plugin audio to peers");
+                    ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), peers.join(", "), audio_intervals_sent);
                 }
             }
 
