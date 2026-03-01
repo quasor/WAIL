@@ -4,7 +4,7 @@ WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across 
 
 ## How it works
 
-Each WAIL peer joins a local Ableton Link session and connects to a lightweight WebSocket signaling server to discover other peers. Peers then establish direct WebRTC connections with two DataChannels each:
+Each WAIL peer joins a local Ableton Link session and connects to a lightweight HTTP signaling server to discover other peers. Rooms are password-protected — the first peer to join sets the password; subsequent peers must provide the matching password. Once peers discover each other, they establish direct WebRTC connections with two DataChannels each:
 
 - **sync** — JSON text messages for tempo, beat, phase, and clock synchronization
 - **audio** — binary wire-format messages carrying Opus-encoded audio intervals
@@ -25,7 +25,9 @@ crates/
 ├── wail-net/         WebRTC peer mesh and signaling client
 ├── wail-plugin/      CLAP/VST3 plugin (nih-plug)
 ├── wail-app/         CLI binary
-└── wail-signaling/   WebSocket signaling server
+
+val-town/
+└── signaling.ts      HTTP signaling server (deployed to Val Town)
 ```
 
 ## Build
@@ -54,23 +56,21 @@ Plugin directories:
 - **Linux** — `~/.clap/` and `~/.vst3/`
 - **Windows** — `%COMMONPROGRAMFILES%\{CLAP,VST3}\`
 
-### Running locally
+### Running
 
 ```sh
-cargo xtask run-signaling       # start signaling server on :9090
-
-# two terminals — different IPC ports so they don't collide
-cargo xtask run-peer                        # peer A (BPM 120, IPC 9191)
-cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
+# Two peers in the same room — different IPC ports so they don't collide
+cargo xtask run-peer --room jam --password mysecret                   # peer A
+cargo xtask run-peer --room jam --password mysecret --ipc-port 9192   # peer B
 ```
 
 All `run-peer` flags map directly to `wail-app join` options (see `--help`).
-Defaults: `--room test --server ws://localhost:9090 --bars 4 --quantum 4`.
+Both `--room` and `--password` are required. The first peer to join a room sets the password; others must match it.
 
 ## Testing
 
 ```sh
-cargo test                    # all tests (~90 unit + integration)
+cargo test                    # all tests (~104 unit + integration)
 cargo test -p wail-core       # core library tests
 cargo test -p wail-audio      # audio codec, ring buffer, wire format
 cargo test -p wail-net        # networking + WebRTC integration tests

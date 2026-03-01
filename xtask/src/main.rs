@@ -17,7 +17,6 @@ TASKS:
   build-plugin    Build the CLAP and VST3 plugin bundles
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
-  run-signaling   Start the WAIL signaling server on :9090
   run-peer        Start a WAIL peer and join a room
 
 OPTIONS (install):
@@ -33,7 +32,7 @@ OPTIONS (package-plugin):
   --no-build      Skip the build step; package existing bundles
 
 OPTIONS (run-peer): all flags are forwarded to `wail-app join`
-  --room <NAME>   Room to join          (default: test)
+  --room <NAME>   Room to join          (required)
   --bpm  <BPM>    Initial tempo         (default: 120)
   --ipc-port <N>  IPC port for plugin   (default: 9191)
   --server <URL>  Signaling server URL  (default: https://wail.val.run/)
@@ -50,10 +49,9 @@ EXAMPLES:
   cargo xtask install-plugin --no-build
   cargo xtask package-plugin
   cargo xtask package-plugin --no-build
-  cargo xtask run-signaling
-  cargo xtask run-peer
-  cargo xtask run-peer --bpm 96 --ipc-port 9192
-  cargo xtask run-peer --name Quasor --room jam
+  cargo xtask run-peer --room jam --password secret
+  cargo xtask run-peer --room jam --password secret --bpm 96 --ipc-port 9192
+  cargo xtask run-peer --room jam --password secret --name Quasor
 ";
 
 // ---------------------------------------------------------------------------
@@ -80,7 +78,6 @@ fn main() -> Result<()> {
             args.remove(0);
             package_plugin(&args)
         }
-        Some("run-signaling") => run_signaling(),
         Some("run-peer") => {
             args.remove(0);
             run_peer(&args)
@@ -230,18 +227,6 @@ fn cargo_version(root: &Path) -> Result<String> {
         .context("Could not find wail-app version in cargo metadata")
 }
 
-fn run_signaling() -> Result<()> {
-    println!("Starting WAIL signaling server on :9090 ...");
-    let mut cmd = Command::new("cargo");
-    cmd.args(["run", "-p", "wail-signaling"])
-        .env(
-            "RUST_LOG",
-            env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        )
-        .current_dir(workspace_dir());
-    run_cmd(cmd)
-}
-
 fn run_peer(extra_args: &[String]) -> Result<()> {
     // Build up the default join args, then let extra_args override/extend them.
     // wail-app's clap parser accepts duplicate flags and uses the last value,
@@ -254,8 +239,10 @@ fn run_peer(extra_args: &[String]) -> Result<()> {
     let has_flag = |flag: &str| extra.iter().any(|a| a.as_str() == flag);
 
     let mut args: Vec<&str> = Vec::new();
-    if !has_flag("--room") {
-        args.extend(["--room", "test"]);
+    if !has_flag("--room") && !has_flag("-r") {
+        eprintln!("Error: --room is required\n");
+        print!("{HELP}");
+        std::process::exit(1);
     }
     if !has_flag("--server") {
         args.extend(["--server", "https://wail.val.run/"]);
@@ -312,10 +299,10 @@ fn install_all(args: &[String]) -> Result<()> {
     // Step 4: next-steps instructions
     println!("\n=== WAIL installed successfully ===");
     println!("To join a session:");
-    println!("  wail-app join --room <ROOM>");
+    println!("  wail-app join --room <ROOM> --password <PASSWORD>");
     println!();
     println!("Example:");
-    println!("  wail-app join --room myband");
+    println!("  wail-app join --room myband --password secret");
     Ok(())
 }
 

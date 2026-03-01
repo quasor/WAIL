@@ -7,7 +7,7 @@ WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataCha
 ## Project Structure
 
 ```
-Cargo workspace with 6 crates:
+Cargo workspace with 5 crates:
 
 crates/
 ├── wail-core/        Core sync library (no networking)
@@ -22,15 +22,16 @@ crates/
 │   └── wire.rs        Binary wire format for audio over DataChannels
 ├── wail-net/         Networking layer
 │   ├── lib.rs         PeerMesh: manages all WebRTC connections
-│   ├── signaling.rs   WebSocket signaling client
+│   ├── signaling.rs   HTTP polling signaling client
 │   └── peer.rs        WebRTC peer with "sync" + "audio" DataChannels
 ├── wail-plugin/      CLAP/VST3 plugin (nih-plug)
 │   ├── lib.rs         Plugin entry point, IPC thread, uses wail_audio::AudioBridge
 │   └── params.rs      Plugin parameters (bars, quantum, volume, bitrate)
 ├── wail-app/         CLI binary
 │   └── main.rs        Wires Link + WebRTC + IPC together
-└── wail-signaling/   Signaling server binary
-    └── main.rs        WebSocket room-based relay
+
+val-town/
+└── signaling.ts      HTTP signaling server (deployed to Val Town)
 
 vendor/
 └── link/             Ableton Link 4.0.0 beta SDK (git submodule)
@@ -50,10 +51,9 @@ cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 cargo xtask build-plugin                  # → target/bundled/wail-plugin.{clap,vst3}
 cargo xtask install-plugin                # build + install to system plugin dirs
 
-# Run locally
-cargo xtask run-signaling                 # signaling server on :9090
-cargo xtask run-peer                      # peer A (defaults: room=test, bpm=120, ipc=9191)
-cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
+# Run (signaling via Val Town at https://wail.val.run/)
+cargo xtask run-peer --room jam --password secret             # peer A (defaults: bpm=120, ipc=9191)
+cargo xtask run-peer --room jam --password secret --bpm 96 --ipc-port 9192  # peer B
 ```
 
 ## Key Dependencies
@@ -63,7 +63,6 @@ cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
 - `audiopus` - Opus audio codec (libopus bindings)
 - `nih_plug` (git) - CLAP/VST3 plugin framework
 - `tokio` - Async runtime
-- `tokio-tungstenite` - WebSocket
 - `clap` - CLI parsing
 
 ## Architecture
@@ -71,7 +70,7 @@ cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
 ### Sync Flow
 Each WAIL peer:
 1. Joins local Ableton Link session (LAN multicast)
-2. Connects to signaling server (WebSocket) to join a "room"
+2. Connects to HTTP signaling server to join a password-protected "room"
 3. Establishes WebRTC DataChannels with remote peers (P2P)
 4. Polls Link at 50Hz, broadcasts tempo/phase changes
 5. Applies remote tempo changes to local Link session
@@ -107,7 +106,7 @@ Binary header (48 bytes) + Opus data:
 ## Testing
 
 ```sh
-cargo test                    # run all tests (86 tests)
+cargo test                    # run all tests (~104 tests)
 cargo test -p wail-core       # core library tests only
 cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 ```

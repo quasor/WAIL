@@ -40,9 +40,9 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ### W10. No graceful shutdown
 **Status:** Deferred — infrastructure concern
-**Files:** `crates/wail-app/src/main.rs`, `crates/wail-signaling/src/main.rs`
-**Problem:** Neither binary handles SIGINT/SIGTERM. Process just dies on Ctrl+C.
-**Fix when ready:** Add `tokio::signal::ctrl_c()` branch in `select!` loops.
+**File:** `crates/wail-app/src/main.rs`
+**Problem:** Binary doesn't handle SIGINT/SIGTERM. Process just dies on Ctrl+C.
+**Fix when ready:** Add `tokio::signal::ctrl_c()` branch in `select!` loop.
 
 ### W11. No reconnection logic
 **Status:** Deferred — infrastructure concern
@@ -50,11 +50,11 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **Problem:** Signaling server disconnect kills the session permanently.
 **Fix when ready:** Reconnect with exponential backoff (1s, 2s, 4s, … 30s max).
 
-### W16. Signaling server accepts unbounded connections
+### W16. Signaling server has no rate limiting
 **Status:** Deferred — infrastructure concern
-**File:** `crates/wail-signaling/src/main.rs:46-54`
-**Problem:** No connection limit. A flood spawns unlimited tokio tasks.
-**Fix when ready:** `tokio::sync::Semaphore` with configurable max connections.
+**File:** `val-town/signaling.ts`
+**Problem:** No rate limiting on the HTTP signaling endpoint.
+**Fix when ready:** Add rate limiting at the Val Town level or via middleware.
 
 ---
 
@@ -77,11 +77,11 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ## Skipped
 
-### C4. Signaling server has no authentication/rate-limiting
-**Status:** Explicitly skipped — not a priority for early development
-**File:** `crates/wail-signaling/src/main.rs`
-**Problem:** Binds to 0.0.0.0, no auth, no room passwords, no TLS, no peer limits.
-**Rationale:** Security hardening before the core product works is premature. Revisit when deploying publicly.
+### C4. Signaling server has no rate-limiting
+**Status:** Partially addressed — room passwords added
+**File:** `val-town/signaling.ts`
+**Problem:** No rate limiting, no per-room peer limits.
+**Rationale:** Room passwords prevent unauthorized joins. Rate limiting and peer caps to revisit when needed.
 
 ---
 

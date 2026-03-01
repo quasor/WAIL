@@ -26,11 +26,11 @@ WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer D
 │  │  Ableton Live / Link app     │    │                    │    │  Ableton Live / Link app     │  │
 │  └──────────────────────────────┘    │                    │    └──────────────────────────────┘  │
 └──────────────────────────────────────┘                    └──────────────────────────────────────┘
-                    │ WebSocket                                              │ WebSocket
+                    │ HTTP polling                                           │ HTTP polling
                     │                                                        │
                     │              ┌──────────────────┐                      │
                     └─────────────►│ Signaling Server │◄─────────────────────┘
-                                   │ (room-based WS)  │
+                                   │  (Val Town HTTP)  │
                                    └──────────────────┘
 ```
 
@@ -50,8 +50,7 @@ wail-plugin (CLAP/VST3, built separately via nih-plug)
 ├── wail-core
 └── wail-audio
 
-wail-signaling (binary, standalone)
-└── wail-core (for protocol types only)
+val-town/signaling.ts (HTTP signaling server, deployed to Val Town)
 ```
 
 ## The NINJAM Model
@@ -173,13 +172,12 @@ App→Plugin: remote peer's interval, peer_id identifies the sender.
 ## WebRTC Connection Establishment
 
 ```
-1. Peer A connects to signaling server via WebSocket
-2. Sends Join { room, peer_id }
-3. Server replies with PeerList of existing peers
-4. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
-5. Offer relayed through signaling server
-6. Peer B creates Answer, relayed back
-7. ICE candidates exchanged via signaling server
+1. Peer A POSTs join to HTTP signaling server (with room password)
+2. Server replies with list of existing peers
+3. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
+4. Offer relayed through signaling server (HTTP polling)
+5. Peer B creates Answer, relayed back
+6. ICE candidates exchanged via signaling server
 8. Two DataChannels established per peer:
    - "sync": ordered, text mode (JSON SyncMessages)
    - "audio": unordered, binary mode (AudioWire frames)

@@ -30,8 +30,8 @@ jobs:
       - name: Install cargo-nih-plug
         run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
-      - name: Build CLI binaries
-        run: cargo build -p wail-app -p wail-signaling --release
+      - name: Build CLI binary
+        run: cargo build -p wail-app --release
 
       - name: Build plugin
         run: cargo xtask build-plugin
@@ -40,7 +40,6 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/wail-app dist/
-          cp target/release/wail-signaling dist/
           cp -r target/bundled/wail-plugin.clap dist/
           cp -r target/bundled/wail-plugin.vst3 dist/
 
@@ -86,10 +85,10 @@ jobs:
           }
         shell: pwsh
 
-      - name: Build CLI binaries
+      - name: Build CLI binary
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: cargo build -p wail-app -p wail-signaling --release
+        run: cargo build -p wail-app --release
 
       - name: Build plugin
         env:
@@ -100,7 +99,6 @@ jobs:
         run: |
           mkdir dist
           copy target\release\wail-app.exe dist\
-          copy target\release\wail-signaling.exe dist\
           copy C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
           xcopy /E /I target\bundled\wail-plugin.clap dist\wail-plugin.clap\
           xcopy /E /I target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3\
