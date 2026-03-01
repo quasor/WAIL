@@ -320,7 +320,7 @@ async fn run_peer(
                         let local = interval.current_index();
                         let behind = local.map_or(true, |l| index > l);
                         if behind {
-                            warn!(
+                            debug!(
                                 local = ?local,
                                 remote = index,
                                 peer = %from,

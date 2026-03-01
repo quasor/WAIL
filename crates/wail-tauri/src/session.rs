@@ -63,6 +63,9 @@ pub struct SessionConfig {
     pub quantum: f64,
     pub ipc_port: u16,
     pub test_tone: bool,
+    pub turn_url: Option<String>,
+    pub turn_username: Option<String>,
+    pub turn_credential: Option<String>,
 }
 
 pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHandle> {
@@ -103,6 +106,9 @@ async fn session_loop(
         quantum,
         ipc_port,
         test_tone,
+        turn_url,
+        turn_username,
+        turn_credential,
     } = config;
 
     let name_str = display_name.as_deref().unwrap_or("(anonymous)");
@@ -114,9 +120,18 @@ async fn session_loop(
     let (link_cmd_tx, mut link_event_rx) = link.spawn_poller();
     ui_info!(&app, "Ableton Link enabled");
 
+    // Build ICE servers (STUN + optional TURN)
+    let ice_servers = match (turn_url.as_deref(), turn_username.as_deref(), turn_credential.as_deref()) {
+        (Some(url), Some(user), Some(cred)) => {
+            ui_info!(&app, "TURN server configured: {url}");
+            wail_net::ice_servers_with_turn(url, user, cred)
+        }
+        _ => wail_net::default_ice_servers(),
+    };
+
     // Connect to signaling server
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect(&server, &room, &peer_id, &password).await?;
+        PeerMesh::connect_with_ice(&server, &room, &peer_id, &password, ice_servers).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(
@@ -269,7 +284,8 @@ async fn session_loop(
                 if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
-                    debug!(wire_bytes = wire_data.len(), "Forwarded plugin audio to peers");
+                    let peers = mesh.connected_peers();
+                    debug!(wire_bytes = wire_data.len(), peers = ?peers, "Forwarded plugin audio to peers");
                 }
             }
 
@@ -387,7 +403,7 @@ async fn session_loop(
                         let local = interval.current_index();
                         let behind = local.map_or(true, |l| index > l);
                         if behind {
-                            warn!(local = ?local, remote = index, peer = %from, "Interval index behind — syncing");
+                            debug!(local = ?local, remote = index, peer = %from, "Interval index behind — syncing");
                             interval.sync_to(index);
                         }
                     }
@@ -603,7 +619,8 @@ async fn send_test_tone(
             };
             mesh.broadcast(&ready_msg).await;
 
-            ui_info!(app, "[TEST TONE] Broadcast interval {idx} to peers");
+            let peers = mesh.connected_peers();
+            ui_info!(app, "[TEST TONE] Broadcast interval {idx} to peers: [{}]", peers.join(", "));
         }
         Err(e) => {
             ui_warn!(app, "[TEST TONE] Encode failed: {e}");

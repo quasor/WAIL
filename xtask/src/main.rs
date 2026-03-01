@@ -20,6 +20,7 @@ TASKS:
   run-peer        Start a WAIL peer and join a room
   run-tauri       Run the Tauri desktop app in dev mode
   build-tauri     Build plugins, then build the Tauri distributable
+  run-turn        Start a local coturn TURN server
 
 OPTIONS (install):
   --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
@@ -43,6 +44,12 @@ OPTIONS (run-peer): all flags are forwarded to `wail-app join`
   --name <NAME>   Display name for this peer
   --password <PW> Room password (first peer sets it; others must match)
 
+OPTIONS (run-turn):
+  --port <PORT>   Listening port          (default: 3478)
+  --user <U:P>    Username:password       (default: wail:wailpass)
+  --min-port <N>  Relay port range start  (default: 49152)
+  --max-port <N>  Relay port range end    (default: 49252)
+
 EXAMPLES:
   cargo xtask install
   cargo xtask install --no-plugin-build
@@ -56,6 +63,7 @@ EXAMPLES:
   cargo xtask run-peer --room jam --password secret --name Quasor
   cargo xtask run-tauri
   cargo xtask build-tauri
+  cargo xtask run-turn
 ";
 
 // ---------------------------------------------------------------------------
@@ -93,6 +101,10 @@ fn main() -> Result<()> {
         Some("build-tauri") => {
             args.remove(0);
             build_tauri()
+        }
+        Some("run-turn") => {
+            args.remove(0);
+            run_turn(&args)
         }
         Some(task) => bail!("Unknown task: {task}\n\n{HELP}"),
         None => {
@@ -304,6 +316,121 @@ fn build_tauri() -> Result<()> {
     cmd.args(["tauri", "build", "-c", "crates/wail-tauri/tauri.conf.json"])
         .current_dir(workspace_dir());
     run_cmd(cmd)
+}
+
+fn run_turn(args: &[String]) -> Result<()> {
+    // Parse optional flags
+    let get_flag = |flag: &str, default: &str| -> String {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+            .unwrap_or_else(|| default.to_string())
+    };
+
+    let port = get_flag("--port", "3478");
+    let user = get_flag("--user", "wail:wailpass");
+    let min_port = get_flag("--min-port", "49152");
+    let max_port = get_flag("--max-port", "49252");
+
+    // Detect local IP
+    let local_ip = detect_local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
+
+    // Detect public IP
+    println!("Detecting public IP...");
+    let public_ip = detect_public_ip().unwrap_or_else(|| {
+        eprintln!("Warning: Could not detect public IP. Using local IP.");
+        local_ip.clone()
+    });
+
+    println!("Local IP:  {local_ip}");
+    println!("Public IP: {public_ip}");
+    println!("TURN port: {port}");
+    println!("Relay ports: {min_port}-{max_port}");
+    println!("Credentials: {user}");
+    println!();
+    println!("Configure your WAIL client with:");
+    println!("  TURN Server:   turn:{public_ip}:{port}");
+    println!("  TURN Username: {}", user.split(':').next().unwrap_or("wail"));
+    println!("  TURN Password: {}", user.split(':').nth(1).unwrap_or("wailpass"));
+    println!();
+    println!("Make sure to forward ports {port} (TCP+UDP) and {min_port}-{max_port} (UDP) on your router.");
+    println!();
+
+    // Find turnserver binary
+    let turnserver = which_turnserver()?;
+
+    let mut cmd = Command::new(turnserver);
+    cmd.arg("-n") // no config file
+        .arg("--log-file=stdout")
+        .arg("--verbose")
+        .arg(format!("--listening-port={port}"))
+        .arg(format!("--listening-ip={local_ip}"))
+        .arg(format!("--external-ip={public_ip}/{local_ip}"))
+        .arg("--realm=wail")
+        .arg(format!("--user={user}"))
+        .arg("--lt-cred-mech")
+        .arg("--no-tls")
+        .arg("--no-dtls")
+        .arg(format!("--min-port={min_port}"))
+        .arg(format!("--max-port={max_port}"));
+
+    println!("Starting coturn TURN server...\n");
+    run_cmd(cmd)
+}
+
+fn which_turnserver() -> Result<String> {
+    // Check common locations
+    for path in &[
+        "/opt/homebrew/opt/coturn/bin/turnserver",
+        "/opt/homebrew/bin/turnserver",
+        "/usr/local/bin/turnserver",
+        "/usr/bin/turnserver",
+    ] {
+        if Path::new(path).exists() {
+            return Ok(path.to_string());
+        }
+    }
+    // Try PATH
+    let output = Command::new("which")
+        .arg("turnserver")
+        .output()
+        .context("Could not locate turnserver")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    bail!("coturn not found. Install with: brew install coturn")
+}
+
+fn detect_local_ip() -> Option<String> {
+    // Try en0 first (Wi-Fi on macOS), then en1
+    for iface in &["en0", "en1"] {
+        let output = Command::new("ipconfig")
+            .args(["getifaddr", iface])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !ip.is_empty() {
+                return Some(ip);
+            }
+        }
+    }
+    None
+}
+
+fn detect_public_ip() -> Option<String> {
+    // Try IPv4 first
+    let output = Command::new("curl")
+        .args(["-s", "-4", "--max-time", "5", "https://api.ipify.org"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !ip.is_empty() && !ip.contains(':') {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 fn install_all(args: &[String]) -> Result<()> {

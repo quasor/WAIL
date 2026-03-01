@@ -8,9 +8,35 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 
+use webrtc::ice_transport::ice_server::RTCIceServer;
+
 use wail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
 use peer::PeerConnection;
 use signaling::SignalingClient;
+
+/// Default ICE servers (Google STUN only).
+pub fn default_ice_servers() -> Vec<RTCIceServer> {
+    vec![RTCIceServer {
+        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        ..Default::default()
+    }]
+}
+
+/// Build ICE servers list with an optional TURN server.
+pub fn ice_servers_with_turn(turn_url: &str, username: &str, credential: &str) -> Vec<RTCIceServer> {
+    vec![
+        RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        },
+        RTCIceServer {
+            urls: vec![turn_url.to_string()],
+            username: username.to_string(),
+            credential: credential.to_string(),
+            ..Default::default()
+        },
+    ]
+}
 
 /// Manages WebRTC connections to all peers in a room.
 ///
@@ -23,6 +49,7 @@ pub struct PeerMesh {
     signaling: SignalingClient,
     sync_tx: mpsc::UnboundedSender<(String, SyncMessage)>,
     audio_tx: mpsc::Sender<(String, Vec<u8>)>,
+    ice_servers: Vec<RTCIceServer>,
 }
 
 impl PeerMesh {
@@ -38,6 +65,21 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
+        Self::connect_with_ice(server_url, room, peer_id, password, default_ice_servers()).await
+    }
+
+    /// Connect with custom ICE servers (e.g. including a TURN server).
+    pub async fn connect_with_ice(
+        server_url: &str,
+        room: &str,
+        peer_id: &str,
+        password: &str,
+        ice_servers: Vec<RTCIceServer>,
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<(String, SyncMessage)>,
+        mpsc::Receiver<(String, Vec<u8>)>,
+    )> {
         let signaling = SignalingClient::connect(server_url, room, peer_id, password).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
@@ -48,6 +90,7 @@ impl PeerMesh {
             signaling,
             sync_tx,
             audio_tx,
+            ice_servers,
         };
 
         Ok((mesh, sync_rx, audio_rx))
@@ -127,7 +170,7 @@ impl PeerMesh {
                 match payload {
                     SignalPayload::Offer { sdp } => {
                         debug!(peer = %from, "Received SDP offer");
-                        let mut pc = PeerConnection::new(from.clone()).await?;
+                        let mut pc = PeerConnection::new(from.clone(), self.ice_servers.clone()).await?;
                         let (answer_sdp, ice_rx) = pc.handle_offer(sdp).await?;
 
                         // Send answer
@@ -175,7 +218,7 @@ impl PeerMesh {
     /// Initiate a WebRTC connection to a remote peer (we create the offer).
     async fn initiate_connection(&mut self, remote_id: &str) -> Result<()> {
         info!(peer = %remote_id, "Initiating WebRTC connection");
-        let mut pc = PeerConnection::new(remote_id.to_string()).await?;
+        let mut pc = PeerConnection::new(remote_id.to_string(), self.ice_servers.clone()).await?;
         let (offer_sdp, ice_rx) = pc.create_offer().await?;
 
         // Send offer via signaling

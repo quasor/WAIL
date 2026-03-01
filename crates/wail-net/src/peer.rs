@@ -113,8 +113,8 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    /// Create a new peer connection.
-    pub async fn new(remote_peer_id: String) -> Result<Self> {
+    /// Create a new peer connection with the given ICE servers.
+    pub async fn new(remote_peer_id: String, ice_servers: Vec<RTCIceServer>) -> Result<Self> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
@@ -130,10 +130,7 @@ impl PeerConnection {
             .build();
 
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                ..Default::default()
-            }],
+            ice_servers,
             ..Default::default()
         };
 
