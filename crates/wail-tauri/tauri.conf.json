@@ -1,0 +1,26 @@
+{
+  "productName": "WAIL",
+  "version": "0.1.0",
+  "identifier": "com.wail.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "WAIL",
+        "width": 480,
+        "height": 640,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "resources": {
+      "../../target/bundled/wail-plugin.clap": "plugins/wail-plugin.clap",
+      "../../target/bundled/wail-plugin.vst3": "plugins/wail-plugin.vst3"
+    }
+  }
+}

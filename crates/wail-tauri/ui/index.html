@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WAIL</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Join Screen -->
+  <div id="join-screen">
+    <h1>WAIL</h1>
+    <p class="subtitle">WebRTC Audio Interchange for Link</p>
+
+    <form id="join-form">
+      <label for="room">Room</label>
+      <input type="text" id="room" placeholder="e.g. jam" required>
+
+      <label for="password">Password</label>
+      <input type="password" id="password" placeholder="Room password" required>
+
+      <label for="display-name">Display Name</label>
+      <input type="text" id="display-name" placeholder="(optional)">
+
+      <label for="bpm">BPM</label>
+      <input type="number" id="bpm" value="120" min="20" max="999" step="0.1">
+
+      <details id="advanced-toggle">
+        <summary>Advanced</summary>
+        <div class="advanced-fields">
+          <label for="server">Server URL</label>
+          <input type="text" id="server" value="https://wail.val.run/">
+
+          <label for="bars">Bars per interval</label>
+          <input type="number" id="bars" value="4" min="1" max="64">
+
+          <label for="quantum">Quantum</label>
+          <input type="number" id="quantum" value="4" min="1" max="16" step="0.1">
+
+          <label for="ipc-port">IPC Port</label>
+          <input type="number" id="ipc-port" value="9191" min="1024" max="65535">
+        </div>
+      </details>
+
+      <div class="remember-row">
+        <input type="checkbox" id="remember" checked>
+        <label for="remember" class="remember-label">Remember settings</label>
+      </div>
+
+      <button type="submit" id="join-btn">Join Room</button>
+    </form>
+
+    <div id="plugin-section">
+      <div id="plugin-status"></div>
+      <button type="button" id="install-plugins-btn" style="display:none">Install Plugins</button>
+    </div>
+
+    <div id="join-error" class="error" style="display:none"></div>
+  </div>
+
+  <!-- Session View -->
+  <div id="session-screen" style="display:none">
+    <div class="session-header">
+      <h2>WAIL</h2>
+      <span id="session-room" class="room-badge"></span>
+    </div>
+
+    <div class="stat-group">
+      <label>BPM</label>
+      <div class="bpm-row">
+        <input type="number" id="session-bpm" min="20" max="999" step="0.1">
+        <button type="button" id="set-bpm-btn">Set</button>
+      </div>
+    </div>
+
+    <div class="stat-group">
+      <label>Position</label>
+      <span id="session-position">-</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Link Peers (LAN)</label>
+      <span id="session-link-peers">0</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Peers</label>
+      <div id="peer-list" class="peer-list">
+        <span class="empty">No peers connected</span>
+      </div>
+    </div>
+
+    <div class="stat-group">
+      <label>Audio</label>
+      <span id="session-audio">0 sent / 0 recv</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Interval</label>
+      <span id="session-interval">-</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Plugin</label>
+      <span id="session-plugin">disconnected</span>
+    </div>
+
+    <button type="button" id="disconnect-btn">Disconnect</button>
+
+    <div id="session-error" class="error" style="display:none"></div>
+
+    <details id="log-toggle">
+      <summary>Logs <span id="log-count" class="log-badge">0</span></summary>
+      <div id="log-list" class="log-list"></div>
+    </details>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

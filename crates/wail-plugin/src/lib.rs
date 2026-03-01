@@ -71,7 +71,7 @@ impl Default for WailPlugin {
 impl Plugin for WailPlugin {
     const NAME: &'static str = "WAIL";
     const VENDOR: &'static str = "WAIL Project";
-    const URL: &'static str = "https://github.com/user/AWAIL";
+    const URL: &'static str = "https://github.com/quasor/WAIL";
     const EMAIL: &'static str = "";
 
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
