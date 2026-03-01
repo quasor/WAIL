@@ -13,16 +13,24 @@ const HELP: &str = "\
 cargo xtask <TASK> [OPTIONS]
 
 TASKS:
+  install         Build, install plugins + wail-app CLI to PATH (full setup)
   build-plugin    Build the CLAP and VST3 plugin bundles
   install-plugin  Build (optional) and install to system plugin directories
+  package-plugin  Create a macOS .pkg installer (macOS only)
   run-signaling   Start the WAIL signaling server on :9090
   run-peer        Start a WAIL peer and join a room
+
+OPTIONS (install):
+  --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
 
 OPTIONS (build-plugin, install-plugin):
   --debug         Build in debug mode instead of release
 
 OPTIONS (install-plugin):
   --no-build      Skip the build step; install existing bundles
+
+OPTIONS (package-plugin):
+  --no-build      Skip the build step; package existing bundles
 
 OPTIONS (run-peer): all flags are forwarded to `wail-app join`
   --room <NAME>   Room to join          (default: test)
@@ -33,9 +41,13 @@ OPTIONS (run-peer): all flags are forwarded to `wail-app join`
   --quantum <F>   Quantum               (default: 4.0)
 
 EXAMPLES:
+  cargo xtask install
+  cargo xtask install --no-plugin-build
   cargo xtask build-plugin
   cargo xtask install-plugin
   cargo xtask install-plugin --no-build
+  cargo xtask package-plugin
+  cargo xtask package-plugin --no-build
   cargo xtask run-signaling
   cargo xtask run-peer
   cargo xtask run-peer --bpm 96 --ipc-port 9192
@@ -49,6 +61,10 @@ fn main() -> Result<()> {
     let mut args: Vec<String> = env::args().skip(1).collect();
 
     match args.first().map(|s| s.as_str()) {
+        Some("install") => {
+            args.remove(0);
+            install_all(&args)
+        }
         Some("build-plugin") => {
             args.remove(0);
             build_plugin(&args)
@@ -56,6 +72,10 @@ fn main() -> Result<()> {
         Some("install-plugin") => {
             args.remove(0);
             install_plugin(&args)
+        }
+        Some("package-plugin") => {
+            args.remove(0);
+            package_plugin(&args)
         }
         Some("run-signaling") => run_signaling(),
         Some("run-peer") => {
@@ -136,6 +156,77 @@ fn install_plugin(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn package_plugin(args: &[String]) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    bail!("package-plugin is only supported on macOS");
+
+    #[cfg(target_os = "macos")]
+    {
+        let no_build = args.contains(&"--no-build".to_string());
+        if !no_build {
+            build_plugin(&[])?;
+        }
+
+        let root = workspace_dir();
+        let version = cargo_version(&root)?;
+
+        let clap_src = root.join("target/bundled/wail-plugin.clap");
+        let vst3_src = root.join("target/bundled/wail-plugin.vst3");
+        for path in [&clap_src, &vst3_src] {
+            if !path.exists() {
+                bail!(
+                    "{} not found — run `cargo xtask build-plugin` first",
+                    path.display()
+                );
+            }
+        }
+
+        let payload = root.join("target/pkg_payload");
+        let clap_dest = payload.join("Library/Audio/Plug-Ins/CLAP");
+        let vst3_dest = payload.join("Library/Audio/Plug-Ins/VST3");
+        if payload.exists() {
+            fs::remove_dir_all(&payload).context("Could not clean pkg_payload")?;
+        }
+        fs::create_dir_all(&clap_dest)?;
+        fs::create_dir_all(&vst3_dest)?;
+        copy_bundle(&clap_src, &clap_dest)?;
+        copy_bundle(&vst3_src, &vst3_dest)?;
+
+        let pkg_path = root.join(format!("target/wail-plugin-{version}-macos.pkg"));
+        let mut pkgbuild = Command::new("pkgbuild");
+        pkgbuild
+            .arg("--identifier")
+            .arg("com.wail.plugin")
+            .arg("--version")
+            .arg(&version)
+            .arg("--root")
+            .arg(&payload)
+            .arg(&pkg_path);
+        run_cmd(pkgbuild).context("pkgbuild failed")?;
+
+        println!("Created: {}", pkg_path.display());
+        Ok(())
+    }
+}
+
+fn cargo_version(root: &Path) -> Result<String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version=1", "--no-deps"])
+        .current_dir(root)
+        .output()
+        .context("failed to run cargo metadata")?;
+    let meta: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("failed to parse cargo metadata")?;
+    meta["packages"]
+        .as_array()
+        .context("packages not an array")?
+        .iter()
+        .find(|p| p["name"] == "wail-app")
+        .and_then(|p| p["version"].as_str())
+        .map(|s| s.to_owned())
+        .context("Could not find wail-app version in cargo metadata")
+}
+
 fn run_signaling() -> Result<()> {
     println!("Starting WAIL signaling server on :9090 ...");
     let mut cmd = Command::new("cargo");
@@ -173,6 +264,62 @@ fn run_peer(extra_args: &[String]) -> Result<()> {
         )
         .current_dir(workspace_dir());
     run_cmd(cmd)
+}
+
+fn install_all(args: &[String]) -> Result<()> {
+    let no_plugin_build = args.contains(&"--no-plugin-build".to_string());
+
+    // Step 1: ensure cargo-nih-plug is available
+    ensure_nih_plug()?;
+
+    // Step 2: build + install plugins
+    let plugin_args: Vec<String> = if no_plugin_build {
+        vec!["--no-build".to_string()]
+    } else {
+        vec![]
+    };
+    install_plugin(&plugin_args)?;
+
+    // Step 3: install wail-app binary to ~/.cargo/bin
+    println!("\nInstalling wail-app binary...");
+    let root = workspace_dir();
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args(["install", "--path", "crates/wail-app", "--locked"])
+        .current_dir(&root);
+    run_cmd(cmd).context("cargo install wail-app failed")?;
+
+    // Step 4: next-steps instructions
+    println!("\n=== WAIL installed successfully ===");
+    println!("To join a session:");
+    println!("  wail-app join --room <ROOM> --server <SIGNALING_URL>");
+    println!();
+    println!("Example:");
+    println!("  wail-app join --room myband --server ws://relay.example.com:9090");
+    Ok(())
+}
+
+fn ensure_nih_plug() -> Result<()> {
+    let already_installed = Command::new("cargo")
+        .args(["nih-plug", "--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if already_installed {
+        return Ok(());
+    }
+
+    println!("Installing cargo-nih-plug (this takes a few minutes the first time)...");
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args([
+        "install",
+        "--git",
+        "https://github.com/robbert-vdh/nih-plug.git",
+        "cargo-nih-plug",
+    ]);
+    run_cmd(cmd).context("Failed to install cargo-nih-plug")
 }
 
 // ---------------------------------------------------------------------------
