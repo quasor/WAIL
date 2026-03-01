@@ -102,7 +102,7 @@ impl Plugin for WailPlugin {
         match self.bridge.lock() {
             Ok(mut guard) => *guard = Some(bridge),
             Err(_) => {
-                nih_log::error!("WAIL plugin bridge mutex poisoned, initialization failed");
+                nih_error!("WAIL plugin bridge mutex poisoned, initialization failed");
                 return false;
             }
         }
@@ -121,7 +121,7 @@ impl Plugin for WailPlugin {
             .spawn(move || ipc_thread(out_rx, in_tx, addr))
             .ok();
 
-        nih_log::info!(
+        nih_log!(
             "WAIL plugin initialized: {}Hz, {} channels, {} bars",
             buffer_config.sample_rate,
             channels,
@@ -150,7 +150,7 @@ impl Plugin for WailPlugin {
         let num_samples = buffer.samples();
 
         // Get beat position from DAW transport
-        let beat_position = transport.pos_beats.unwrap_or(0.0);
+        let beat_position = transport.pos_beats().unwrap_or(0.0);
         let bpm = transport.tempo.unwrap_or(120.0);
         let playing = transport.playing;
 

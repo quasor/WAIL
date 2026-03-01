@@ -6,9 +6,7 @@ members = [
     "crates/wail-net",
     "crates/wail-app",
     "crates/wail-signaling",
-]
-exclude = [
-    "crates/wail-plugin",  # built separately (nih-plug cdylib, uses git dep)
+    "crates/wail-plugin",
 ]
 
 [workspace.package]

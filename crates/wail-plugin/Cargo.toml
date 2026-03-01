@@ -11,5 +11,5 @@ crate-type = ["cdylib"]
 wail-audio = { path = "../wail-audio" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
 crossbeam-channel = "0.5"
-tracing = { workspace = true }
-anyhow = { workspace = true }
+tracing.workspace = true
+anyhow.workspace = true
