@@ -25,6 +25,7 @@ jobs:
             ~/.cargo/bin/cargo-tauri
             target
           key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
 
       - name: Install opus
         run: brew install opus
@@ -77,6 +78,7 @@ jobs:
             ~/.cargo/bin/cargo-tauri.exe
             target
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
 
       - name: Install opus via vcpkg
         run: vcpkg install opus:x64-windows
