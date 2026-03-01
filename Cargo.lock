@@ -2520,6 +2520,7 @@ dependencies = [
  "wail-core",
  "wail-signaling",
  "webrtc",
+ "webrtc-ice",
 ]
 
 [[package]]

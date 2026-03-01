@@ -6,7 +6,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
+use webrtc_ice::mdns::MulticastDnsMode;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -55,9 +57,13 @@ impl PeerConnection {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
 
+        let mut s = SettingEngine::default();
+        s.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+
         let api = APIBuilder::new()
             .with_media_engine(m)
             .with_interceptor_registry(registry)
+            .with_setting_engine(s)
             .build();
 
         let config = RTCConfiguration {

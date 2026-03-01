@@ -7,6 +7,7 @@ edition.workspace = true
 wail-core = { path = "../wail-core" }
 wail-audio = { path = "../wail-audio" }
 webrtc = "0.11"
+webrtc-ice = "0.11"
 bytes = "1"
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
