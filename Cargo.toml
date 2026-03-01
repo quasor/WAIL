@@ -6,6 +6,7 @@ members = [
     "crates/wail-net",
     "crates/wail-app",
     "crates/wail-plugin",
+    "crates/wail-tauri",
     "xtask",
 ]
 

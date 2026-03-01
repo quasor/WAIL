@@ -18,6 +18,8 @@ TASKS:
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
   run-peer        Start a WAIL peer and join a room
+  run-tauri       Run the Tauri desktop app in dev mode
+  build-tauri     Build plugins, then build the Tauri distributable
 
 OPTIONS (install):
   --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
@@ -52,6 +54,8 @@ EXAMPLES:
   cargo xtask run-peer --room jam --password secret
   cargo xtask run-peer --room jam --password secret --bpm 96 --ipc-port 9192
   cargo xtask run-peer --room jam --password secret --name Quasor
+  cargo xtask run-tauri
+  cargo xtask build-tauri
 ";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,14 @@ fn main() -> Result<()> {
         Some("run-peer") => {
             args.remove(0);
             run_peer(&args)
+        }
+        Some("run-tauri") => {
+            args.remove(0);
+            run_tauri()
+        }
+        Some("build-tauri") => {
+            args.remove(0);
+            build_tauri()
         }
         Some(task) => bail!("Unknown task: {task}\n\n{HELP}"),
         None => {
@@ -270,6 +282,26 @@ fn run_peer(extra_args: &[String]) -> Result<()> {
             env::var("RUST_LOG")
                 .unwrap_or_else(|_| "wail_app=info,wail_core=info,wail_net=info".into()),
         )
+        .current_dir(workspace_dir());
+    run_cmd(cmd)
+}
+
+fn run_tauri() -> Result<()> {
+    println!("Starting WAIL Tauri app in dev mode...");
+    let mut cmd = Command::new("cargo");
+    cmd.args(["tauri", "dev", "-c", "crates/wail-tauri/tauri.conf.json"])
+        .current_dir(workspace_dir());
+    run_cmd(cmd)
+}
+
+fn build_tauri() -> Result<()> {
+    // Build plugins first — they're bundled as resources
+    println!("Building plugins first...");
+    build_plugin(&[])?;
+
+    println!("\nBuilding WAIL Tauri app...");
+    let mut cmd = Command::new("cargo");
+    cmd.args(["tauri", "build", "-c", "crates/wail-tauri/tauri.conf.json"])
         .current_dir(workspace_dir());
     run_cmd(cmd)
 }

@@ -84,13 +84,19 @@ impl SignalingClient {
         let poll_peer = peer_id.to_string();
         tokio::spawn(async move {
             let mut last_seq: i64 = 0;
-            let mut poll_interval = tokio::time::interval(Duration::from_millis(200));
+            let base_poll_ms: u64 = 5_000;
+            let mut current_poll_ms: u64 = base_poll_ms;
+            let max_backoff_ms: u64 = 30_000;
 
             loop {
-                poll_interval.tick().await;
+                tokio::time::sleep(Duration::from_millis(current_poll_ms)).await;
 
-                // Drain all pending outgoing signals and POST them
+                // Drain all pending outgoing signals and POST them (batch up to 5 per tick)
+                let mut sent = 0;
                 loop {
+                    if sent >= 5 {
+                        break;
+                    }
                     match outgoing_rx.try_recv() {
                         Ok(msg) => {
                             debug!(?msg, "Sending signal via HTTP");
@@ -99,9 +105,18 @@ impl SignalingClient {
                                 .json(&msg)
                                 .send()
                                 .await;
-                            if let Err(e) = res {
-                                warn!(error = %e, "Failed to POST signal");
+                            match res {
+                                Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                                    warn!("Rate limited on signal POST, backing off");
+                                    current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to POST signal");
+                                }
                             }
+                            sent += 1;
                         }
                         Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -126,25 +141,42 @@ impl SignalingClient {
                     poll_room, poll_peer, last_seq
                 );
                 match client.get(&poll_url).send().await {
-                    Ok(resp) => match resp.json::<PollResponse>().await {
-                        Ok(poll) => {
-                            for pm in poll.messages {
-                                if pm.seq > last_seq {
-                                    last_seq = pm.seq;
-                                }
-                                debug!(?pm.body, seq = pm.seq, "Poll received");
-                                if incoming_tx.send(pm.body).is_err() {
-                                    info!("Incoming channel closed, stopping poll loop");
-                                    return;
+                    Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                        current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
+                        warn!(backoff_ms = current_poll_ms, "Rate limited, backing off");
+                    }
+                    Ok(resp) => {
+                        // Successful response — restore base interval
+                        current_poll_ms = base_poll_ms;
+
+                        let text = match resp.text().await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to read poll response body");
+                                continue;
+                            }
+                        };
+                        match serde_json::from_str::<PollResponse>(&text) {
+                            Ok(poll) => {
+                                for pm in poll.messages {
+                                    if pm.seq > last_seq {
+                                        last_seq = pm.seq;
+                                    }
+                                    debug!(?pm.body, seq = pm.seq, "Poll received");
+                                    if incoming_tx.send(pm.body).is_err() {
+                                        info!("Incoming channel closed, stopping poll loop");
+                                        return;
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                warn!(error = %e, body = %text, "Failed to parse poll response");
+                            }
                         }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to parse poll response");
-                        }
-                    },
+                    }
                     Err(e) => {
                         error!(error = %e, "Poll request failed");
+                        current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
                     }
                 }
             }

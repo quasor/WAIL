@@ -1,0 +1,20 @@
+[package]
+name = "wail-tauri"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+wail-core = { path = "../wail-core" }
+wail-net = { path = "../wail-net" }
+wail-audio = { path = "../wail-audio" }
+tauri = { version = "2", features = [] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }

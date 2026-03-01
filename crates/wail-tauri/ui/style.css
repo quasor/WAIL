@@ -1,0 +1,326 @@
+:root {
+  --bg: #1a1a2e;
+  --bg-card: #16213e;
+  --fg: #e0e0e0;
+  --fg-dim: #8888a0;
+  --accent: #0f3460;
+  --accent-bright: #4e9af1;
+  --error: #e74c3c;
+  --success: #2ecc71;
+  --border: #2a2a4a;
+  --radius: 6px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 24px;
+  min-height: 100vh;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 4px;
+  margin-bottom: 4px;
+}
+
+h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+.subtitle {
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-bottom: 24px;
+}
+
+/* Forms */
+label {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 12px;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--accent-bright);
+}
+
+button {
+  width: 100%;
+  padding: 10px;
+  margin-top: 16px;
+  background: var(--accent);
+  border: 1px solid var(--accent-bright);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-bright);
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Remember checkbox */
+.remember-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.remember-row input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--accent-bright);
+}
+
+.remember-label {
+  display: inline;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+/* Advanced toggle */
+details {
+  margin-top: 12px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.advanced-fields {
+  padding-top: 4px;
+}
+
+/* Error */
+.error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: rgba(231, 76, 60, 0.15);
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  color: var(--error);
+  font-size: 12px;
+}
+
+/* Session view */
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.room-badge {
+  background: var(--accent);
+  border: 1px solid var(--accent-bright);
+  border-radius: var(--radius);
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.stat-group {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.stat-group label {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.stat-group span {
+  font-size: 14px;
+}
+
+.bpm-row {
+  display: flex;
+  gap: 8px;
+}
+
+.bpm-row input {
+  flex: 1;
+}
+
+.bpm-row button {
+  width: auto;
+  margin-top: 0;
+  padding: 8px 16px;
+}
+
+/* Peer list */
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.peer-list .empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.peer-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+}
+
+.peer-name {
+  font-weight: 600;
+}
+
+.peer-rtt {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Status indicators */
+.connected {
+  color: var(--success);
+}
+
+#disconnect-btn {
+  background: transparent;
+  border-color: var(--error);
+  color: var(--error);
+  margin-top: 20px;
+}
+
+#disconnect-btn:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+/* Plugin section */
+#plugin-section {
+  margin-top: 16px;
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+#plugin-section button {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* Log panel */
+#log-toggle {
+  margin-top: 16px;
+}
+
+#log-toggle summary {
+  cursor: pointer;
+  color: var(--fg-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.log-badge {
+  background: var(--accent);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  margin-left: 4px;
+}
+
+.log-badge.has-warnings {
+  background: #b8860b;
+  color: #fff;
+}
+
+.log-badge.has-errors {
+  background: var(--error);
+  color: #fff;
+}
+
+.log-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.log-entry {
+  padding: 3px 8px;
+  font-size: 11px;
+  border-left: 2px solid var(--border);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+
+.log-entry.info {
+  border-left-color: var(--accent-bright);
+  color: var(--fg-dim);
+}
+
+.log-entry.warn {
+  border-left-color: #b8860b;
+  color: #d4a843;
+}
+
+.log-entry.error {
+  border-left-color: var(--error);
+  color: var(--error);
+}
+
+.log-time {
+  color: var(--fg-dim);
+  margin-right: 6px;
+}
