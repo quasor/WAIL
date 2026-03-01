@@ -3,6 +3,7 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use assert_no_alloc::permit_alloc;
 use crossbeam_channel::{Receiver, Sender};
 use nih_plug::prelude::*;
 
@@ -65,6 +66,16 @@ impl Default for WailPlugin {
             playback_buf: Vec::new(),
             peer_bufs: Default::default(),
         }
+    }
+}
+
+/// Ensure a buffer is at least `needed` elements long, growing with zeroes if necessary.
+/// This is NOT real-time safe (allocates), but prevents panics if the DAW exceeds
+/// max_buffer_size. In practice this only fires on the first oversized buffer.
+#[inline]
+fn ensure_buf(buf: &mut Vec<f32>, needed: usize) {
+    if buf.len() < needed {
+        buf.resize(needed, 0.0);
     }
 }
 
@@ -213,15 +224,9 @@ impl Plugin for WailPlugin {
                     bpm,
                 );
 
-                // Feed any incoming decoded PCM before processing (no Opus on audio thread)
-                if let Some(ref rx) = self.ipc_incoming_rx {
-                    while let Ok((peer_id, interval_index, samples)) = rx.try_recv() {
-                        bridge.feed_decoded(&peer_id, interval_index, samples);
-                    }
-                }
-
                 // Interleave input into pre-allocated buffer (zeros if not recording)
                 let buf_size = num_samples * num_channels as usize;
+                ensure_buf(&mut self.interleave_buf, buf_size);
                 let interleave = &mut self.interleave_buf[..buf_size];
                 if send_enabled && playing {
                     for sample_idx in 0..num_samples {
@@ -234,10 +239,22 @@ impl Plugin for WailPlugin {
                     interleave.fill(0.0);
                 }
 
-                // Run the ring buffer: record input, produce playback output (no Opus)
+                ensure_buf(&mut self.playback_buf, buf_size);
                 let playback = &mut self.playback_buf[..buf_size];
                 playback.fill(0.0);
-                let completed = bridge.process_rt(interleave, playback, beat_position);
+
+                // permit_alloc: feed_decoded may push to pending_remote, and
+                // process_rt may allocate once at interval boundaries (copying
+                // recorded samples to CompletedInterval for IPC transfer).
+                // Normal per-buffer operation is allocation-free.
+                let completed = permit_alloc(|| {
+                    if let Some(ref rx) = self.ipc_incoming_rx {
+                        while let Ok((peer_id, interval_index, samples)) = rx.try_recv() {
+                            bridge.feed_decoded(&peer_id, interval_index, samples);
+                        }
+                    }
+                    bridge.process_rt(interleave, playback, beat_position)
+                });
 
                 // Mix playback into DAW main output
                 if receive_enabled {
@@ -252,6 +269,7 @@ impl Plugin for WailPlugin {
                 // Route per-peer audio to auxiliary output buses
                 let num_aux = aux.outputs.len().min(wail_audio::MAX_REMOTE_PEERS);
                 for slot_idx in 0..num_aux {
+                    ensure_buf(&mut self.peer_bufs[slot_idx], buf_size);
                     let peer_buf = &mut self.peer_bufs[slot_idx][..buf_size];
                     peer_buf.fill(0.0);
                     bridge.read_peer_playback(slot_idx, peer_buf);
@@ -269,24 +287,28 @@ impl Plugin for WailPlugin {
                     }
                 }
 
-                // Send raw completed intervals to IPC thread for encoding
-                if let Some(ref tx) = self.ipc_outgoing_tx {
-                    let sr = bridge.sample_rate();
-                    let ch = bridge.channels();
-                    let bpm_snap = bridge.bpm();
-                    let q = bridge.quantum();
-                    let b = bridge.bars();
-                    for c in completed {
-                        let _ = tx.try_send(RawInterval {
-                            completed: c,
-                            sample_rate: sr,
-                            channels: ch,
-                            bpm: bpm_snap,
-                            quantum: q,
-                            bars: b,
-                        });
+                // Send raw completed intervals to IPC thread for encoding.
+                // permit_alloc: the Vec<CompletedInterval> is deallocated when
+                // consumed/dropped, which counts as an alloc event.
+                permit_alloc(|| {
+                    if let Some(ref tx) = self.ipc_outgoing_tx {
+                        let sr = bridge.sample_rate();
+                        let ch = bridge.channels();
+                        let bpm_snap = bridge.bpm();
+                        let q = bridge.quantum();
+                        let b = bridge.bars();
+                        for c in completed {
+                            let _ = tx.try_send(RawInterval {
+                                completed: c,
+                                sample_rate: sr,
+                                channels: ch,
+                                bpm: bpm_snap,
+                                quantum: q,
+                                bars: b,
+                            });
+                        }
                     }
-                }
+                });
             }
         }
 

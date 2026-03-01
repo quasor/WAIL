@@ -5776,6 +5776,7 @@ name = "wail-plugin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "assert_no_alloc",
  "crossbeam-channel",
  "nih_plug",
  "tracing",

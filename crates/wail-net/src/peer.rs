@@ -10,6 +10,7 @@ use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc_ice::mdns::MulticastDnsMode;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -241,9 +242,12 @@ impl PeerConnection {
     /// Send a sync message over the "sync" DataChannel (JSON text).
     pub async fn send(&self, msg: &SyncMessage) -> Result<()> {
         match self.dc_sync.get() {
-            Some(dc) => {
+            Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
                 let text = serde_json::to_string(msg)?;
                 dc.send_text(text).await?;
+            }
+            Some(_) => {
+                debug!(peer = %self.remote_peer_id, "Sync DataChannel not open yet — message dropped");
             }
             None => {
                 debug!(peer = %self.remote_peer_id, "Sync DataChannel not ready — message dropped");
@@ -255,8 +259,11 @@ impl PeerConnection {
     /// Send binary audio data over the "audio" DataChannel.
     pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
         match self.dc_audio.get() {
-            Some(dc) => {
+            Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
                 dc.send(&Bytes::copy_from_slice(data)).await?;
+            }
+            Some(_) => {
+                debug!(peer = %self.remote_peer_id, "Audio DataChannel not open yet — data dropped");
             }
             None => {
                 debug!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");

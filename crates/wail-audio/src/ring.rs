@@ -48,14 +48,21 @@ impl PeerSlot {
 /// Beat position comes from the DAW transport (Ableton Link beat grid).
 /// Example: 4 bars of 4/4 = 16 beats per interval.
 pub struct IntervalRing {
-    /// The slot currently being recorded into (local audio capture)
+    /// The slot currently being recorded into (local audio capture).
+    /// Pre-allocated to `slot_capacity` — never grows on the audio thread.
     record_slot: Vec<f32>,
-    /// The slot currently being played back (mixed remote audio)
+    /// The slot currently being played back (mixed remote audio).
+    /// Pre-allocated to `slot_capacity`.
     playback_slot: Vec<f32>,
+    /// Actual number of playback samples in `playback_slot` (may be less than capacity)
+    playback_len: usize,
     /// Write position in the record slot (in interleaved samples)
     record_pos: usize,
     /// Read position in the playback slot (in interleaved samples)
     playback_pos: usize,
+    /// Pre-allocated capacity for record/playback slots
+    #[allow(dead_code)]
+    slot_capacity: usize,
     /// Current interval index
     current_interval: Option<i64>,
     /// Completed intervals ready for encoding and transmission
@@ -92,13 +99,17 @@ struct RemoteInterval {
 
 impl IntervalRing {
     /// Create a new interval ring buffer.
+    ///
+    /// All buffers are pre-allocated so that `process()` never allocates on the
+    /// audio thread (except for one `to_vec()` at each interval boundary, which
+    /// should be wrapped in `permit_alloc` by the caller).
     pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64) -> Self {
         let bars = bars.max(1);
         let quantum = quantum.max(f64::EPSILON);
         let beats_per_interval = bars as f64 * quantum;
-        // Pre-allocate for max expected interval size at 200 BPM (fast tempo = short intervals)
-        // At 60 BPM, 16 beats = 16 seconds. At 200 BPM, 16 beats = 4.8 seconds.
-        let max_seconds = beats_per_interval / 60.0; // at 60 BPM
+        // Pre-allocate for slowest expected tempo (20 BPM) so we never grow
+        // on the audio thread. At 20 BPM, 16 beats = 48 seconds.
+        let max_seconds = beats_per_interval / 20.0_f64.max(1.0);
         let slot_capacity = (sample_rate as f64 * max_seconds * channels as f64) as usize;
 
         let mut peer_slots = Vec::with_capacity(MAX_REMOTE_PEERS);
@@ -108,18 +119,20 @@ impl IntervalRing {
 
         Self {
             record_slot: Vec::with_capacity(slot_capacity),
-            playback_slot: Vec::new(),
+            playback_slot: vec![0.0f32; slot_capacity],
+            playback_len: 0,
             record_pos: 0,
             playback_pos: 0,
+            slot_capacity,
             current_interval: None,
-            completed: Vec::new(),
-            pending_remote: Vec::new(),
+            completed: Vec::with_capacity(2),
+            pending_remote: Vec::with_capacity(MAX_REMOTE_PEERS),
             sample_rate,
             channels,
             bars,
             quantum,
             peer_slots,
-            peer_slot_map: Vec::new(),
+            peer_slot_map: Vec::with_capacity(MAX_REMOTE_PEERS),
         }
     }
 
@@ -154,12 +167,21 @@ impl IntervalRing {
         }
         self.current_interval = Some(interval_index);
 
-        // Record: append input to record slot
-        self.record_slot.extend_from_slice(input);
-        self.record_pos += input.len();
+        // Record: write input into pre-allocated record slot (no allocation)
+        let remaining_capacity = self.record_slot.capacity() - self.record_pos;
+        let to_write = input.len().min(remaining_capacity);
+        if to_write > 0 {
+            // Grow length within existing capacity — no heap allocation
+            let new_len = self.record_pos + to_write;
+            if self.record_slot.len() < new_len {
+                self.record_slot.resize(new_len, 0.0);
+            }
+            self.record_slot[self.record_pos..new_len].copy_from_slice(&input[..to_write]);
+            self.record_pos = new_len;
+        }
 
         // Playback: read from playback slot
-        let available = self.playback_slot.len().saturating_sub(self.playback_pos);
+        let available = self.playback_len.saturating_sub(self.playback_pos);
         let to_read = available.min(output.len());
 
         if to_read > 0 {
@@ -199,12 +221,12 @@ impl IntervalRing {
         self.quantum = quantum.max(f64::EPSILON);
     }
 
-    /// Reset all state.
+    /// Reset all state (preserves pre-allocated capacity).
     pub fn reset(&mut self) {
         self.record_slot.clear();
-        self.playback_slot.clear();
         self.record_pos = 0;
         self.playback_pos = 0;
+        self.playback_len = 0;
         self.current_interval = None;
         self.completed.clear();
         self.pending_remote.clear();
@@ -226,7 +248,7 @@ impl IntervalRing {
 
     /// Number of samples remaining in the playback slot.
     pub fn playback_remaining(&self) -> usize {
-        self.playback_slot.len().saturating_sub(self.playback_pos)
+        self.playback_len.saturating_sub(self.playback_pos)
     }
 
     /// Number of remote intervals pending for next playback.
@@ -303,41 +325,54 @@ impl IntervalRing {
     }
 
     /// Swap intervals: move record → completed, mix pending remote → playback.
+    ///
+    /// NOTE: The `to_vec()` call below is the ONE allocation in the audio-thread
+    /// path. It copies recorded samples so they can be owned by `CompletedInterval`
+    /// and sent to the IPC thread. The caller should wrap this in `permit_alloc`.
     fn swap_intervals(&mut self, completed_index: i64) {
-        // Move the recorded audio to the completed queue
-        if !self.record_slot.is_empty() {
-            let samples = std::mem::take(&mut self.record_slot);
+        // Copy recorded audio to completed queue, then clear record slot
+        // (clear preserves the pre-allocated capacity — no future alloc)
+        if self.record_pos > 0 {
+            let samples = self.record_slot[..self.record_pos].to_vec();
             self.completed.push(CompletedInterval {
                 index: completed_index,
                 samples,
             });
         }
+        self.record_slot.clear();
         self.record_pos = 0;
 
         // Clear per-peer slots (but keep assignments)
         for slot in &mut self.peer_slots {
             slot.samples.clear();
             slot.read_pos = 0;
-            // Keep active and peer_id — only clear audio data
         }
 
-        // Mix pending remote intervals into the new playback slot
-        // AND distribute to per-peer slots
-        self.playback_slot.clear();
+        // Mix pending remote intervals into pre-allocated playback slot
         self.playback_pos = 0;
+        self.playback_len = 0;
 
         let pending = std::mem::take(&mut self.pending_remote);
-        for mut remote in pending {
-            // Mix into summed playback slot (read-only, before we move samples)
-            let mix_len = self.playback_slot.len().max(remote.samples.len());
-            self.playback_slot.resize(mix_len, 0.0);
-            for (i, sample) in remote.samples.iter().enumerate() {
+        for remote in pending {
+            let mix_len = self.playback_len.max(remote.samples.len());
+            // Grow playback within pre-allocated capacity
+            let mix_len = mix_len.min(self.playback_slot.len());
+
+            // Zero-fill the extension range
+            for s in &mut self.playback_slot[self.playback_len..mix_len] {
+                *s = 0.0;
+            }
+            self.playback_len = mix_len;
+
+            // Sum remote audio into playback
+            let copy_len = remote.samples.len().min(self.playback_slot.len());
+            for (i, sample) in remote.samples[..copy_len].iter().enumerate() {
                 self.playback_slot[i] += sample;
             }
 
-            // Move samples to per-peer slot (zero-cost swap, no clone)
+            // Move samples to per-peer slot
             if let Some(slot_idx) = self.assign_peer_slot(&remote.peer_id) {
-                std::mem::swap(&mut self.peer_slots[slot_idx].samples, &mut remote.samples);
+                self.peer_slots[slot_idx].samples = remote.samples;
                 self.peer_slots[slot_idx].read_pos = 0;
             }
         }

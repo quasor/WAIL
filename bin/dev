@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
+cargo xtask install-plugin --debug
 exec cargo tauri dev -c crates/wail-tauri/tauri.conf.json "$@"
