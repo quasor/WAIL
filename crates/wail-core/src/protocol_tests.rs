@@ -98,11 +98,15 @@ mod tests {
     fn sync_message_hello_roundtrip() {
         let msg = SyncMessage::Hello {
             peer_id: "abc123".to_string(),
+            display_name: Some("TestUser".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: SyncMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SyncMessage::Hello { peer_id } => assert_eq!(peer_id, "abc123"),
+            SyncMessage::Hello { peer_id, display_name } => {
+                assert_eq!(peer_id, "abc123");
+                assert_eq!(display_name.as_deref(), Some("TestUser"));
+            }
             _ => panic!("Wrong variant"),
         }
     }

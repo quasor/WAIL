@@ -12,5 +12,5 @@ pub use bridge::AudioBridge;
 pub use codec::{AudioDecoder, AudioEncoder};
 pub use interval::{AudioInterval, IntervalRecorder, IntervalPlayer};
 pub use ipc::{IpcFramer, IpcMessage, IpcRecvBuffer};
-pub use ring::{CompletedInterval, IntervalRing};
+pub use ring::{CompletedInterval, IntervalRing, PeerSlot, MAX_REMOTE_PEERS};
 pub use wire::AudioWire;

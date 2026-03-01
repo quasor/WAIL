@@ -1,9 +1,8 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches: [main, "claude/**"]
-  workflow_dispatch:
+    tags: ['v*']
 
 jobs:
   build-macos:
@@ -45,10 +44,15 @@ jobs:
           cp -r target/bundled/wail-plugin.clap dist/
           cp -r target/bundled/wail-plugin.vst3 dist/
 
+      - name: Create .pkg installer
+        run: cargo xtask package-plugin --no-build
+
       - uses: actions/upload-artifact@v4
         with:
-          name: wail-macos-x64
-          path: dist/
+          name: wail-release-macos
+          path: |
+            dist/
+            target/wail-plugin-*-macos.pkg
 
   build-windows:
     runs-on: windows-latest
@@ -105,5 +109,29 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wail-windows-x64
+          name: wail-release-windows
           path: dist\
+
+  create-release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Zip platform artifacts
+        run: |
+          cd wail-release-macos/dist && zip -r ../../wail-macos-x64.zip . && cd ../..
+          cd wail-release-windows && zip -r ../wail-windows-x64.zip . && cd ..
+
+      - name: Find .pkg file
+        id: pkg
+        run: echo "path=$(ls wail-release-macos/target/wail-plugin-*-macos.pkg)" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            wail-macos-x64.zip
+            ${{ steps.pkg.outputs.path }}
+            wail-windows-x64.zip

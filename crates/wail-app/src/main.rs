@@ -44,6 +44,10 @@ enum Commands {
         /// IPC port for plugin communication
         #[arg(long, default_value_t = 9191)]
         ipc_port: u16,
+
+        /// Display name for this peer (shown to remote peers)
+        #[arg(short, long)]
+        name: Option<String>,
     },
 }
 
@@ -66,8 +70,9 @@ async fn main() -> Result<()> {
             bars,
             quantum,
             ipc_port,
+            name,
         } => {
-            run_peer(server, room, bpm, bars, quantum, ipc_port).await?;
+            run_peer(server, room, bpm, bars, quantum, ipc_port, name).await?;
         }
     }
 
@@ -81,9 +86,11 @@ async fn run_peer(
     bars: u32,
     quantum: f64,
     ipc_port: u16,
+    display_name: Option<String>,
 ) -> Result<()> {
     let peer_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    info!(%peer_id, %room, bpm, bars, quantum, ipc_port, "Starting WAIL peer");
+    let name_str = display_name.as_deref().unwrap_or("(anonymous)");
+    info!(%peer_id, name = name_str, %room, bpm, bars, quantum, ipc_port, "Starting WAIL peer");
 
     // Initialize Ableton Link
     let link = LinkBridge::new(bpm, quantum);
@@ -183,7 +190,7 @@ async fn run_peer(
                 match event {
                     Ok(Some(wail_net::MeshEvent::PeerJoined(pid))) => {
                         info!(peer = %pid, "Peer connected - sending Hello");
-                        let hello = SyncMessage::Hello { peer_id: peer_id.clone() };
+                        let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: display_name.clone() };
                         mesh.broadcast(&hello).await;
 
                         // Send interval config
@@ -216,8 +223,9 @@ async fn run_peer(
             // --- Incoming sync messages from peers ---
             Some((from, msg)) = sync_rx.recv() => {
                 match msg {
-                    SyncMessage::Hello { peer_id: pid } => {
-                        info!(peer = %pid, "Received Hello from peer");
+                    SyncMessage::Hello { peer_id: pid, display_name } => {
+                        let name = display_name.as_deref().unwrap_or("(anonymous)");
+                        info!(peer = %pid, name, "Received Hello from peer");
                     }
 
                     SyncMessage::Ping { id, sent_at_us } => {

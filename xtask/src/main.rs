@@ -39,6 +39,7 @@ OPTIONS (run-peer): all flags are forwarded to `wail-app join`
   --server <URL>  Signaling server URL  (default: ws://localhost:9090)
   --bars <N>      Bars per interval     (default: 4)
   --quantum <F>   Quantum               (default: 4.0)
+  --name <NAME>   Display name for this peer
 
 EXAMPLES:
   cargo xtask install
@@ -51,6 +52,7 @@ EXAMPLES:
   cargo xtask run-signaling
   cargo xtask run-peer
   cargo xtask run-peer --bpm 96 --ipc-port 9192
+  cargo xtask run-peer --name Quasor --room jam
 ";
 
 // ---------------------------------------------------------------------------
@@ -243,20 +245,38 @@ fn run_peer(extra_args: &[String]) -> Result<()> {
     // Build up the default join args, then let extra_args override/extend them.
     // wail-app's clap parser accepts duplicate flags and uses the last value,
     // so passing defaults first and user args after achieves natural overriding.
-    let defaults = [
-        "--room", "test",
-        "--server", "ws://localhost:9090",
-        "--bpm", "120",
-        "--bars", "4",
-        "--quantum", "4",
-        "--ipc-port", "9191",
-    ];
+    //
+    // Strip any leading "--" separator that cargo passes through.
+    let extra: Vec<&String> = extra_args.iter().filter(|a| a.as_str() != "--").collect();
+
+    // Parse user-supplied flags so we can skip defaults they've overridden.
+    let has_flag = |flag: &str| extra.iter().any(|a| a.as_str() == flag);
+
+    let mut args: Vec<&str> = Vec::new();
+    if !has_flag("--room") {
+        args.extend(["--room", "test"]);
+    }
+    if !has_flag("--server") {
+        args.extend(["--server", "ws://localhost:9090"]);
+    }
+    if !has_flag("--bpm") {
+        args.extend(["--bpm", "120"]);
+    }
+    if !has_flag("--bars") {
+        args.extend(["--bars", "4"]);
+    }
+    if !has_flag("--quantum") {
+        args.extend(["--quantum", "4"]);
+    }
+    if !has_flag("--ipc-port") {
+        args.extend(["--ipc-port", "9191"]);
+    }
 
     println!("Starting WAIL peer...");
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "-p", "wail-app", "--", "join"])
-        .args(defaults)
-        .args(extra_args)
+        .args(&args)
+        .args(&extra)
         .env(
             "RUST_LOG",
             env::var("RUST_LOG")

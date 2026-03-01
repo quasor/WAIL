@@ -37,6 +37,9 @@ pub enum SyncMessage {
     /// Greeting on DataChannel open
     Hello {
         peer_id: String,
+        /// Human-readable name (e.g. "Ringo"). Old peers omit this field.
+        #[serde(default)]
+        display_name: Option<String>,
     },
     /// Announce audio capabilities (sent after Hello)
     AudioCapabilities {
@@ -106,6 +109,37 @@ pub enum SignalPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hello_with_display_name_roundtrip() {
+        let msg = SyncMessage::Hello {
+            peer_id: "abc123".into(),
+            display_name: Some("Ringo".into()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SyncMessage::Hello { peer_id, display_name } => {
+                assert_eq!(peer_id, "abc123");
+                assert_eq!(display_name.as_deref(), Some("Ringo"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_without_display_name_backward_compat() {
+        // Old-format JSON without display_name field
+        let json = r#"{"type":"Hello","peer_id":"old-peer"}"#;
+        let decoded: SyncMessage = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            SyncMessage::Hello { peer_id, display_name } => {
+                assert_eq!(peer_id, "old-peer");
+                assert_eq!(display_name, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
 
     #[test]
     fn sync_message_interval_boundary_roundtrip() {
