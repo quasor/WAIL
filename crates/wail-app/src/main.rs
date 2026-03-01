@@ -25,8 +25,8 @@ enum Commands {
         #[arg(short, long)]
         room: String,
 
-        /// Signaling server WebSocket URL
-        #[arg(short, long, default_value = "ws://localhost:9090")]
+        /// Signaling server URL
+        #[arg(short, long, default_value = "https://wail.val.run/")]
         server: String,
 
         /// Initial BPM
@@ -48,6 +48,10 @@ enum Commands {
         /// Display name for this peer (shown to remote peers)
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Room password (first peer to join sets it; others must match)
+        #[arg(short, long)]
+        password: String,
     },
 }
 
@@ -71,8 +75,9 @@ async fn main() -> Result<()> {
             quantum,
             ipc_port,
             name,
+            password,
         } => {
-            run_peer(server, room, bpm, bars, quantum, ipc_port, name).await?;
+            run_peer(server, room, bpm, bars, quantum, ipc_port, name, password).await?;
         }
     }
 
@@ -87,6 +92,7 @@ async fn run_peer(
     quantum: f64,
     ipc_port: u16,
     display_name: Option<String>,
+    password: String,
 ) -> Result<()> {
     let peer_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
     let name_str = display_name.as_deref().unwrap_or("(anonymous)");
@@ -99,7 +105,7 @@ async fn run_peer(
 
     // Connect to signaling server (now returns sync + audio receivers)
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect(&server, &room, &peer_id).await?;
+        PeerMesh::connect(&server, &room, &peer_id, &password).await?;
     info!("Connected to signaling server");
 
     // Clock sync and interval tracker

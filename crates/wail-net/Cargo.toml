@@ -10,8 +10,7 @@ webrtc = "0.11"
 webrtc-ice = "0.11"
 bytes = "1"
 tokio = { workspace = true }
-tokio-tungstenite = { workspace = true }
-futures-util = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -19,5 +18,5 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
-wail-signaling = { path = "../wail-signaling" }
+axum = "0.7"
 tracing-subscriber = { workspace = true }

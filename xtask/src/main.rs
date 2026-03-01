@@ -36,10 +36,11 @@ OPTIONS (run-peer): all flags are forwarded to `wail-app join`
   --room <NAME>   Room to join          (default: test)
   --bpm  <BPM>    Initial tempo         (default: 120)
   --ipc-port <N>  IPC port for plugin   (default: 9191)
-  --server <URL>  Signaling server URL  (default: ws://localhost:9090)
+  --server <URL>  Signaling server URL  (default: https://wail.val.run/)
   --bars <N>      Bars per interval     (default: 4)
   --quantum <F>   Quantum               (default: 4.0)
   --name <NAME>   Display name for this peer
+  --password <PW> Room password (first peer sets it; others must match)
 
 EXAMPLES:
   cargo xtask install
@@ -257,7 +258,7 @@ fn run_peer(extra_args: &[String]) -> Result<()> {
         args.extend(["--room", "test"]);
     }
     if !has_flag("--server") {
-        args.extend(["--server", "ws://localhost:9090"]);
+        args.extend(["--server", "https://wail.val.run/"]);
     }
     if !has_flag("--bpm") {
         args.extend(["--bpm", "120"]);
@@ -311,10 +312,10 @@ fn install_all(args: &[String]) -> Result<()> {
     // Step 4: next-steps instructions
     println!("\n=== WAIL installed successfully ===");
     println!("To join a session:");
-    println!("  wail-app join --room <ROOM> --server <SIGNALING_URL>");
+    println!("  wail-app join --room <ROOM>");
     println!();
     println!("Example:");
-    println!("  wail-app join --room myband --server ws://relay.example.com:9090");
+    println!("  wail-app join --room myband");
     Ok(())
 }
 

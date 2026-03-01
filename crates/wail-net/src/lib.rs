@@ -32,12 +32,13 @@ impl PeerMesh {
         server_url: &str,
         room: &str,
         peer_id: &str,
+        password: &str,
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        let signaling = SignalingClient::connect(server_url, room, peer_id).await?;
+        let signaling = SignalingClient::connect(server_url, room, peer_id, password).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
 
