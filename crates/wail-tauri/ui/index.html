@@ -13,6 +13,12 @@
     <p class="subtitle">WebRTC Audio Interchange for Link</p>
 
     <form id="join-form">
+      <label for="room">Room</label>
+      <input type="text" id="room" placeholder="e.g. jam" required>
+
+      <label for="password">Password</label>
+      <input type="password" id="password" placeholder="Room password" required>
+
       <label for="display-name">Display Name</label>
       <input type="text" id="display-name" placeholder="(optional)">
 
@@ -30,15 +36,6 @@
 
           <label for="ipc-port">IPC Port</label>
           <input type="number" id="ipc-port" value="9191" min="1024" max="65535">
-
-          <label for="turn-url">TURN Server</label>
-          <input type="text" id="turn-url" placeholder="turn:your-ip:3478">
-
-          <label for="turn-username">TURN Username</label>
-          <input type="text" id="turn-username" placeholder="wail">
-
-          <label for="turn-credential">TURN Password</label>
-          <input type="password" id="turn-credential" placeholder="">
 
           <div class="remember-row" style="margin-top:8px">
             <input type="checkbox" id="test-tone">

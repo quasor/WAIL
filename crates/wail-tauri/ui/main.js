@@ -20,7 +20,7 @@ let testToneEnabled = false;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential'];
+const rememberFields = ['room', 'password', 'display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone'];
 
 function loadSettings() {
   try {
@@ -112,17 +112,17 @@ joinForm.addEventListener('submit', async (e) => {
 
   const params = {
     server: document.getElementById('server').value,
-    room: 'wail',
-    password: 'wailpass',
+    room: document.getElementById('room').value,
+    password: document.getElementById('password').value,
     displayName: document.getElementById('display-name').value || null,
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
     ipcPort: parseInt(document.getElementById('ipc-port').value),
     testTone: document.getElementById('test-tone').checked,
-    turnUrl: document.getElementById('turn-url').value || null,
-    turnUsername: document.getElementById('turn-username').value || null,
-    turnCredential: document.getElementById('turn-credential').value || null,
+    turnUrl: null,
+    turnUsername: null,
+    turnCredential: null,
   };
 
   try {
