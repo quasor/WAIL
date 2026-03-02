@@ -28,6 +28,8 @@ WAIL has three components that work together:
 
 **No audio from remote peers** — Verify that both WAIL Send and WAIL Recv plugins are loaded and the WAIL app is running and connected to the same room.
 
+**Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. All peers will hear a glitch as the old interval (recorded at the previous tempo) plays back while the new interval begins recording at the new tempo. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
+
 ## How it works
 
 Each WAIL peer joins a local Ableton Link session and connects to a lightweight HTTP signaling server to discover other peers. Rooms are password-protected — the first peer to join sets the password; subsequent peers must provide the matching password. Once peers discover each other, they establish direct WebRTC connections with two DataChannels each:
