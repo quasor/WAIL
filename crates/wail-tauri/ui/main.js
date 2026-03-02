@@ -20,7 +20,7 @@ let testToneEnabled = false;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['display-name', 'bpm', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential'];
+const rememberFields = ['display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential'];
 
 function loadSettings() {
   try {
@@ -71,13 +71,12 @@ function showJoin() {
   cleanup();
 }
 
-function showSession(room, bpm) {
+function showSession(room) {
   joinScreen.style.display = 'none';
   sessionScreen.style.display = '';
   sessionError.style.display = 'none';
   clearLog();
   document.getElementById('session-room').textContent = room;
-  document.getElementById('session-bpm').value = bpm;
   document.getElementById('peer-list').innerHTML = '<span class="empty">No peers connected</span>';
   document.getElementById('session-audio').textContent = '0 sent / 0 recv';
   document.getElementById('session-plugin').textContent = 'disconnected';
@@ -116,7 +115,7 @@ joinForm.addEventListener('submit', async (e) => {
     room: 'wail',
     password: 'wailpass',
     displayName: document.getElementById('display-name').value || null,
-    bpm: parseFloat(document.getElementById('bpm').value),
+    bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
     ipcPort: parseInt(document.getElementById('ipc-port').value),
@@ -129,7 +128,7 @@ joinForm.addEventListener('submit', async (e) => {
   try {
     const result = await invoke('join_room', params);
     saveSettings();
-    showSession(result.room, result.bpm);
+    showSession(result.room);
     setupListeners();
   } catch (err) {
     showError(joinError, err);
