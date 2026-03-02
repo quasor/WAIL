@@ -237,10 +237,10 @@ fn cargo_version(root: &Path) -> Result<String> {
         .as_array()
         .context("packages not an array")?
         .iter()
-        .find(|p| p["name"] == "wail-plugin")
+        .find(|p| p["name"] == "wail-plugin-send")
         .and_then(|p| p["version"].as_str())
         .map(|s| s.to_owned())
-        .context("Could not find wail-plugin version in cargo metadata")
+        .context("Could not find wail-plugin-send version in cargo metadata")
 }
 
 fn run_tauri() -> Result<()> {
