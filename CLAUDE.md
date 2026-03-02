@@ -26,12 +26,10 @@ crates/
 │   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
 │   ├── lib.rs            Plugin entry point, send-only IPC thread
-│   └── params.rs         Send parameters (bars, timesig, send toggle, bitrate)
+│   └── params.rs         Plugin parameters (empty — defaults hardcoded)
 ├── wail-plugin-recv/    CLAP/VST3 receive plugin (plays remote audio)
 │   ├── lib.rs            Plugin entry point, recv-only IPC thread
-│   └── params.rs         Recv parameters (bars, timesig, receive toggle, volume)
-├── wail-app/            CLI binary
-│   └── main.rs           Wires Link + WebRTC + IPC together
+│   └── params.rs         Plugin parameters (empty — defaults hardcoded)
 
 val-town/
 └── signaling.ts      HTTP signaling server (deployed to Val Town)
@@ -54,9 +52,8 @@ cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 cargo xtask build-plugin                  # → target/bundled/wail-plugin-{send,recv}.{clap,vst3}
 cargo xtask install-plugin                # build + install to system plugin dirs
 
-# Run (signaling via Val Town at https://wail.val.run/)
-cargo xtask run-peer --room jam --password secret             # peer A (defaults: bpm=120, ipc=9191)
-cargo xtask run-peer --room jam --password secret --bpm 96 --ipc-port 9192  # peer B
+# Tauri app (handles Link + WebRTC + IPC)
+cargo tauri dev
 ```
 
 ## Key Dependencies
@@ -127,7 +124,7 @@ cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 
 ## Common Tasks
 
-- **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-app/src/main.rs` select loop
+- **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-tauri/src/session.rs` select loop
 - **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
 - **Add STUN/TURN servers**: `RTCIceServer` list in `crates/wail-net/src/peer.rs`
 - **Change Opus bitrate**: Default in send plugin params (`crates/wail-plugin-send/src/params.rs`)
