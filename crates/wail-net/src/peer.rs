@@ -97,6 +97,14 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use wail_core::protocol::SyncMessage;
 
+/// Drain all pending sync messages from the queue.
+fn take_pending(pending: &Mutex<Vec<String>>) -> Vec<String> {
+    match pending.lock() {
+        Ok(mut guard) => std::mem::take(&mut *guard),
+        Err(e) => std::mem::take(&mut *e.into_inner()),
+    }
+}
+
 /// A single WebRTC peer connection with DataChannels for sync and audio.
 ///
 /// Two DataChannels:
@@ -120,6 +128,8 @@ pub struct PeerConnection {
     /// Incoming audio data (binary, bounded) — taken via `take_audio_rx()` for forwarding
     pub audio_rx: Option<mpsc::Receiver<Vec<u8>>>,
     audio_tx: mpsc::Sender<Vec<u8>>,
+    /// Sync messages queued before the DataChannel is open.
+    pending_sync: Arc<Mutex<Vec<String>>>,
     /// ICE candidates that arrived before remote description was set
     pending_candidates: Vec<RTCIceCandidateInit>,
     remote_desc_set: bool,
@@ -201,6 +211,7 @@ impl PeerConnection {
             incoming_tx,
             audio_rx: Some(audio_rx),
             audio_tx,
+            pending_sync: Arc::new(Mutex::new(Vec::new())),
             pending_candidates: Vec::new(),
             remote_desc_set: false,
         })
@@ -245,6 +256,7 @@ impl PeerConnection {
         let rpid = self.remote_peer_id.clone();
         let dc_sync_slot = self.dc_sync.clone();
         let dc_audio_slot = self.dc_audio.clone();
+        let pending_sync = self.pending_sync.clone();
 
         self.pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let incoming_tx = incoming_tx.clone();
@@ -252,6 +264,7 @@ impl PeerConnection {
             let rpid = rpid.clone();
             let dc_sync_slot = dc_sync_slot.clone();
             let dc_audio_slot = dc_audio_slot.clone();
+            let pending_sync = pending_sync.clone();
             Box::pin(async move {
                 let label = dc.label().to_string();
                 info!(peer = %rpid, label = %label, "Data channel opened by remote");
@@ -259,6 +272,26 @@ impl PeerConnection {
                 match label.as_str() {
                     "sync" => {
                         let _ = dc_sync_slot.set(dc.clone());
+
+                        // Flush pending messages when channel opens
+                        let pending2 = pending_sync.clone();
+                        let rpid2 = rpid.clone();
+                        let dc_for_flush = dc.clone();
+                        dc.on_open(Box::new(move || {
+                            info!(peer = %rpid2, "Sync channel open (responder)");
+                            Box::pin(async move {
+                                let messages = take_pending(&pending2);
+                                if !messages.is_empty() {
+                                    info!(count = messages.len(), "Flushing queued sync messages (responder)");
+                                }
+                                for text in messages {
+                                    if let Err(e) = dc_for_flush.send_text(text).await {
+                                        warn!("Failed to send queued sync message: {e}");
+                                    }
+                                }
+                            })
+                        }));
+
                         let tx = incoming_tx.clone();
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let tx = tx.clone();
@@ -345,17 +378,18 @@ impl PeerConnection {
     }
 
     /// Send a sync message over the "sync" DataChannel (JSON text).
+    /// If the channel isn't open yet, the message is queued and will be
+    /// flushed automatically when the channel opens.
     pub async fn send(&self, msg: &SyncMessage) -> Result<()> {
+        let text = serde_json::to_string(msg)?;
         match self.dc_sync.get() {
             Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
-                let text = serde_json::to_string(msg)?;
                 dc.send_text(text).await?;
             }
-            Some(_) => {
-                debug!(peer = %self.remote_peer_id, "Sync DataChannel not open yet — message dropped");
-            }
-            None => {
-                debug!(peer = %self.remote_peer_id, "Sync DataChannel not ready — message dropped");
+            _ => {
+                let mut guard = self.pending_sync.lock().unwrap_or_else(|e| e.into_inner());
+                debug!(peer = %self.remote_peer_id, pending = guard.len() + 1, "Sync DC not open — message queued");
+                guard.push(text);
             }
         }
         Ok(())
@@ -405,11 +439,23 @@ impl PeerConnection {
     async fn setup_sync_channel(&mut self, dc: Arc<RTCDataChannel>) {
         let incoming_tx = self.incoming_tx.clone();
         let rpid = self.remote_peer_id.clone();
+        let pending = self.pending_sync.clone();
 
         let dc_clone = dc.clone();
         dc.on_open(Box::new(move || {
             info!(peer = %rpid, label = %dc_clone.label(), "Sync channel open");
-            Box::pin(async {})
+            let dc2 = dc_clone.clone();
+            Box::pin(async move {
+                let messages = take_pending(&pending);
+                if !messages.is_empty() {
+                    info!(count = messages.len(), "Flushing queued sync messages");
+                }
+                for text in messages {
+                    if let Err(e) = dc2.send_text(text).await {
+                        warn!("Failed to send queued sync message: {e}");
+                    }
+                }
+            })
         }));
 
         let tx = incoming_tx.clone();

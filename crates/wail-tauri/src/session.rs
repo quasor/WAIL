@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -152,6 +152,8 @@ async fn session_loop(
 
     // Track peers' display names
     let mut peer_names: HashMap<String, Option<String>> = HashMap::new();
+    // Track which peers we've sent Hello to (prevents infinite Hello loops)
+    let mut hello_sent: HashSet<String> = HashSet::new();
 
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
@@ -308,6 +310,11 @@ async fn session_loop(
 
                         let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: display_name.clone() };
                         mesh.broadcast(&hello).await;
+                        // Mark all connected peers as having been sent Hello
+                        // (messages are queued if DataChannel isn't open yet)
+                        for p in mesh.connected_peers() {
+                            hello_sent.insert(p);
+                        }
 
                         let config_msg = SyncMessage::IntervalConfig { bars, quantum };
                         mesh.broadcast(&config_msg).await;
@@ -324,6 +331,7 @@ async fn session_loop(
                         let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid);
                         ui_info!(&app, "Peer {name} left");
                         peer_names.remove(&pid);
+                        hello_sent.remove(&pid);
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
                     Ok(Some(_)) => {}
@@ -344,6 +352,21 @@ async fn session_loop(
                         let name_display = name.as_deref().unwrap_or("(anonymous)");
                         ui_info!(&app, "Hello from {name_display} ({pid})");
                         peer_names.insert(pid.clone(), name.clone());
+
+                        // Reply with our Hello if we haven't sent one to this peer.
+                        // This handles the case where the peer wasn't in mesh.peers
+                        // when we originally broadcast Hello (responder timing).
+                        if hello_sent.insert(from.clone()) {
+                            let reply = SyncMessage::Hello {
+                                peer_id: peer_id.clone(),
+                                display_name: display_name.clone(),
+                            };
+                            if let Err(e) = mesh.send_to(&from, &reply).await {
+                                debug!(peer = %from, error = %e, "Failed to send Hello reply");
+                                hello_sent.remove(&from);
+                            }
+                        }
+
                         let _ = app.emit("peer:joined", PeerJoinedEvent {
                             peer_id: pid,
                             display_name: name,
