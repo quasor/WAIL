@@ -12,56 +12,70 @@
     <h1>WAIL</h1>
     <p class="subtitle">WebRTC Audio Interchange for Link</p>
 
-    <form id="join-form">
-      <label for="room">Room</label>
-      <input type="text" id="room" placeholder="e.g. jam" required>
-
-      <label for="password">Password</label>
-      <input type="password" id="password" placeholder="Room password" required>
-
-      <label for="display-name">Display Name</label>
-      <input type="text" id="display-name" placeholder="(optional)">
-
-      <details id="advanced-toggle">
-        <summary>Advanced</summary>
-        <div class="advanced-fields">
-          <label for="server">Server URL</label>
-          <input type="text" id="server" value="https://wail.val.run/">
-
-          <label for="bars">Bars per interval</label>
-          <input type="number" id="bars" value="4" min="1" max="64">
-
-          <label for="quantum">Quantum</label>
-          <input type="number" id="quantum" value="4" min="1" max="16" step="0.1">
-
-          <input type="hidden" id="ipc-port" value="9191">
-
-          <label for="turn-url">TURN Server</label>
-          <input type="text" id="turn-url" placeholder="turn:your-ip:3478">
-          <input type="hidden" id="turn-username" value="wail">
-          <input type="hidden" id="turn-credential" value="wailpass">
-
-          <div class="remember-row" style="margin-top:8px">
-            <input type="checkbox" id="test-tone">
-            <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
-          </div>
-        </div>
-      </details>
-
-      <div class="remember-row">
-        <input type="checkbox" id="remember" checked>
-        <label for="remember" class="remember-label">Remember settings</label>
-      </div>
-
-      <button type="submit" id="join-btn">Join Room</button>
-    </form>
-
-    <div id="plugin-section">
-      <div id="plugin-status"></div>
-      <button type="button" id="install-plugins-btn" style="display:none">Install Plugins</button>
+    <div class="tab-bar">
+      <button type="button" class="tab active" id="tab-join">Join Room</button>
+      <button type="button" class="tab" id="tab-public">Public Rooms</button>
     </div>
 
-    <div id="join-error" class="error" style="display:none"></div>
+    <div id="tab-join-content">
+      <form id="join-form">
+        <label for="room">Room</label>
+        <input type="text" id="room" placeholder="e.g. jam" required>
+
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="Room password (empty = public)">
+
+        <label for="display-name">Display Name</label>
+        <input type="text" id="display-name" placeholder="(optional)">
+
+        <details id="advanced-toggle">
+          <summary>Advanced</summary>
+          <div class="advanced-fields">
+            <label for="server">Server URL</label>
+            <input type="text" id="server" value="https://wail.val.run/">
+
+            <label for="bars">Bars per interval</label>
+            <input type="number" id="bars" value="4" min="1" max="64">
+
+            <label for="quantum">Quantum</label>
+            <input type="number" id="quantum" value="4" min="1" max="16" step="0.1">
+
+            <input type="hidden" id="ipc-port" value="9191">
+
+            <label for="turn-url">TURN Server</label>
+            <input type="text" id="turn-url" placeholder="turn:your-ip:3478">
+            <input type="hidden" id="turn-username" value="wail">
+            <input type="hidden" id="turn-credential" value="wailpass">
+
+            <div class="remember-row" style="margin-top:8px">
+              <input type="checkbox" id="test-tone">
+              <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
+            </div>
+          </div>
+        </details>
+
+        <div class="remember-row">
+          <input type="checkbox" id="remember" checked>
+          <label for="remember" class="remember-label">Remember settings</label>
+        </div>
+
+        <button type="submit" id="join-btn">Join Room</button>
+      </form>
+
+      <div id="plugin-section">
+        <div id="plugin-status"></div>
+        <button type="button" id="install-plugins-btn" style="display:none">Install Plugins</button>
+      </div>
+
+      <div id="join-error" class="error" style="display:none"></div>
+    </div>
+
+    <div id="tab-public-content" style="display:none">
+      <div id="public-rooms-list" class="room-list">
+        <span class="empty">Loading...</span>
+      </div>
+      <button type="button" id="refresh-rooms-btn">Refresh</button>
+    </div>
   </div>
 
   <!-- Session View -->

@@ -32,14 +32,14 @@ async fn two_peers_exchange_audio_over_webrtc() {
     //    "peer-a" < "peer-b" → peer-a will be the WebRTC initiator
     let ice = wail_net::default_ice_servers();
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-a", "test", ice.clone(), 200)
+        PeerMesh::connect_with_options(&server_url, "test-room", "peer-a", Some("test"), ice.clone(), 200)
             .await
             .expect("Peer A failed to connect to signaling");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-b", "test", ice, 200)
+        PeerMesh::connect_with_options(&server_url, "test-room", "peer-b", Some("test"), ice, 200)
             .await
             .expect("Peer B failed to connect to signaling");
 
@@ -220,7 +220,7 @@ async fn two_peers_exchange_audio_via_turn() {
     // 3. Connect both peers using TURN (fast polling for tests)
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
         PeerMesh::connect_with_options(
-            &server_url, "test-room", "peer-a", "test", ice_servers.clone(), 200,
+            &server_url, "test-room", "peer-a", Some("test"), ice_servers.clone(), 200,
         )
             .await
             .expect("Peer A failed to connect to signaling");
@@ -229,7 +229,7 @@ async fn two_peers_exchange_audio_via_turn() {
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
         PeerMesh::connect_with_options(
-            &server_url, "test-room", "peer-b", "test", ice_servers, 200,
+            &server_url, "test-room", "peer-b", Some("test"), ice_servers, 200,
         )
             .await
             .expect("Peer B failed to connect to signaling");

@@ -45,6 +45,80 @@ h2 {
   margin-bottom: 24px;
 }
 
+/* Tab bar */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.tab {
+  flex: 1;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-top: 0;
+  width: auto;
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent-bright);
+  color: var(--fg);
+}
+
+/* Public room list */
+.room-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.room-list .empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.room-card {
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.room-card .room-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.room-card .room-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.room-card .room-meta {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.room-card button {
+  width: auto;
+  margin-top: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+}
+
 /* Forms */
 label {
   display: block;

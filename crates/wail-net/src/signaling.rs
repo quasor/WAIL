@@ -14,6 +14,34 @@ pub struct SignalingClient {
     pub outgoing_tx: mpsc::UnboundedSender<SignalMessage>,
 }
 
+/// A public room returned by the signaling server's list endpoint.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PublicRoom {
+    pub room: String,
+    pub created_at: i64,
+    pub peer_count: u32,
+    pub display_names: Vec<String>,
+    pub bpm: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct ListResponse {
+    rooms: Vec<PublicRoom>,
+}
+
+/// Fetch the list of public rooms from a signaling server.
+pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
+    let client = Client::new();
+    let base = base_url.trim_end_matches('/');
+    let resp = client
+        .get(format!("{base}/?action=list"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let list: ListResponse = resp.json().await?;
+    Ok(list.rooms)
+}
+
 /// Response from the `?action=join` endpoint.
 #[derive(serde::Deserialize)]
 struct JoinResponse {
@@ -39,7 +67,9 @@ impl SignalingClient {
     /// Sends a `join` request, then spawns a background polling loop that:
     /// - Drains outgoing signals and POSTs them as `?action=signal`
     /// - Polls `?action=poll` at the configured interval
-    pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: &str) -> Result<Self> {
+    ///
+    /// Pass `None` for `password` to create/join a public room.
+    pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: Option<&str>) -> Result<Self> {
         Self::connect_with_poll_interval(base_url, room, peer_id, password, 5_000).await
     }
 
@@ -48,20 +78,23 @@ impl SignalingClient {
         base_url: &str,
         room: &str,
         peer_id: &str,
-        password: &str,
+        password: Option<&str>,
         poll_interval_ms: u64,
     ) -> Result<Self> {
         let client = Client::new();
         let base = base_url.trim_end_matches('/').to_string();
 
         // POST ?action=join
+        let mut body = serde_json::json!({
+            "room": room,
+            "peer_id": peer_id,
+        });
+        if let Some(pw) = password {
+            body["password"] = serde_json::Value::String(pw.to_string());
+        }
         let resp = client
             .post(format!("{base}/?action=join"))
-            .json(&serde_json::json!({
-                "room": room,
-                "peer_id": peer_id,
-                "password": password,
-            }))
+            .json(&body)
             .send()
             .await?;
 

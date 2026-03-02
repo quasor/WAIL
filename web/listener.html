@@ -106,6 +106,19 @@
     .volume-row { display: flex; align-items: center; gap: 8px; }
     .volume-row input { flex: 1; }
     .volume-value { font-size: 12px; color: var(--fg-dim); min-width: 32px; text-align: right; }
+    .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; }
+    .tab { flex: 1; padding: 8px; background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--fg-dim); font-family: inherit; font-size: 12px;
+      cursor: pointer; text-transform: uppercase; letter-spacing: 1px; width: auto; margin-top: 0;
+      text-align: center; min-height: auto; }
+    .tab.active { background: var(--accent); border-color: var(--accent-bright); color: var(--fg); }
+    .room-list { display: flex; flex-direction: column; gap: 6px; }
+    .room-card { padding: 10px; background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); display: flex; justify-content: space-between; align-items: center; }
+    .room-card .room-info { display: flex; flex-direction: column; gap: 2px; }
+    .room-card .room-name { font-weight: 600; font-size: 14px; }
+    .room-card .room-meta { color: var(--fg-dim); font-size: 11px; }
+    .room-card button { width: auto; margin-top: 0; padding: 6px 16px; font-size: 12px; min-height: auto; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -115,21 +128,33 @@
     <div id="join-screen">
       <h1>WAIL</h1>
       <p class="subtitle">listen to a session</p>
-      <label for="room">Room</label>
-      <input type="text" id="room" placeholder="room name" autocapitalize="off" autocorrect="off">
-      <label for="password">Password</label>
-      <input type="password" id="password" placeholder="room password">
-      <label for="display-name">Display Name</label>
-      <input type="text" id="display-name" placeholder="optional">
-      <details>
-        <summary>Advanced</summary>
-        <div class="advanced-fields">
-          <label for="server-url">Signaling Server</label>
-          <input type="text" id="server-url" placeholder="https://wail.val.run/">
+      <div class="tab-bar">
+        <button class="tab active" id="tab-join">Join Room</button>
+        <button class="tab" id="tab-public">Public Rooms</button>
+      </div>
+      <div id="tab-join-content">
+        <label for="room">Room</label>
+        <input type="text" id="room" placeholder="room name" autocapitalize="off" autocorrect="off">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="room password (empty = public)">
+        <label for="display-name">Display Name</label>
+        <input type="text" id="display-name" placeholder="optional">
+        <details>
+          <summary>Advanced</summary>
+          <div class="advanced-fields">
+            <label for="server-url">Signaling Server</label>
+            <input type="text" id="server-url" placeholder="https://wail.val.run/">
+          </div>
+        </details>
+        <div id="join-error" class="error" hidden></div>
+        <button id="listen-btn">LISTEN</button>
+      </div>
+      <div id="tab-public-content" hidden>
+        <div id="public-rooms-list" class="room-list">
+          <span class="empty">Loading...</span>
         </div>
-      </details>
-      <div id="join-error" class="error" hidden></div>
-      <button id="listen-btn">LISTEN</button>
+        <button id="refresh-rooms-btn" style="margin-top:12px">REFRESH</button>
+      </div>
     </div>
 
     <!-- Session Screen -->
@@ -237,10 +262,12 @@ class WailSignaling {
   }
 
   async join() {
+    const body = { room: this.room, peer_id: this.peerId };
+    if (this.password) body.password = this.password;
     const res = await fetch(this.baseUrl + '?action=join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ room: this.room, peer_id: this.peerId, password: this.password }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -820,7 +847,7 @@ class WailAudioPlayer {
 class WailSession {
   constructor(config) {
     this.room = config.room;
-    this.password = config.password;
+    this.password = config.password || null;
     this.displayName = config.displayName;
     this.serverUrl = config.serverUrl || defaultSignalingUrl();
     this.peerId = crypto.randomUUID();
@@ -979,19 +1006,74 @@ function updateSessionUI() {
   statsEl.textContent = count + ' interval' + (count !== 1 ? 's' : '') + ' received';
 }
 
-// Listen button
-document.getElementById('listen-btn').addEventListener('click', async () => {
-  const room = document.getElementById('room').value.trim();
-  const password = document.getElementById('password').value;
+// --- Tab switching ---
+const tabJoin = document.getElementById('tab-join');
+const tabPublic = document.getElementById('tab-public');
+const tabJoinContent = document.getElementById('tab-join-content');
+const tabPublicContent = document.getElementById('tab-public-content');
+let roomRefreshTimer = null;
+
+tabJoin.addEventListener('click', () => {
+  tabJoin.classList.add('active'); tabPublic.classList.remove('active');
+  tabJoinContent.hidden = false; tabPublicContent.hidden = true;
+  stopRoomRefresh();
+});
+
+tabPublic.addEventListener('click', () => {
+  tabPublic.classList.add('active'); tabJoin.classList.remove('active');
+  tabJoinContent.hidden = true; tabPublicContent.hidden = false;
+  fetchPublicRooms(); startRoomRefresh();
+});
+
+function getServerUrl() {
+  const el = document.getElementById('server-url');
+  return (el && el.value.trim()) || defaultSignalingUrl();
+}
+
+function startRoomRefresh() { stopRoomRefresh(); roomRefreshTimer = setInterval(fetchPublicRooms, 10000); }
+function stopRoomRefresh() { if (roomRefreshTimer) { clearInterval(roomRefreshTimer); roomRefreshTimer = null; } }
+
+async function fetchPublicRooms() {
+  const url = getServerUrl();
+  try {
+    const res = await fetch(url + '?action=list');
+    const data = await res.json();
+    renderPublicRooms(data.rooms || []);
+  } catch (e) {
+    document.getElementById('public-rooms-list').innerHTML =
+      '<span class="empty">Failed to load: ' + esc(e.message) + '</span>';
+  }
+}
+
+function renderPublicRooms(rooms) {
+  const list = document.getElementById('public-rooms-list');
+  if (rooms.length === 0) { list.innerHTML = '<span class="empty">No public rooms available</span>'; return; }
+  list.innerHTML = rooms.map(r => {
+    const bpm = r.bpm ? r.bpm.toFixed(0) + ' BPM' : '-- BPM';
+    const names = r.display_names.filter(Boolean).join(', ') || 'anonymous';
+    return '<div class="room-card"><div class="room-info"><span class="room-name">' + esc(r.room) + '</span>'
+      + '<span class="room-meta">' + r.peer_count + ' peer' + (r.peer_count !== 1 ? 's' : '') + ' &middot; ' + bpm + ' &middot; ' + esc(names) + '</span>'
+      + '</div><button onclick="joinPublicRoom(\'' + esc(r.room) + '\')">JOIN</button></div>';
+  }).join('');
+}
+
+async function joinPublicRoom(room) {
+  document.getElementById('room').value = room;
+  document.getElementById('password').value = '';
+  tabJoin.click();
+  await startListening(room, '');
+}
+
+document.getElementById('refresh-rooms-btn').addEventListener('click', fetchPublicRooms);
+
+async function startListening(room, password) {
   const displayName = document.getElementById('display-name').value.trim();
-  const serverUrl = document.getElementById('server-url').value.trim();
+  const serverUrl = getServerUrl();
   const errorEl = document.getElementById('join-error');
   errorEl.hidden = true;
 
   if (!room) { errorEl.textContent = 'Room name is required'; errorEl.hidden = false; return; }
-  if (!password) { errorEl.textContent = 'Password is required'; errorEl.hidden = false; return; }
 
-  // Check WebCodecs support
   if (typeof AudioDecoder === 'undefined') {
     errorEl.textContent = 'Your browser does not support audio decoding (WebCodecs). Use Chrome, Safari, or Firefox.';
     errorEl.hidden = false;
@@ -1003,11 +1085,12 @@ document.getElementById('listen-btn').addEventListener('click', async () => {
   btn.textContent = 'CONNECTING...';
 
   try {
-    session = new WailSession({ room, password, displayName, serverUrl: serverUrl || undefined });
+    session = new WailSession({ room, password: password || null, displayName, serverUrl: serverUrl || undefined });
     session.onUpdate = updateSessionUI;
     await session.start();
     showScreen('session');
     updateSessionUI();
+    stopRoomRefresh();
   } catch (e) {
     errorEl.textContent = e.message;
     errorEl.hidden = false;
@@ -1016,6 +1099,15 @@ document.getElementById('listen-btn').addEventListener('click', async () => {
     btn.disabled = false;
     btn.textContent = 'LISTEN';
   }
+
+  saveForm();
+}
+
+// Listen button
+document.getElementById('listen-btn').addEventListener('click', async () => {
+  const room = document.getElementById('room').value.trim();
+  const password = document.getElementById('password').value;
+  await startListening(room, password);
 });
 
 // Disconnect button
@@ -1053,7 +1145,6 @@ function saveForm() {
     }));
   } catch {}
 }
-document.getElementById('listen-btn').addEventListener('click', saveForm);
 
 // ---------------------------------------------------------------------------
 // Self-test mode (?test)

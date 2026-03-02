@@ -17,6 +17,7 @@ const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
 // State
 let unlisten = [];
 let testToneEnabled = false;
+let roomRefreshTimer = null;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
@@ -61,6 +62,104 @@ document.getElementById('remember').addEventListener('change', () => {
     localStorage.removeItem(STORAGE_KEY);
   }
 });
+
+// --- Tab switching ---
+const tabJoinBtn = document.getElementById('tab-join');
+const tabPublicBtn = document.getElementById('tab-public');
+const tabJoinContent = document.getElementById('tab-join-content');
+const tabPublicContent = document.getElementById('tab-public-content');
+
+tabJoinBtn.addEventListener('click', () => {
+  tabJoinBtn.classList.add('active');
+  tabPublicBtn.classList.remove('active');
+  tabJoinContent.style.display = '';
+  tabPublicContent.style.display = 'none';
+  stopRoomRefresh();
+});
+
+tabPublicBtn.addEventListener('click', () => {
+  tabPublicBtn.classList.add('active');
+  tabJoinBtn.classList.remove('active');
+  tabJoinContent.style.display = 'none';
+  tabPublicContent.style.display = '';
+  fetchPublicRooms();
+  startRoomRefresh();
+});
+
+function startRoomRefresh() {
+  stopRoomRefresh();
+  roomRefreshTimer = setInterval(fetchPublicRooms, 10000);
+}
+
+function stopRoomRefresh() {
+  if (roomRefreshTimer) {
+    clearInterval(roomRefreshTimer);
+    roomRefreshTimer = null;
+  }
+}
+
+async function fetchPublicRooms() {
+  const server = document.getElementById('server').value;
+  try {
+    const rooms = await invoke('list_public_rooms', { server });
+    renderPublicRooms(rooms);
+  } catch (err) {
+    document.getElementById('public-rooms-list').innerHTML =
+      `<span class="empty">Failed to load: ${escapeHtml(String(err))}</span>`;
+  }
+}
+
+function renderPublicRooms(rooms) {
+  const list = document.getElementById('public-rooms-list');
+  if (rooms.length === 0) {
+    list.innerHTML = '<span class="empty">No public rooms available</span>';
+    return;
+  }
+  list.innerHTML = rooms.map(r => {
+    const bpm = r.bpm ? `${r.bpm.toFixed(0)} BPM` : '-- BPM';
+    const names = r.display_names.filter(Boolean).join(', ') || 'anonymous';
+    return `<div class="room-card">
+      <div class="room-info">
+        <span class="room-name">${escapeHtml(r.room)}</span>
+        <span class="room-meta">${r.peer_count} peer${r.peer_count !== 1 ? 's' : ''} &middot; ${bpm} &middot; ${escapeHtml(names)}</span>
+      </div>
+      <button type="button" data-room="${escapeHtml(r.room)}">Join</button>
+    </div>`;
+  }).join('');
+
+  // Attach click handlers
+  list.querySelectorAll('.room-card button').forEach(btn => {
+    btn.addEventListener('click', () => joinPublicRoom(btn.dataset.room));
+  });
+}
+
+async function joinPublicRoom(room) {
+  const params = {
+    server: document.getElementById('server').value,
+    room: room,
+    password: null,
+    displayName: document.getElementById('display-name').value || null,
+    bpm: 120.0,
+    bars: parseInt(document.getElementById('bars').value),
+    quantum: parseFloat(document.getElementById('quantum').value),
+    ipcPort: parseInt(document.getElementById('ipc-port').value),
+    testTone: document.getElementById('test-tone').checked,
+    turnUrl: document.getElementById('turn-url').value || null,
+    turnUsername: document.getElementById('turn-username').value || null,
+    turnCredential: document.getElementById('turn-credential').value || null,
+  };
+  try {
+    const result = await invoke('join_room', params);
+    saveSettings();
+    stopRoomRefresh();
+    showSession(result.room);
+    setupListeners();
+  } catch (err) {
+    showError(joinError, err);
+  }
+}
+
+document.getElementById('refresh-rooms-btn').addEventListener('click', fetchPublicRooms);
 
 function showJoin() {
   joinScreen.style.display = '';
@@ -113,7 +212,7 @@ joinForm.addEventListener('submit', async (e) => {
   const params = {
     server: document.getElementById('server').value,
     room: document.getElementById('room').value,
-    password: document.getElementById('password').value,
+    password: document.getElementById('password').value || null,
     displayName: document.getElementById('display-name').value || null,
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),

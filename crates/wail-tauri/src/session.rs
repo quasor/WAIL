@@ -56,7 +56,7 @@ pub enum SessionCommand {
 pub struct SessionConfig {
     pub server: String,
     pub room: String,
-    pub password: String,
+    pub password: Option<String>,
     pub display_name: Option<String>,
     pub bpm: f64,
     pub bars: u32,
@@ -131,7 +131,7 @@ async fn session_loop(
 
     // Connect to signaling server
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect_with_ice(&server, &room, &peer_id, &password, ice_servers).await?;
+        PeerMesh::connect_with_ice(&server, &room, &peer_id, password.as_deref(), ice_servers).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(

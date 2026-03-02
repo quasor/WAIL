@@ -40,7 +40,7 @@ async fn mini_app_session(
         &signaling_url,
         &room,
         &peer_id,
-        &password,
+        Some(password.as_str()),
         ice,
         poll_interval_ms,
     )

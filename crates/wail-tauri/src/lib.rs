@@ -32,6 +32,7 @@ pub fn run() {
             commands::set_test_tone,
             commands::install_plugins,
             commands::check_plugins_installed,
+            commands::list_public_rooms,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WAIL");

@@ -29,9 +29,16 @@ await sqlite.batch([
     ON messages (room, to_peer, id)`,
   `CREATE TABLE IF NOT EXISTS rooms (
     room TEXT PRIMARY KEY,
-    password_hash TEXT NOT NULL
+    password_hash TEXT,
+    created_at INTEGER NOT NULL DEFAULT 0
   )`,
 ]);
+
+// Migrate peers table — add columns if they don't exist
+try { await sqlite.execute("ALTER TABLE peers ADD COLUMN display_name TEXT"); } catch (_) {}
+try { await sqlite.execute("ALTER TABLE peers ADD COLUMN bpm REAL"); } catch (_) {}
+// Migrate rooms table — add created_at if missing (from older schema)
+try { await sqlite.execute("ALTER TABLE rooms ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -235,6 +242,19 @@ const LISTENER_HTML = `<!DOCTYPE html>
     .volume-row { display: flex; align-items: center; gap: 8px; }
     .volume-row input { flex: 1; }
     .volume-value { font-size: 12px; color: var(--fg-dim); min-width: 32px; text-align: right; }
+    .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; }
+    .tab { flex: 1; padding: 8px; background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--fg-dim); font-family: inherit; font-size: 12px;
+      cursor: pointer; text-transform: uppercase; letter-spacing: 1px; width: auto; margin-top: 0;
+      text-align: center; min-height: auto; }
+    .tab.active { background: var(--accent); border-color: var(--accent-bright); color: var(--fg); }
+    .room-list { display: flex; flex-direction: column; gap: 6px; }
+    .room-card { padding: 10px; background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); display: flex; justify-content: space-between; align-items: center; }
+    .room-card .room-info { display: flex; flex-direction: column; gap: 2px; }
+    .room-card .room-name { font-weight: 600; font-size: 14px; }
+    .room-card .room-meta { color: var(--fg-dim); font-size: 11px; }
+    .room-card button { width: auto; margin-top: 0; padding: 6px 16px; font-size: 12px; min-height: auto; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -243,14 +263,32 @@ const LISTENER_HTML = `<!DOCTYPE html>
     <div id="join-screen">
       <h1>WAIL</h1>
       <p class="subtitle">listen to a session</p>
-      <label for="room">Room</label>
-      <input type="text" id="room" placeholder="room name" autocapitalize="off" autocorrect="off">
-      <label for="password">Password</label>
-      <input type="password" id="password" placeholder="room password">
-      <label for="display-name">Display Name</label>
-      <input type="text" id="display-name" placeholder="optional">
-      <div id="join-error" class="error" hidden></div>
-      <button id="listen-btn">LISTEN</button>
+      <div class="tab-bar">
+        <button class="tab active" id="tab-join">Join Room</button>
+        <button class="tab" id="tab-public">Public Rooms</button>
+      </div>
+      <div id="tab-join-content">
+        <label for="room">Room</label>
+        <input type="text" id="room" placeholder="room name" autocapitalize="off" autocorrect="off">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="room password (empty = public)">
+        <label for="display-name">Display Name</label>
+        <input type="text" id="display-name" placeholder="optional">
+        <details><summary>Advanced</summary>
+          <div class="advanced-fields">
+            <label for="server-url">Server URL</label>
+            <input type="text" id="server-url" placeholder="signaling server">
+          </div>
+        </details>
+        <div id="join-error" class="error" hidden></div>
+        <button id="listen-btn">LISTEN</button>
+      </div>
+      <div id="tab-public-content" hidden>
+        <div id="public-rooms-list" class="room-list">
+          <span class="empty">Loading...</span>
+        </div>
+        <button id="refresh-rooms-btn" style="margin-top:12px">REFRESH</button>
+      </div>
     </div>
     <div id="session-screen" hidden>
       <div class="session-header">
@@ -323,9 +361,11 @@ class WailSignaling{
     this.onMessage=null;this.stopped=false;
   }
   async join(){
+    var body={room:this.room,peer_id:this.peerId};
+    if(this.password)body.password=this.password;
     var res=await fetch(this.baseUrl+'?action=join',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({room:this.room,peer_id:this.peerId,password:this.password})});
+      body:JSON.stringify(body)});
     if(!res.ok){var d=await res.json().catch(function(){return{}});throw new Error(d.error||'Join failed ('+res.status+')');}
     return res.json();
   }
@@ -526,7 +566,7 @@ class WailAudioPlayer{
 
 class WailSession{
   constructor(config){
-    this.room=config.room;this.password=config.password;this.displayName=config.displayName;
+    this.room=config.room;this.password=config.password||null;this.displayName=config.displayName;
     this.serverUrl=config.serverUrl||defaultSignalingUrl();this.peerId=crypto.randomUUID();
     this.signaling=null;this.peerManager=null;this.wireParser=null;this.audioPlayer=null;
     this.bpm=null;this.peerInfo=new Map();this.onUpdate=null;
@@ -576,19 +616,62 @@ function updateSessionUI(){
   var count=session.audioPlayer?session.audioPlayer.intervalsReceived:0;
   document.getElementById('audio-stats').textContent=count+' interval'+(count!==1?'s':'')+' received';
 }
-document.getElementById('listen-btn').addEventListener('click',async function(){
-  var room=document.getElementById('room').value.trim();var password=document.getElementById('password').value;
+// --- Tab switching ---
+var tabJoin=document.getElementById('tab-join'),tabPublic=document.getElementById('tab-public');
+var tabJoinContent=document.getElementById('tab-join-content'),tabPublicContent=document.getElementById('tab-public-content');
+var roomRefreshTimer=null;
+tabJoin.addEventListener('click',function(){
+  tabJoin.classList.add('active');tabPublic.classList.remove('active');
+  tabJoinContent.hidden=false;tabPublicContent.hidden=true;stopRoomRefresh();
+});
+tabPublic.addEventListener('click',function(){
+  tabPublic.classList.add('active');tabJoin.classList.remove('active');
+  tabJoinContent.hidden=true;tabPublicContent.hidden=false;fetchPublicRooms();startRoomRefresh();
+});
+function startRoomRefresh(){stopRoomRefresh();roomRefreshTimer=setInterval(fetchPublicRooms,10000);}
+function stopRoomRefresh(){if(roomRefreshTimer){clearInterval(roomRefreshTimer);roomRefreshTimer=null;}}
+async function fetchPublicRooms(){
+  var url=getServerUrl();
+  try{var res=await fetch(url+'?action=list');var data=await res.json();renderPublicRooms(data.rooms||[]);}
+  catch(e){document.getElementById('public-rooms-list').innerHTML='<span class="empty">Failed to load: '+esc(e.message)+'</span>';}
+}
+function renderPublicRooms(rooms){
+  var list=document.getElementById('public-rooms-list');
+  if(rooms.length===0){list.innerHTML='<span class="empty">No public rooms available</span>';return;}
+  list.innerHTML=rooms.map(function(r){
+    var bpm=r.bpm?r.bpm.toFixed(0)+' BPM':'-- BPM';
+    var names=r.display_names.filter(Boolean).join(', ')||'anonymous';
+    return '<div class="room-card"><div class="room-info"><span class="room-name">'+esc(r.room)+'</span>'
+      +'<span class="room-meta">'+r.peer_count+' peer'+(r.peer_count!==1?'s':'')+' &middot; '+bpm+' &middot; '+esc(names)+'</span>'
+      +'</div><button onclick="joinPublicRoom(\\''+esc(r.room)+'\\')">JOIN</button></div>';
+  }).join('');
+}
+function getServerUrl(){
+  var el=document.getElementById('server-url');
+  return(el&&el.value.trim())||defaultSignalingUrl();
+}
+async function joinPublicRoom(room){
+  document.getElementById('room').value=room;document.getElementById('password').value='';
+  tabJoin.click();
+  await startListening(room,'');
+}
+document.getElementById('refresh-rooms-btn').addEventListener('click',fetchPublicRooms);
+
+async function startListening(room,password){
   var displayName=document.getElementById('display-name').value.trim();
   var errorEl=document.getElementById('join-error');errorEl.hidden=true;
   if(!room){errorEl.textContent='Room name is required';errorEl.hidden=false;return;}
-  if(!password){errorEl.textContent='Password is required';errorEl.hidden=false;return;}
   if(typeof AudioDecoder==='undefined'){errorEl.textContent='Your browser does not support audio decoding (WebCodecs). Use Chrome, Safari, or Firefox.';errorEl.hidden=false;return;}
   var btn=document.getElementById('listen-btn');btn.disabled=true;btn.textContent='CONNECTING...';
-  try{session=new WailSession({room:room,password:password,displayName:displayName});
-    session.onUpdate=updateSessionUI;await session.start();showScreen('session');updateSessionUI();
+  try{session=new WailSession({room:room,password:password||null,displayName:displayName,serverUrl:getServerUrl()});
+    session.onUpdate=updateSessionUI;await session.start();showScreen('session');updateSessionUI();stopRoomRefresh();
   }catch(e){errorEl.textContent=e.message;errorEl.hidden=false;if(session){session.stop();session=null;}}
   finally{btn.disabled=false;btn.textContent='LISTEN';}
   try{localStorage.setItem('wail-listener',JSON.stringify({room:room,displayName:displayName}));}catch(x){}
+}
+document.getElementById('listen-btn').addEventListener('click',async function(){
+  var room=document.getElementById('room').value.trim();var password=document.getElementById('password').value;
+  await startListening(room,password);
 });
 document.getElementById('disconnect-btn').addEventListener('click',function(){
   if(session){session.stop();session=null;}showScreen('join');logEntries.length=0;logWarnings=0;logErrors=0;renderLog();
@@ -629,36 +712,41 @@ export default async function(req: Request): Promise<Response> {
       // POST ?action=join  body: { room, peer_id, password }
       // -------------------------------------------------------------------
       case "join": {
-        const { room, peer_id, password } = await req.json();
+        const { room, peer_id, password, display_name, bpm } = await req.json();
         if (!room || !peer_id) return json({ error: "room and peer_id required" }, 400);
-        if (!password) return json({ error: "password required" }, 400);
 
-        // Check or create room password
-        const pwHash = await hashPassword(password);
+        // Check or create room
         const roomRow = await sqlite.execute({
           sql: "SELECT password_hash FROM rooms WHERE room = ?",
           args: [room],
         });
         if (roomRow.rows.length === 0) {
-          // First peer creates the room
+          // First peer creates the room (public if no password)
+          const pwHash = password ? await hashPassword(password) : null;
           await sqlite.execute({
-            sql: "INSERT INTO rooms (room, password_hash) VALUES (?, ?)",
-            args: [room, pwHash],
+            sql: "INSERT INTO rooms (room, password_hash, created_at) VALUES (?, ?, ?)",
+            args: [room, pwHash, now()],
           });
         } else {
-          const storedHash = roomRow.rows[0][0] as string;
-          if (storedHash !== pwHash) {
-            return json({ error: "invalid password" }, 401);
+          const storedHash = roomRow.rows[0][0] as string | null;
+          if (storedHash !== null) {
+            // Private room — password required
+            if (!password) return json({ error: "password required" }, 401);
+            const pwHash = await hashPassword(password);
+            if (storedHash !== pwHash) {
+              return json({ error: "invalid password" }, 401);
+            }
           }
+          // Public room (storedHash === null) — no password check
         }
 
         const ts = now();
 
-        // Upsert peer
+        // Upsert peer with metadata
         await sqlite.execute({
-          sql: `INSERT INTO peers (room, peer_id, last_seen) VALUES (?, ?, ?)
-                ON CONFLICT (room, peer_id) DO UPDATE SET last_seen = ?`,
-          args: [room, peer_id, ts, ts],
+          sql: `INSERT INTO peers (room, peer_id, last_seen, display_name, bpm) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (room, peer_id) DO UPDATE SET last_seen = ?, display_name = ?, bpm = ?`,
+          args: [room, peer_id, ts, display_name || null, bpm || null, ts, display_name || null, bpm || null],
         });
 
         // Get current peers (excluding self)
@@ -760,6 +848,78 @@ export default async function(req: Request): Promise<Response> {
         }));
 
         return json({ messages });
+      }
+
+      // -------------------------------------------------------------------
+      // GET ?action=list — list public rooms
+      // -------------------------------------------------------------------
+      case "list": {
+        // Clean stale peers globally
+        const cutoff = now() - 30;
+        const stale = await sqlite.execute({
+          sql: "SELECT room, peer_id FROM peers WHERE last_seen < ?",
+          args: [cutoff],
+        });
+        for (const row of stale.rows) {
+          await sqlite.execute({
+            sql: "DELETE FROM peers WHERE room = ? AND peer_id = ?",
+            args: [row[0] as string, row[1] as string],
+          });
+        }
+        // Delete empty rooms
+        await sqlite.execute(
+          "DELETE FROM rooms WHERE room NOT IN (SELECT DISTINCT room FROM peers)",
+        );
+        // Clean old messages
+        await sqlite.execute({
+          sql: "DELETE FROM messages WHERE created_at < ?",
+          args: [now() - 60],
+        });
+
+        // Fetch public rooms with peer info
+        const listRows = await sqlite.execute(
+          `SELECT r.room, r.created_at,
+            COUNT(p.peer_id) as peer_count,
+            GROUP_CONCAT(p.display_name) as display_names,
+            AVG(p.bpm) as avg_bpm
+          FROM rooms r
+          JOIN peers p ON r.room = p.room
+          WHERE r.password_hash IS NULL
+          GROUP BY r.room
+          ORDER BY peer_count DESC, r.room ASC`,
+        );
+
+        const rooms = listRows.rows.map((r) => ({
+          room: r[0] as string,
+          created_at: r[1] as number,
+          peer_count: r[2] as number,
+          display_names: ((r[3] as string) || "").split(",").filter(Boolean),
+          bpm: r[4] as number | null,
+        }));
+
+        return json({ rooms });
+      }
+
+      // -------------------------------------------------------------------
+      // POST ?action=update  body: { room, peer_id, bpm?, display_name? }
+      // -------------------------------------------------------------------
+      case "update": {
+        const body = await req.json();
+        if (!body.room || !body.peer_id) return json({ error: "room and peer_id required" }, 400);
+
+        const sets: string[] = [];
+        const args: unknown[] = [];
+        if (body.bpm != null) { sets.push("bpm = ?"); args.push(body.bpm); }
+        if (body.display_name != null) { sets.push("display_name = ?"); args.push(body.display_name); }
+        if (sets.length === 0) return json({ ok: true });
+
+        args.push(body.room, body.peer_id);
+        await sqlite.execute({
+          sql: `UPDATE peers SET ${sets.join(", ")} WHERE room = ? AND peer_id = ?`,
+          args,
+        });
+
+        return json({ ok: true });
       }
 
       case null:

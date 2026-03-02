@@ -60,11 +60,12 @@ pub struct PeerMesh {
 impl PeerMesh {
     /// Connect to signaling server and join a room.
     /// Returns the mesh plus receivers for sync messages and audio data.
+    /// Pass `None` for `password` to create/join a public room.
     pub async fn connect(
         server_url: &str,
         room: &str,
         peer_id: &str,
-        password: &str,
+        password: Option<&str>,
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
@@ -78,7 +79,7 @@ impl PeerMesh {
         server_url: &str,
         room: &str,
         peer_id: &str,
-        password: &str,
+        password: Option<&str>,
         ice_servers: Vec<RTCIceServer>,
     ) -> Result<(
         Self,
@@ -93,7 +94,7 @@ impl PeerMesh {
         server_url: &str,
         room: &str,
         peer_id: &str,
-        password: &str,
+        password: Option<&str>,
         ice_servers: Vec<RTCIceServer>,
         poll_interval_ms: u64,
     ) -> Result<(
