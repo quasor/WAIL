@@ -52,7 +52,7 @@ jobs:
         run: cargo xtask build-plugin
 
       - name: Build Tauri app
-        run: cargo tauri build
+        run: cargo tauri build --bundles dmg
 
       - name: Collect artifacts
         run: |
@@ -138,13 +138,14 @@ jobs:
       - name: Build Tauri app
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: cargo tauri build
+        run: cargo tauri build --bundles nsis
 
       - name: Collect artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
           Copy-Item target\release\wail-app.exe dist\
+          Copy-Item target\release\wail-tauri.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
           Copy-Item target\bundled\wail-plugin.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
@@ -167,15 +168,15 @@ jobs:
       - name: Zip platform artifacts
         run: |
           cd wail-release-macos/dist && zip -r ../../wail-macos-x64.zip . && cd ../..
-          cd wail-release-windows/dist && zip -r ../../wail-windows-x64.zip . && cd ..
+          cd wail-release-windows && zip -r ../wail-windows-x64.zip . && cd ..
 
       - name: Find individual installers
         id: files
         run: |
           echo "pkg=$(ls wail-release-macos/target/wail-plugin-*-macos.pkg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
           echo "dmg=$(ls wail-release-macos/dist/*.dmg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
-          echo "nsis=$(ls wail-release-windows/dist/*.exe 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
-          echo "msi=$(ls wail-release-windows/dist/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "nsis=$(ls wail-release-windows/WAIL*.exe 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "msi=$(ls wail-release-windows/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         with:
