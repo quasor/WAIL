@@ -2,33 +2,36 @@
 
 ## What is this?
 
-WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataChannels. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. Intervalic audio (NINJAM-style) is captured, Opus-encoded, and transmitted over WebRTC DataChannels. CLAP/VST3 plugin provides DAW integration.
+WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataChannels. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. Intervalic audio (NINJAM-style) is captured, Opus-encoded, and transmitted over WebRTC DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture) and WAIL Recv (playback).
 
 ## Project Structure
 
 ```
-Cargo workspace with 5 crates:
+Cargo workspace with 6 crates:
 
 crates/
-├── wail-core/        Core sync library (no networking)
-│   ├── link.rs        Ableton Link bridge via rusty_link
-│   ├── protocol.rs    SyncMessage + SignalMessage types
-│   ├── clock.rs       NTP-like peer clock offset estimation
-│   └── interval.rs    NINJAM-style interval tracking
-├── wail-audio/       Audio encoding and intervalic ring buffer
-│   ├── codec.rs       Opus encode/decode (audiopus)
-│   ├── ring.rs        NINJAM-style interval ring buffer (record + playback)
-│   ├── interval.rs    AudioInterval type, IntervalRecorder, IntervalPlayer
-│   └── wire.rs        Binary wire format for audio over DataChannels
-├── wail-net/         Networking layer
-│   ├── lib.rs         PeerMesh: manages all WebRTC connections
-│   ├── signaling.rs   HTTP polling signaling client
-│   └── peer.rs        WebRTC peer with "sync" + "audio" DataChannels
-├── wail-plugin/      CLAP/VST3 plugin (nih-plug)
-│   ├── lib.rs         Plugin entry point, IPC thread, uses wail_audio::AudioBridge
-│   └── params.rs      Plugin parameters (bars, quantum, volume, bitrate)
-├── wail-app/         CLI binary
-│   └── main.rs        Wires Link + WebRTC + IPC together
+├── wail-core/           Core sync library (no networking)
+│   ├── link.rs           Ableton Link bridge via rusty_link
+│   ├── protocol.rs       SyncMessage + SignalMessage types
+│   ├── clock.rs          NTP-like peer clock offset estimation
+│   └── interval.rs       NINJAM-style interval tracking
+├── wail-audio/          Audio encoding and intervalic ring buffer
+│   ├── codec.rs          Opus encode/decode (audiopus)
+│   ├── ring.rs           NINJAM-style interval ring buffer (record + playback)
+│   ├── interval.rs       AudioInterval type, IntervalRecorder, IntervalPlayer
+│   └── wire.rs           Binary wire format for audio over DataChannels
+├── wail-net/            Networking layer
+│   ├── lib.rs            PeerMesh: manages all WebRTC connections
+│   ├── signaling.rs      HTTP polling signaling client
+│   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
+├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
+│   ├── lib.rs            Plugin entry point, send-only IPC thread
+│   └── params.rs         Send parameters (bars, timesig, send toggle, bitrate)
+├── wail-plugin-recv/    CLAP/VST3 receive plugin (plays remote audio)
+│   ├── lib.rs            Plugin entry point, recv-only IPC thread
+│   └── params.rs         Recv parameters (bars, timesig, receive toggle, volume)
+├── wail-app/            CLI binary
+│   └── main.rs           Wires Link + WebRTC + IPC together
 
 val-town/
 └── signaling.ts      HTTP signaling server (deployed to Val Town)
@@ -48,7 +51,7 @@ cargo test                                # run all tests
 
 # Plugin (install bundler once)
 cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
-cargo xtask build-plugin                  # → target/bundled/wail-plugin.{clap,vst3}
+cargo xtask build-plugin                  # → target/bundled/wail-plugin-{send,recv}.{clap,vst3}
 cargo xtask install-plugin                # build + install to system plugin dirs
 
 # Run (signaling via Val Town at https://wail.val.run/)
@@ -77,11 +80,11 @@ Each WAIL peer:
 6. Tracks NINJAM-style interval boundaries
 
 ### Audio Flow (Intervalic)
-NINJAM-style double-buffer pattern:
-1. Plugin captures DAW audio into record slot for current interval
-2. At interval boundary: record slot → Opus encode → WebRTC DataChannel
-3. Remote intervals are decoded and mixed into playback slot
-4. Playback slot feeds audio output to DAW
+NINJAM-style double-buffer pattern with two separate plugins:
+1. **WAIL Send** plugin captures DAW audio into record slot for current interval
+2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebRTC DataChannel
+3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
+4. Playback slot feeds audio output to DAW (main bus + 7 per-peer aux outputs)
 5. Latency = exactly 1 interval (by design, like NINJAM)
 
 Two WebRTC DataChannels per peer:
@@ -89,8 +92,8 @@ Two WebRTC DataChannels per peer:
 - **"audio"**: Binary wire-format messages (Opus-encoded intervals)
 
 ```
-DAW A → [CLAP Plugin] → record → Opus encode → DataChannel → remote peer
-                       ← play  ← Opus decode ← DataChannel ← remote peer
+DAW A → [WAIL Send] → record → Opus encode → IPC → wail-app → DataChannel → remote peer
+        [WAIL Recv] ← play  ← Opus decode  ← IPC ← wail-app ← DataChannel ← remote peer
 ```
 
 ### Wire Format (AudioWire)
@@ -127,7 +130,7 @@ cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 - **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-app/src/main.rs` select loop
 - **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
 - **Add STUN/TURN servers**: `RTCIceServer` list in `crates/wail-net/src/peer.rs`
-- **Change Opus bitrate**: Default in plugin params (`crates/wail-plugin/src/params.rs`)
+- **Change Opus bitrate**: Default in send plugin params (`crates/wail-plugin-send/src/params.rs`)
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
 - **Adjust ring buffer crossfade**: `IntervalPlayer::new()` crossfade_ms param
 

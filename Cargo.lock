@@ -5649,7 +5649,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "wail-plugin"
+name = "wail-plugin-recv"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_no_alloc",
+ "crossbeam-channel",
+ "nih_plug",
+ "tracing",
+ "wail-audio",
+]
+
+[[package]]
+name = "wail-plugin-send"
 version = "0.1.0"
 dependencies = [
  "anyhow",

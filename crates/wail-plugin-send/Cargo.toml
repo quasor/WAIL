@@ -1,8 +1,8 @@
 [package]
-name = "wail-plugin"
+name = "wail-plugin-send"
 version.workspace = true
 edition.workspace = true
-description = "WAIL CLAP/VST3 plugin - intervalic audio over WebRTC"
+description = "WAIL Send plugin - captures DAW audio for network transmission"
 
 [lib]
 crate-type = ["cdylib"]

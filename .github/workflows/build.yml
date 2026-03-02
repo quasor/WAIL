@@ -63,8 +63,10 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/wail-app dist/
-          cp -r target/bundled/wail-plugin.clap dist/
-          cp -r target/bundled/wail-plugin.vst3 dist/
+          cp -r target/bundled/wail-plugin-send.clap dist/
+          cp -r target/bundled/wail-plugin-send.vst3 dist/
+          cp -r target/bundled/wail-plugin-recv.clap dist/
+          cp -r target/bundled/wail-plugin-recv.vst3 dist/
           APP=$(find target/release/bundle -name "*.app" -maxdepth 3 2>/dev/null | head -1)
           if [ -n "$APP" ]; then cp -r "$APP" dist/; else echo "Warning: no .app bundle found"; fi
           cp target/release/bundle/dmg/*.dmg dist/ || true
@@ -148,8 +150,10 @@ jobs:
           New-Item -ItemType Directory -Force dist
           Copy-Item target\release\wail-app.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item target\bundled\wail-plugin.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
+          Copy-Item target\bundled\wail-plugin-send.clap dist\
+          Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
+          Copy-Item target\bundled\wail-plugin-recv.clap dist\
+          Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
           if (Test-Path target\release\bundle\nsis) { Copy-Item -Recurse target\release\bundle\nsis dist\nsis }
           if (Test-Path target\release\bundle\msi) { Copy-Item -Recurse target\release\bundle\msi dist\msi }
 

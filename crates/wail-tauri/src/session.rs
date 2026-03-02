@@ -193,8 +193,10 @@ async fn session_loop(
     let ipc_listener = tokio::net::TcpListener::bind(("127.0.0.1", ipc_port)).await?;
     ui_info!(&app, "IPC listening on port {ipc_port}");
 
-    let mut ipc_writer: Option<tokio::net::tcp::OwnedWriteHalf> = None;
+    let mut ipc_writers: Vec<(usize, tokio::net::tcp::OwnedWriteHalf)> = Vec::new();
+    let mut next_conn_id: usize = 0;
     let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
 
     ui_info!(&app, "Waiting for peers...");
 
@@ -234,12 +236,15 @@ async fn session_loop(
             result = ipc_listener.accept() => {
                 match result {
                     Ok((stream, addr)) => {
-                        ui_info!(&app, "Plugin connected from {addr}");
+                        let conn_id = next_conn_id;
+                        next_conn_id += 1;
+                        ui_info!(&app, "Plugin connected from {addr} (conn {conn_id})");
                         let (read_half, write_half) = stream.into_split();
-                        ipc_writer = Some(write_half);
+                        ipc_writers.push((conn_id, write_half));
                         let _ = app.emit("plugin:connected", ());
 
                         let tx = ipc_from_plugin_tx.clone();
+                        let disconnect_tx = ipc_disconnect_tx.clone();
                         let app2 = app.clone();
                         tokio::spawn(async move {
                             let mut recv_buf = IpcRecvBuffer::new();
@@ -248,7 +253,7 @@ async fn session_loop(
                             loop {
                                 match reader.read(&mut buf).await {
                                     Ok(0) => {
-                                        ui_info!(&app2, "Plugin disconnected");
+                                        ui_info!(&app2, "Plugin disconnected (conn {conn_id})");
                                         let _ = app2.emit("plugin:disconnected", ());
                                         break;
                                     }
@@ -265,12 +270,13 @@ async fn session_loop(
                                         }
                                     }
                                     Err(e) => {
-                                        ui_warn!(&app2, "Plugin IPC read error: {e}");
+                                        ui_warn!(&app2, "Plugin IPC read error (conn {conn_id}): {e}");
                                         let _ = app2.emit("plugin:disconnected", ());
                                         break;
                                     }
                                 }
                             }
+                            let _ = disconnect_tx.send(conn_id).await;
                         });
                     }
                     Err(e) => {
@@ -449,14 +455,28 @@ async fn session_loop(
                     }
                 }
 
-                if let Some(ref mut writer) = ipc_writer {
+                if !ipc_writers.is_empty() {
                     let msg = IpcMessage::encode_audio(&from, &data);
                     let frame = IpcFramer::encode_frame(&msg);
-                    if let Err(e) = writer.write_all(&frame).await {
-                        ui_warn!(&app, "Plugin IPC write failed: {e}");
-                        ipc_writer = None;
+                    let mut dead = Vec::new();
+                    for (id, writer) in &mut ipc_writers {
+                        if writer.write_all(&frame).await.is_err() {
+                            dead.push(*id);
+                        }
+                    }
+                    if !dead.is_empty() {
+                        for id in &dead {
+                            ui_warn!(&app, "Removing failed IPC writer (conn {id})");
+                        }
+                        ipc_writers.retain(|(id, _)| !dead.contains(id));
                     }
                 }
+            }
+
+            // --- IPC disconnect notification ---
+            Some(conn_id) = ipc_disconnect_rx.recv() => {
+                ipc_writers.retain(|(id, _)| *id != conn_id);
+                ui_info!(&app, "IPC connection {conn_id} removed");
             }
 
             // --- Local Link events ---
@@ -545,7 +565,7 @@ async fn session_loop(
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
-                        plugin_connected: ipc_writer.is_some(),
+                        plugin_connected: !ipc_writers.is_empty(),
                         test_tone_enabled,
                     });
                 }

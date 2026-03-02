@@ -102,23 +102,24 @@ fn main() -> Result<()> {
 
 fn build_plugin(args: &[String]) -> Result<()> {
     let release = !args.contains(&"--debug".to_string());
-    println!(
-        "Building WAIL plugin ({})...",
-        if release { "release" } else { "debug" }
-    );
-
-    let mut cmd = Command::new("cargo");
-    cmd.args(["nih-plug", "bundle", "wail-plugin"]);
-    if release {
-        cmd.arg("--release");
-    }
-    cmd.current_dir(workspace_dir());
-    run_cmd(cmd).context("cargo nih-plug bundle failed")?;
-
     let profile = if release { "release" } else { "debug" };
+
+    for plugin in &["wail-plugin-send", "wail-plugin-recv"] {
+        println!("Building {plugin} ({profile})...");
+        let mut cmd = Command::new("cargo");
+        cmd.args(["nih-plug", "bundle", plugin]);
+        if release {
+            cmd.arg("--release");
+        }
+        cmd.current_dir(workspace_dir());
+        run_cmd(cmd).with_context(|| format!("cargo nih-plug bundle {plugin} failed"))?;
+    }
+
     println!("\nPlugin bundles:");
-    println!("  target/bundled/wail-plugin.clap");
-    println!("  target/bundled/wail-plugin.vst3");
+    println!("  target/bundled/wail-plugin-send.clap");
+    println!("  target/bundled/wail-plugin-send.vst3");
+    println!("  target/bundled/wail-plugin-recv.clap");
+    println!("  target/bundled/wail-plugin-recv.vst3");
     println!("\nBuilt with profile: {profile}");
     Ok(())
 }
@@ -137,26 +138,28 @@ fn install_plugin(args: &[String]) -> Result<()> {
     }
 
     let root = workspace_dir();
-    let clap_bundle = root.join("target/bundled/wail-plugin.clap");
-    let vst3_bundle = root.join("target/bundled/wail-plugin.vst3");
-
-    for path in [&clap_bundle, &vst3_bundle] {
-        if !path.exists() {
-            bail!(
-                "{} not found — run `cargo xtask build-plugin` first",
-                path.display()
-            );
-        }
-    }
-
     let (clap_dir, vst3_dir) = plugin_dirs()?;
     fs::create_dir_all(&clap_dir)
         .with_context(|| format!("Could not create {}", clap_dir.display()))?;
     fs::create_dir_all(&vst3_dir)
         .with_context(|| format!("Could not create {}", vst3_dir.display()))?;
 
-    copy_bundle(&clap_bundle, &clap_dir)?;
-    copy_bundle(&vst3_bundle, &vst3_dir)?;
+    for plugin in &["wail-plugin-send", "wail-plugin-recv"] {
+        let clap_bundle = root.join(format!("target/bundled/{plugin}.clap"));
+        let vst3_bundle = root.join(format!("target/bundled/{plugin}.vst3"));
+
+        for path in [&clap_bundle, &vst3_bundle] {
+            if !path.exists() {
+                bail!(
+                    "{} not found — run `cargo xtask build-plugin` first",
+                    path.display()
+                );
+            }
+        }
+
+        copy_bundle(&clap_bundle, &clap_dir)?;
+        copy_bundle(&vst3_bundle, &vst3_dir)?;
+    }
 
     println!("\nDone. Rescan plugins in your DAW to pick up the changes.");
     Ok(())
@@ -176,17 +179,6 @@ fn package_plugin(args: &[String]) -> Result<()> {
         let root = workspace_dir();
         let version = cargo_version(&root)?;
 
-        let clap_src = root.join("target/bundled/wail-plugin.clap");
-        let vst3_src = root.join("target/bundled/wail-plugin.vst3");
-        for path in [&clap_src, &vst3_src] {
-            if !path.exists() {
-                bail!(
-                    "{} not found — run `cargo xtask build-plugin` first",
-                    path.display()
-                );
-            }
-        }
-
         let payload = root.join("target/pkg_payload");
         let clap_dest = payload.join("Library/Audio/Plug-Ins/CLAP");
         let vst3_dest = payload.join("Library/Audio/Plug-Ins/VST3");
@@ -195,8 +187,21 @@ fn package_plugin(args: &[String]) -> Result<()> {
         }
         fs::create_dir_all(&clap_dest)?;
         fs::create_dir_all(&vst3_dest)?;
-        copy_bundle(&clap_src, &clap_dest)?;
-        copy_bundle(&vst3_src, &vst3_dest)?;
+
+        for plugin in &["wail-plugin-send", "wail-plugin-recv"] {
+            let clap_src = root.join(format!("target/bundled/{plugin}.clap"));
+            let vst3_src = root.join(format!("target/bundled/{plugin}.vst3"));
+            for path in [&clap_src, &vst3_src] {
+                if !path.exists() {
+                    bail!(
+                        "{} not found — run `cargo xtask build-plugin` first",
+                        path.display()
+                    );
+                }
+            }
+            copy_bundle(&clap_src, &clap_dest)?;
+            copy_bundle(&vst3_src, &vst3_dest)?;
+        }
 
         let pkg_path = root.join(format!("target/wail-plugin-{version}-macos.pkg"));
         let mut pkgbuild = Command::new("pkgbuild");

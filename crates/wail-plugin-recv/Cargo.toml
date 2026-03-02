@@ -1,0 +1,16 @@
+[package]
+name = "wail-plugin-recv"
+version.workspace = true
+edition.workspace = true
+description = "WAIL Receive plugin - plays back remote peers' audio in the DAW"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wail-audio = { path = "../wail-audio" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }
+crossbeam-channel = "0.5"
+tracing.workspace = true
+anyhow.workspace = true

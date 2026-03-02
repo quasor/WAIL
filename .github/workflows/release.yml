@@ -58,8 +58,10 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/wail-app dist/
-          cp -r target/bundled/wail-plugin.clap dist/
-          cp -r target/bundled/wail-plugin.vst3 dist/
+          cp -r target/bundled/wail-plugin-send.clap dist/
+          cp -r target/bundled/wail-plugin-send.vst3 dist/
+          cp -r target/bundled/wail-plugin-recv.clap dist/
+          cp -r target/bundled/wail-plugin-recv.vst3 dist/
           cp target/release/bundle/dmg/*.dmg dist/ || true
 
       - name: Create .pkg installer
@@ -147,8 +149,10 @@ jobs:
           Copy-Item target\release\wail-app.exe dist\
           Copy-Item target\release\wail-tauri.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item target\bundled\wail-plugin.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
+          Copy-Item target\bundled\wail-plugin-send.clap dist\
+          Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
+          Copy-Item target\bundled\wail-plugin-recv.clap dist\
+          Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
           if (Test-Path target\release\bundle\nsis\*.exe) { Copy-Item target\release\bundle\nsis\*.exe dist\ }
           if (Test-Path target\release\bundle\msi\*.msi) { Copy-Item target\release\bundle\msi\*.msi dist\ }
 
