@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>WAIL Listener</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --bg-card: #16213e;
+      --fg: #e0e0e0;
+      --fg-dim: #8888a0;
+      --accent: #0f3460;
+      --accent-bright: #4e9af1;
+      --error: #e74c3c;
+      --success: #2ecc71;
+      --border: #2a2a4a;
+      --radius: 6px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--fg);
+      padding: 24px 16px;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+    }
+    #app { width: 100%; max-width: 420px; }
+    h1 { font-size: 28px; font-weight: 700; letter-spacing: 4px; margin-bottom: 4px; }
+    h2 { font-size: 18px; font-weight: 700; letter-spacing: 2px; }
+    .subtitle { color: var(--fg-dim); font-size: 11px; margin-bottom: 24px; }
+    label {
+      display: block; font-size: 11px; color: var(--fg-dim);
+      margin-top: 12px; margin-bottom: 4px;
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+    input[type="text"], input[type="password"] {
+      width: 100%; padding: 10px; background: var(--bg-card);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--fg); font-family: inherit; font-size: 14px; outline: none;
+    }
+    input:focus { border-color: var(--accent-bright); }
+    input[type="range"] { width: 100%; accent-color: var(--accent-bright); }
+    button {
+      width: 100%; padding: 12px; margin-top: 16px;
+      background: var(--accent); border: 1px solid var(--accent-bright);
+      border-radius: var(--radius); color: var(--fg); font-family: inherit;
+      font-size: 13px; font-weight: 600; cursor: pointer; letter-spacing: 1px;
+      min-height: 44px;
+    }
+    button:hover:not(:disabled) { background: var(--accent-bright); color: #fff; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    details { margin-top: 12px; }
+    summary {
+      cursor: pointer; color: var(--fg-dim); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+    .advanced-fields { padding-top: 4px; }
+    .error {
+      margin-top: 12px; padding: 8px 10px;
+      background: rgba(231,76,60,0.15); border: 1px solid var(--error);
+      border-radius: var(--radius); color: var(--error); font-size: 12px;
+    }
+    .session-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    .room-badge {
+      background: var(--accent); border: 1px solid var(--accent-bright);
+      border-radius: var(--radius); padding: 2px 10px; font-size: 12px;
+    }
+    .stat-group {
+      margin-bottom: 12px; padding: 10px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .stat-group label { margin-top: 0; margin-bottom: 4px; }
+    .stat-value { font-size: 16px; font-weight: 600; }
+    .peer-list { display: flex; flex-direction: column; gap: 4px; }
+    .peer-list .empty { color: var(--fg-dim); font-size: 12px; }
+    .peer-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 8px; background: rgba(255,255,255,0.03); border-radius: 4px;
+    }
+    .peer-name { font-weight: 600; }
+    .peer-rtt { color: var(--fg-dim); font-size: 11px; }
+    #disconnect-btn {
+      background: transparent; border-color: var(--error);
+      color: var(--error); margin-top: 20px;
+    }
+    #disconnect-btn:hover { background: var(--error); color: #fff; }
+    #log-toggle { margin-top: 16px; }
+    .log-badge {
+      background: var(--accent); border-radius: 8px;
+      padding: 1px 6px; font-size: 10px; margin-left: 4px;
+    }
+    .log-list { max-height: 200px; overflow-y: auto; margin-top: 8px; }
+    .log-entry {
+      padding: 3px 8px; font-size: 11px;
+      border-left: 2px solid var(--border); margin-bottom: 2px; word-break: break-word;
+    }
+    .log-entry.info { border-left-color: var(--accent-bright); color: var(--fg-dim); }
+    .log-entry.warn { border-left-color: #b8860b; color: #d4a843; }
+    .log-entry.error { border-left-color: var(--error); color: var(--error); }
+    .log-time { color: var(--fg-dim); margin-right: 6px; }
+    .volume-row { display: flex; align-items: center; gap: 8px; }
+    .volume-row input { flex: 1; }
+    .volume-value { font-size: 12px; color: var(--fg-dim); min-width: 32px; text-align: right; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Join Screen -->
+    <div id="join-screen">
+      <h1>WAIL</h1>
+      <p class="subtitle">listen to a session</p>
+      <label for="room">Room</label>
+      <input type="text" id="room" placeholder="room name" autocapitalize="off" autocorrect="off">
+      <label for="password">Password</label>
+      <input type="password" id="password" placeholder="room password">
+      <label for="display-name">Display Name</label>
+      <input type="text" id="display-name" placeholder="optional">
+      <details>
+        <summary>Advanced</summary>
+        <div class="advanced-fields">
+          <label for="server-url">Signaling Server</label>
+          <input type="text" id="server-url" placeholder="https://wail.val.run/">
+        </div>
+      </details>
+      <div id="join-error" class="error" hidden></div>
+      <button id="listen-btn">LISTEN</button>
+    </div>
+
+    <!-- Session Screen -->
+    <div id="session-screen" hidden>
+      <div class="session-header">
+        <h2>WAIL</h2>
+        <span class="room-badge" id="room-name"></span>
+      </div>
+      <div class="stat-group">
+        <label>Tempo</label>
+        <span class="stat-value" id="bpm-display">--</span> <span style="color:var(--fg-dim)">BPM</span>
+      </div>
+      <div class="stat-group">
+        <label>Peers</label>
+        <div class="peer-list" id="peer-list">
+          <span class="empty">waiting for peers...</span>
+        </div>
+      </div>
+      <div class="stat-group">
+        <label>Volume</label>
+        <div class="volume-row">
+          <input type="range" id="volume" min="0" max="100" value="80">
+          <span class="volume-value" id="volume-value">80%</span>
+        </div>
+      </div>
+      <div class="stat-group">
+        <label>Audio</label>
+        <span id="audio-stats">0 intervals received</span>
+      </div>
+      <button id="disconnect-btn">DISCONNECT</button>
+      <details id="log-toggle">
+        <summary>Log <span class="log-badge" id="log-badge">0</span></summary>
+        <div class="log-list" id="log-list"></div>
+      </details>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function nowUs() { return Date.now() * 1000; }
+
+function defaultSignalingUrl() {
+  if (location.hostname.includes('val')) return location.origin + location.pathname;
+  return 'https://wail.val.run/';
+}
+
+// ---------------------------------------------------------------------------
+// Log
+// ---------------------------------------------------------------------------
+
+const MAX_LOG = 200;
+const logEntries = [];
+let logWarnings = 0;
+let logErrors = 0;
+
+function log(level, msg) {
+  const time = new Date().toLocaleTimeString();
+  logEntries.push({ level, msg, time });
+  if (logEntries.length > MAX_LOG) logEntries.shift();
+  if (level === 'warn') logWarnings++;
+  if (level === 'error') logErrors++;
+  renderLog();
+  if (level === 'error') console.error('[WAIL]', msg);
+  else if (level === 'warn') console.warn('[WAIL]', msg);
+  else console.log('[WAIL]', msg);
+}
+
+function renderLog() {
+  const list = document.getElementById('log-list');
+  const badge = document.getElementById('log-badge');
+  if (!list) return;
+  list.innerHTML = logEntries.map(function(e) {
+    return '<div class="log-entry ' + e.level + '"><span class="log-time">' + e.time + '</span>' + esc(e.msg) + '</div>';
+  }).join('');
+  list.scrollTop = list.scrollHeight;
+  badge.textContent = logEntries.length;
+  badge.className = 'log-badge' +
+    (logErrors ? ' has-errors' : logWarnings ? ' has-warnings' : '');
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ---------------------------------------------------------------------------
+// WailSignaling — HTTP polling signaling client
+// ---------------------------------------------------------------------------
+
+class WailSignaling {
+  constructor(baseUrl, room, peerId, password) {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.room = room;
+    this.peerId = peerId;
+    this.password = password;
+    this.lastSeq = 0;
+    this.pollTimer = null;
+    this.pollInterval = 5000;
+    this.onMessage = null; // callback(msg)
+    this.stopped = false;
+  }
+
+  async join() {
+    const res = await fetch(this.baseUrl + '?action=join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: this.room, peer_id: this.peerId, password: this.password }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Join failed (' + res.status + ')');
+    }
+    return res.json();
+  }
+
+  startPolling() {
+    this.stopped = false;
+    this._poll();
+  }
+
+  stopPolling() {
+    this.stopped = true;
+    if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
+  }
+
+  async _poll() {
+    if (this.stopped) return;
+    try {
+      var url = this.baseUrl + '?action=poll&room=' + encodeURIComponent(this.room) + '&peer_id=' + encodeURIComponent(this.peerId) + '&after=' + this.lastSeq;
+      const res = await fetch(url);
+      if (res.status === 429) {
+        this.pollInterval = Math.min(this.pollInterval * 2, 30000);
+        log('warn', 'Rate limited, backing off to ' + this.pollInterval + 'ms');
+      } else if (res.ok) {
+        this.pollInterval = 5000;
+        const data = await res.json();
+        for (const m of data.messages || []) {
+          this.lastSeq = Math.max(this.lastSeq, m.seq);
+          if (this.onMessage) this.onMessage(m.body);
+        }
+      }
+    } catch (e) {
+      log('warn', 'Poll error: ' + e.message);
+    }
+    if (!this.stopped) {
+      this.pollTimer = setTimeout(() => this._poll(), this.pollInterval);
+    }
+  }
+
+  async signal(msg) {
+    try {
+      await fetch(this.baseUrl + '?action=signal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(msg),
+      });
+    } catch (e) {
+      log('warn', 'Signal send error: ' + e.message);
+    }
+  }
+
+  leave() {
+    this.stopPolling();
+    const body = JSON.stringify({ room: this.room, peer_id: this.peerId });
+    const blob = new Blob([body], { type: 'application/json' });
+    navigator.sendBeacon(this.baseUrl + '?action=leave', blob);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WailPeerManager — WebRTC peer mesh
+// ---------------------------------------------------------------------------
+
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+class WailPeerManager {
+  constructor(localPeerId, displayName, signaling) {
+    this.localPeerId = localPeerId;
+    this.displayName = displayName;
+    this.signaling = signaling;
+    this.peers = new Map(); // remotePeerId -> { pc, dcSync, dcAudio, displayName, remoteDescSet, pendingCandidates }
+    this.onSyncMessage = null;  // (peerId, msg) => {}
+    this.onAudioData = null;    // (peerId, ArrayBuffer) => {}
+    this.onPeerConnected = null;  // (peerId) => {}
+    this.onPeerDisconnected = null; // (peerId) => {}
+
+    signaling.onMessage = (msg) => this._handleSignalingMessage(msg);
+  }
+
+  _handleSignalingMessage(msg) {
+    switch (msg.type) {
+      case 'PeerJoined':
+        log('info', 'Peer joined: ' + msg.peer_id);
+        this._evaluateConnection(msg.peer_id);
+        break;
+      case 'PeerLeft':
+        log('info', 'Peer left: ' + msg.peer_id);
+        this._removePeer(msg.peer_id);
+        break;
+      case 'Signal':
+        this._handleSignal(msg.from, msg.payload);
+        break;
+    }
+  }
+
+  handleInitialPeers(peerIds) {
+    for (const pid of peerIds) {
+      this._evaluateConnection(pid);
+    }
+  }
+
+  _evaluateConnection(remotePeerId) {
+    if (this.peers.has(remotePeerId)) return;
+    // Tie-breaking: lower peer_id initiates
+    if (this.localPeerId < remotePeerId) {
+      this._initiateConnection(remotePeerId);
+    }
+    // else: wait for the remote peer to send us an offer
+  }
+
+  async _initiateConnection(remotePeerId) {
+    log('info', 'Initiating connection to ' + remotePeerId.slice(0,8) + '...');
+    const peer = this._createPeer(remotePeerId);
+
+    // Create DataChannels before creating offer
+    const dcSync = peer.pc.createDataChannel('sync');
+    const dcAudio = peer.pc.createDataChannel('audio');
+    dcAudio.binaryType = 'arraybuffer';
+    peer.dcSync = dcSync;
+    peer.dcAudio = dcAudio;
+    this._setupSyncChannel(dcSync, remotePeerId);
+    this._setupAudioChannel(dcAudio, remotePeerId);
+
+    try {
+      const offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      this.signaling.signal({
+        type: 'Signal', to: remotePeerId, from: this.localPeerId,
+        payload: { kind: 'Offer', sdp: offer.sdp },
+      });
+    } catch (e) {
+      log('error', 'Failed to create offer for ' + remotePeerId.slice(0,8) + ': ' + e.message);
+    }
+  }
+
+  async _handleSignal(fromId, payload) {
+    switch (payload.kind) {
+      case 'Offer': {
+        log('info', 'Received offer from ' + fromId.slice(0,8) + '...');
+        let peer = this.peers.get(fromId);
+        if (!peer) peer = this._createPeer(fromId);
+
+        // Set up ondatachannel for responder
+        peer.pc.ondatachannel = (event) => {
+          const dc = event.channel;
+          if (dc.label === 'sync') {
+            peer.dcSync = dc;
+            this._setupSyncChannel(dc, fromId);
+          } else if (dc.label === 'audio') {
+            dc.binaryType = 'arraybuffer';
+            peer.dcAudio = dc;
+            this._setupAudioChannel(dc, fromId);
+          }
+        };
+
+        try {
+          await peer.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: payload.sdp }));
+          peer.remoteDescSet = true;
+          for (const c of peer.pendingCandidates) {
+            await peer.pc.addIceCandidate(c);
+          }
+          peer.pendingCandidates = [];
+
+          const answer = await peer.pc.createAnswer();
+          await peer.pc.setLocalDescription(answer);
+          this.signaling.signal({
+            type: 'Signal', to: fromId, from: this.localPeerId,
+            payload: { kind: 'Answer', sdp: answer.sdp },
+          });
+        } catch (e) {
+          log('error', 'Failed to handle offer from ' + fromId.slice(0,8) + ': ' + e.message);
+        }
+        break;
+      }
+      case 'Answer': {
+        const peer = this.peers.get(fromId);
+        if (!peer) { log('warn', 'Answer from unknown peer ' + fromId.slice(0,8)); return; }
+        try {
+          await peer.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: payload.sdp }));
+          peer.remoteDescSet = true;
+          for (const c of peer.pendingCandidates) {
+            await peer.pc.addIceCandidate(c);
+          }
+          peer.pendingCandidates = [];
+        } catch (e) {
+          log('error', 'Failed to handle answer from ' + fromId.slice(0,8) + ': ' + e.message);
+        }
+        break;
+      }
+      case 'IceCandidate': {
+        let peer = this.peers.get(fromId);
+        if (!peer) { peer = this._createPeer(fromId); }
+        const candidate = new RTCIceCandidate({
+          candidate: payload.candidate,
+          sdpMid: payload.sdp_mid,
+          sdpMLineIndex: payload.sdp_mline_index,
+        });
+        if (peer.remoteDescSet) {
+          try { await peer.pc.addIceCandidate(candidate); }
+          catch (e) { log('warn', 'Failed to add ICE candidate: ' + e.message); }
+        } else {
+          peer.pendingCandidates.push(candidate);
+        }
+        break;
+      }
+    }
+  }
+
+  _createPeer(remotePeerId) {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const peer = {
+      pc, dcSync: null, dcAudio: null,
+      displayName: null, remoteDescSet: false, pendingCandidates: [],
+    };
+    this.peers.set(remotePeerId, peer);
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        this.signaling.signal({
+          type: 'Signal', to: remotePeerId, from: this.localPeerId,
+          payload: {
+            kind: 'IceCandidate',
+            candidate: event.candidate.candidate,
+            sdp_mid: event.candidate.sdpMid,
+            sdp_mline_index: event.candidate.sdpMLineIndex,
+          },
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      log('info', 'Peer ' + remotePeerId.slice(0,8) + ' connection: ' + pc.connectionState);
+      if (pc.connectionState === 'connected' && this.onPeerConnected) {
+        this.onPeerConnected(remotePeerId);
+      }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        log('warn', 'Peer ' + remotePeerId.slice(0,8) + ' ' + pc.connectionState);
+      }
+    };
+
+    return peer;
+  }
+
+  _setupSyncChannel(dc, remotePeerId) {
+    dc.onopen = () => {
+      log('info', 'Sync channel open with ' + remotePeerId.slice(0,8));
+      // Send Hello
+      dc.send(JSON.stringify({
+        type: 'Hello',
+        peer_id: this.localPeerId,
+        display_name: this.displayName || null,
+      }));
+      // Send AudioCapabilities (listen-only)
+      dc.send(JSON.stringify({
+        type: 'AudioCapabilities',
+        sample_rates: [48000],
+        channel_counts: [1, 2],
+        can_send: false,
+        can_receive: true,
+      }));
+    };
+    dc.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (this.onSyncMessage) this.onSyncMessage(remotePeerId, msg);
+      } catch (e) {
+        log('warn', 'Failed to parse sync message: ' + e.message);
+      }
+    };
+  }
+
+  _setupAudioChannel(dc, remotePeerId) {
+    dc.binaryType = 'arraybuffer';
+    dc.onopen = () => { log('info', 'Audio channel open with ' + remotePeerId.slice(0,8)); };
+    dc.onmessage = (event) => {
+      if (this.onAudioData) this.onAudioData(remotePeerId, event.data);
+    };
+  }
+
+  sendSync(remotePeerId, msg) {
+    const peer = this.peers.get(remotePeerId);
+    if (peer && peer.dcSync && peer.dcSync.readyState === 'open') {
+      peer.dcSync.send(JSON.stringify(msg));
+    }
+  }
+
+  _removePeer(remotePeerId) {
+    const peer = this.peers.get(remotePeerId);
+    if (peer) {
+      peer.pc.close();
+      this.peers.delete(remotePeerId);
+      if (this.onPeerDisconnected) this.onPeerDisconnected(remotePeerId);
+    }
+  }
+
+  closeAll() {
+    for (const [id, peer] of this.peers) {
+      peer.pc.close();
+    }
+    this.peers.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WailWireParser — WAIL binary wire format + WACH chunk reassembly
+// ---------------------------------------------------------------------------
+
+const WACH_MAGIC = 0x48434157; // "WACH" as u32 LE
+const WAIL_HEADER_SIZE = 48;
+
+class WailWireParser {
+  constructor(onInterval) {
+    this.onInterval = onInterval; // (peerId, parsed) => {}
+    this.reassembly = new Map();  // peerId -> { buffer, expectedLen }
+  }
+
+  handleAudioData(peerId, data) {
+    const bytes = new Uint8Array(data);
+
+    // Check for WACH chunk header
+    if (bytes.length >= 8) {
+      const view = new DataView(data);
+      const magic = view.getUint32(0, true);
+      if (magic === WACH_MAGIC) {
+        const totalLen = view.getUint32(4, true);
+        const payload = bytes.slice(8);
+
+        let state = this.reassembly.get(peerId);
+        if (!state || state.expectedLen !== totalLen) {
+          state = { chunks: [], receivedLen: 0, expectedLen: totalLen };
+          this.reassembly.set(peerId, state);
+        }
+        state.chunks.push(payload);
+        state.receivedLen += payload.length;
+
+        if (state.receivedLen >= state.expectedLen) {
+          // Reassemble
+          const complete = new Uint8Array(state.receivedLen);
+          let offset = 0;
+          for (const chunk of state.chunks) {
+            complete.set(chunk, offset);
+            offset += chunk.length;
+          }
+          this.reassembly.delete(peerId);
+          this._parseWire(peerId, complete.buffer);
+        }
+        return;
+      }
+    }
+
+    // Non-chunked message
+    this._parseWire(peerId, data);
+  }
+
+  _parseWire(peerId, data) {
+    const bytes = new Uint8Array(data);
+    if (bytes.length < WAIL_HEADER_SIZE) {
+      log('warn', 'Wire data too short: ' + bytes.length + ' bytes');
+      return;
+    }
+
+    // Check magic "WAIL"
+    if (bytes[0] !== 0x57 || bytes[1] !== 0x41 || bytes[2] !== 0x49 || bytes[3] !== 0x4C) {
+      log('warn', 'Invalid wire magic');
+      return;
+    }
+
+    const version = bytes[4];
+    if (version !== 1) { log('warn', 'Unsupported wire version: ' + version); return; }
+
+    const view = new DataView(data);
+    const flags = bytes[5];
+    const channels = (flags & 1) ? 2 : 1;
+    // bytes 8-15: interval_index (i64 LE) — read low 32 bits (safe for practical indices)
+    const indexLow = view.getUint32(8, true);
+    const indexHigh = view.getInt32(12, true);
+    const index = indexHigh * 0x100000000 + indexLow;
+    const sampleRate = view.getUint32(16, true);
+    const numFrames = view.getUint32(20, true);
+    const bpm = view.getFloat64(24, true);
+    const quantum = view.getFloat64(32, true);
+    const bars = view.getUint32(40, true);
+    const opusDataLen = view.getUint32(44, true);
+
+    if (bytes.length < WAIL_HEADER_SIZE + opusDataLen) {
+      log('warn', 'Wire data truncated: need ' + opusDataLen + ' opus bytes, have ' + (bytes.length - WAIL_HEADER_SIZE));
+      return;
+    }
+
+    const opusData = new Uint8Array(data, WAIL_HEADER_SIZE, opusDataLen);
+
+    this.onInterval(peerId, { index, sampleRate, channels, numFrames, bpm, quantum, bars, opusData });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WailAudioPlayer — Opus decode (WebCodecs) + Web Audio playback
+// ---------------------------------------------------------------------------
+
+function makeOpusDescription(channels, sampleRate) {
+  const head = new Uint8Array(19);
+  const view = new DataView(head.buffer);
+  head.set([0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64]); // "OpusHead"
+  head[8] = 1;                         // version
+  head[9] = channels;                  // channel count
+  view.setUint16(10, 3840, true);      // pre-skip
+  view.setUint32(12, sampleRate, true); // input sample rate
+  view.setUint16(16, 0, true);         // output gain
+  head[18] = 0;                        // channel mapping family
+  return head;
+}
+
+class WailAudioPlayer {
+  constructor() {
+    this.audioCtx = null;
+    this.gainNode = null;
+    this.peerPlayTimes = new Map(); // peerId -> next scheduled time
+    this.intervalsReceived = 0;
+    this.decoderCache = new Map(); // "rate-ch" -> AudioDecoder
+  }
+
+  init() {
+    this.audioCtx = new AudioContext({ sampleRate: 48000 });
+    this.gainNode = this.audioCtx.createGain();
+    this.gainNode.connect(this.audioCtx.destination);
+    this.setVolume(80);
+    log('info', 'AudioContext created (state: ' + this.audioCtx.state + ', rate: ' + this.audioCtx.sampleRate + ')');
+  }
+
+  setVolume(pct) {
+    if (this.gainNode) {
+      this.gainNode.gain.value = pct / 100;
+    }
+  }
+
+  async resume() {
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      await this.audioCtx.resume();
+    }
+  }
+
+  async decodeAndPlay(peerId, interval) {
+    if (!this.audioCtx) return;
+    await this.resume();
+
+    const { opusData, sampleRate, channels } = interval;
+
+    // Parse Opus framing: [u32 numFrames][u16 len][packet]...
+    if (opusData.byteLength < 4) { log('warn', 'Opus data too short'); return; }
+    const opusView = new DataView(opusData.buffer, opusData.byteOffset, opusData.byteLength);
+    const numOpusFrames = opusView.getUint32(0, true);
+    const packets = [];
+    let offset = 4;
+    for (let i = 0; i < numOpusFrames; i++) {
+      if (offset + 2 > opusData.byteLength) break;
+      const pktLen = opusView.getUint16(offset, true);
+      offset += 2;
+      if (offset + pktLen > opusData.byteLength) break;
+      packets.push(opusData.slice(offset, offset + pktLen));
+      offset += pktLen;
+    }
+
+    if (packets.length === 0) return;
+
+    // Decode using WebCodecs
+    try {
+      const channelBuffers = await this._decodePackets(packets, sampleRate, channels);
+      if (channelBuffers && channelBuffers[0].length > 0) {
+        this._schedulePlayback(peerId, channelBuffers, sampleRate);
+        this.intervalsReceived++;
+      }
+    } catch (e) {
+      log('error', 'Decode failed: ' + e.message);
+    }
+  }
+
+  _decodePackets(packets, sampleRate, channels) {
+    return new Promise((resolve, reject) => {
+      const channelChunks = Array.from({ length: channels }, () => []);
+      let decoded = 0;
+      let errored = false;
+
+      const decoder = new AudioDecoder({
+        output(audioData) {
+          try {
+            for (let ch = 0; ch < audioData.numberOfChannels; ch++) {
+              const buf = new Float32Array(audioData.numberOfFrames);
+              audioData.copyTo(buf, { planeIndex: ch });
+              if (ch < channels) channelChunks[ch].push(buf);
+            }
+          } finally {
+            audioData.close();
+          }
+          decoded++;
+        },
+        error(e) {
+          if (!errored) { errored = true; reject(e); }
+        },
+      });
+
+      decoder.configure({
+        codec: 'opus',
+        sampleRate: sampleRate,
+        numberOfChannels: channels,
+        description: makeOpusDescription(channels, sampleRate),
+      });
+
+      let timestamp = 0;
+      for (const pkt of packets) {
+        decoder.decode(new EncodedAudioChunk({
+          type: 'key',
+          timestamp,
+          data: pkt,
+        }));
+        timestamp += 20000; // 20ms in microseconds
+      }
+
+      decoder.flush().then(() => {
+        decoder.close();
+        // Concatenate chunks per channel
+        const result = channelChunks.map(chunks => {
+          const total = chunks.reduce((sum, c) => sum + c.length, 0);
+          const buf = new Float32Array(total);
+          let off = 0;
+          for (const chunk of chunks) { buf.set(chunk, off); off += chunk.length; }
+          return buf;
+        });
+        resolve(result);
+      }).catch(reject);
+    });
+  }
+
+  _schedulePlayback(peerId, channelBuffers, sampleRate) {
+    const numChannels = channelBuffers.length;
+    const numSamples = channelBuffers[0].length;
+    if (numSamples === 0) return;
+
+    const audioBuffer = this.audioCtx.createBuffer(numChannels, numSamples, sampleRate);
+    for (let ch = 0; ch < numChannels; ch++) {
+      audioBuffer.getChannelData(ch).set(channelBuffers[ch]);
+    }
+
+    const source = this.audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.gainNode);
+
+    const now = this.audioCtx.currentTime;
+    let playTime = this.peerPlayTimes.get(peerId) || 0;
+    if (playTime <= now) {
+      playTime = now + 0.05; // 50ms buffer to avoid click
+    }
+    source.start(playTime);
+    this.peerPlayTimes.set(peerId, playTime + audioBuffer.duration);
+  }
+
+  removePeer(peerId) {
+    this.peerPlayTimes.delete(peerId);
+  }
+
+  close() {
+    this.decoderCache.forEach(d => { try { d.close(); } catch {} });
+    this.decoderCache.clear();
+    if (this.audioCtx) {
+      this.audioCtx.close();
+      this.audioCtx = null;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WailSession — orchestrates everything
+// ---------------------------------------------------------------------------
+
+class WailSession {
+  constructor(config) {
+    this.room = config.room;
+    this.password = config.password;
+    this.displayName = config.displayName;
+    this.serverUrl = config.serverUrl || defaultSignalingUrl();
+    this.peerId = crypto.randomUUID();
+
+    this.signaling = null;
+    this.peerManager = null;
+    this.wireParser = null;
+    this.audioPlayer = null;
+
+    this.bpm = null;
+    this.peerInfo = new Map(); // peerId -> { displayName, rtt }
+    this.onUpdate = null; // () => {} — UI refresh callback
+  }
+
+  async start() {
+    // AudioContext must be created within user gesture
+    this.audioPlayer = new WailAudioPlayer();
+    this.audioPlayer.init();
+
+    this.signaling = new WailSignaling(this.serverUrl, this.room, this.peerId, this.password);
+
+    this.wireParser = new WailWireParser((peerId, interval) => {
+      if (this.bpm === null || Math.abs(this.bpm - interval.bpm) > 0.01) {
+        this.bpm = interval.bpm;
+      }
+      this.audioPlayer.decodeAndPlay(peerId, interval);
+      if (this.onUpdate) this.onUpdate();
+    });
+
+    this.peerManager = new WailPeerManager(this.peerId, this.displayName, this.signaling);
+
+    this.peerManager.onSyncMessage = (peerId, msg) => this._handleSync(peerId, msg);
+    this.peerManager.onAudioData = (peerId, data) => this.wireParser.handleAudioData(peerId, data);
+    this.peerManager.onPeerDisconnected = (peerId) => {
+      this.peerInfo.delete(peerId);
+      this.audioPlayer.removePeer(peerId);
+      if (this.onUpdate) this.onUpdate();
+    };
+
+    // Join room
+    log('info', 'Joining room "' + this.room + '" as ' + this.peerId.slice(0,8) + '...');
+    const { peers } = await this.signaling.join();
+    log('info', 'Joined room. ' + peers.length + ' peer(s) present.');
+
+    // Start polling
+    this.signaling.startPolling();
+
+    // Handle initial peer list
+    this.peerManager.handleInitialPeers(peers);
+
+    // Clean leave on page unload
+    window.addEventListener('beforeunload', () => this.signaling.leave());
+
+    if (this.onUpdate) this.onUpdate();
+  }
+
+  _handleSync(peerId, msg) {
+    switch (msg.type) {
+      case 'Hello': {
+        const name = msg.display_name || msg.peer_id.slice(0, 8);
+        log('info', 'Hello from ' + name);
+        if (!this.peerInfo.has(peerId)) this.peerInfo.set(peerId, {});
+        this.peerInfo.get(peerId).displayName = name;
+        if (this.onUpdate) this.onUpdate();
+        break;
+      }
+      case 'Ping': {
+        // Respond with Pong
+        this.peerManager.sendSync(peerId, {
+          type: 'Pong',
+          id: msg.id,
+          ping_sent_at_us: msg.sent_at_us,
+          pong_sent_at_us: nowUs(),
+        });
+        break;
+      }
+      case 'Pong': {
+        const rtt = (nowUs() - msg.ping_sent_at_us) / 1000; // ms
+        if (!this.peerInfo.has(peerId)) this.peerInfo.set(peerId, {});
+        this.peerInfo.get(peerId).rtt = Math.round(rtt);
+        if (this.onUpdate) this.onUpdate();
+        break;
+      }
+      case 'TempoChange': {
+        this.bpm = msg.bpm;
+        if (this.onUpdate) this.onUpdate();
+        break;
+      }
+      case 'StateSnapshot': {
+        this.bpm = msg.bpm;
+        if (this.onUpdate) this.onUpdate();
+        break;
+      }
+      case 'IntervalConfig':
+      case 'IntervalBoundary':
+      case 'AudioCapabilities':
+      case 'AudioIntervalReady':
+        break; // acknowledged, no action needed for listener
+      default:
+        log('info', 'Unknown sync message type: ' + msg.type);
+    }
+  }
+
+  setVolume(pct) {
+    if (this.audioPlayer) this.audioPlayer.setVolume(pct);
+  }
+
+  stop() {
+    if (this.signaling) this.signaling.leave();
+    if (this.peerManager) this.peerManager.closeAll();
+    if (this.audioPlayer) this.audioPlayer.close();
+    this.peerInfo.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI Controller
+// ---------------------------------------------------------------------------
+
+let session = null;
+
+function showScreen(id) {
+  document.getElementById('join-screen').hidden = (id !== 'join');
+  document.getElementById('session-screen').hidden = (id !== 'session');
+}
+
+function updateSessionUI() {
+  if (!session) return;
+
+  // BPM
+  const bpmEl = document.getElementById('bpm-display');
+  bpmEl.textContent = session.bpm !== null ? session.bpm.toFixed(1) : '--';
+
+  // Room name
+  document.getElementById('room-name').textContent = session.room;
+
+  // Peer list
+  const listEl = document.getElementById('peer-list');
+  if (session.peerInfo.size === 0) {
+    listEl.innerHTML = '<span class="empty">waiting for peers...</span>';
+  } else {
+    listEl.innerHTML = '';
+    for (const [pid, info] of session.peerInfo) {
+      const div = document.createElement('div');
+      div.className = 'peer-item';
+      const name = info.displayName || pid.slice(0, 8);
+      const rtt = info.rtt != null ? info.rtt + 'ms' : '...';
+      div.innerHTML = '<span class="peer-name">' + esc(name) + '</span><span class="peer-rtt">' + rtt + '</span>';
+      listEl.appendChild(div);
+    }
+  }
+
+  // Audio stats
+  const statsEl = document.getElementById('audio-stats');
+  const count = session.audioPlayer ? session.audioPlayer.intervalsReceived : 0;
+  statsEl.textContent = count + ' interval' + (count !== 1 ? 's' : '') + ' received';
+}
+
+// Listen button
+document.getElementById('listen-btn').addEventListener('click', async () => {
+  const room = document.getElementById('room').value.trim();
+  const password = document.getElementById('password').value;
+  const displayName = document.getElementById('display-name').value.trim();
+  const serverUrl = document.getElementById('server-url').value.trim();
+  const errorEl = document.getElementById('join-error');
+  errorEl.hidden = true;
+
+  if (!room) { errorEl.textContent = 'Room name is required'; errorEl.hidden = false; return; }
+  if (!password) { errorEl.textContent = 'Password is required'; errorEl.hidden = false; return; }
+
+  // Check WebCodecs support
+  if (typeof AudioDecoder === 'undefined') {
+    errorEl.textContent = 'Your browser does not support audio decoding (WebCodecs). Use Chrome, Safari, or Firefox.';
+    errorEl.hidden = false;
+    return;
+  }
+
+  const btn = document.getElementById('listen-btn');
+  btn.disabled = true;
+  btn.textContent = 'CONNECTING...';
+
+  try {
+    session = new WailSession({ room, password, displayName, serverUrl: serverUrl || undefined });
+    session.onUpdate = updateSessionUI;
+    await session.start();
+    showScreen('session');
+    updateSessionUI();
+  } catch (e) {
+    errorEl.textContent = e.message;
+    errorEl.hidden = false;
+    if (session) { session.stop(); session = null; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'LISTEN';
+  }
+});
+
+// Disconnect button
+document.getElementById('disconnect-btn').addEventListener('click', () => {
+  if (session) { session.stop(); session = null; }
+  showScreen('join');
+  logEntries.length = 0;
+  logWarnings = 0;
+  logErrors = 0;
+  renderLog();
+});
+
+// Volume slider
+document.getElementById('volume').addEventListener('input', (e) => {
+  const pct = parseInt(e.target.value, 10);
+  document.getElementById('volume-value').textContent = pct + '%';
+  if (session) session.setVolume(pct);
+});
+
+// Restore saved form values
+try {
+  const saved = JSON.parse(localStorage.getItem('wail-listener') || '{}');
+  if (saved.room) document.getElementById('room').value = saved.room;
+  if (saved.displayName) document.getElementById('display-name').value = saved.displayName;
+  if (saved.serverUrl) document.getElementById('server-url').value = saved.serverUrl;
+} catch {}
+
+// Save form values on submit
+function saveForm() {
+  try {
+    localStorage.setItem('wail-listener', JSON.stringify({
+      room: document.getElementById('room').value,
+      displayName: document.getElementById('display-name').value,
+      serverUrl: document.getElementById('server-url').value,
+    }));
+  } catch {}
+}
+document.getElementById('listen-btn').addEventListener('click', saveForm);
+
+// ---------------------------------------------------------------------------
+// Self-test mode (?test)
+// ---------------------------------------------------------------------------
+
+if (location.search.includes('test')) {
+  (function runTests() {
+    let passed = 0;
+    let failed = 0;
+
+    function assert(cond, msg) {
+      if (cond) { passed++; }
+      else { failed++; console.error('FAIL:', msg); }
+    }
+
+    // Test WAIL wire format parsing
+    const wire = new Uint8Array(53); // 48 header + 5 opus data
+    const wv = new DataView(wire.buffer);
+    wire.set([0x57, 0x41, 0x49, 0x4C]); // magic "WAIL"
+    wire[4] = 1; // version
+    wire[5] = 1; // flags: stereo
+    wv.setInt32(8, 42, true); wv.setInt32(12, 0, true); // index = 42
+    wv.setUint32(16, 48000, true); // sample_rate
+    wv.setUint32(20, 96000, true); // num_frames
+    wv.setFloat64(24, 120.0, true); // bpm
+    wv.setFloat64(32, 4.0, true);  // quantum
+    wv.setUint32(40, 4, true);     // bars
+    wv.setUint32(44, 5, true);     // opus_data_len
+    wire.set([1, 2, 3, 4, 5], 48);
+
+    let parsedInterval = null;
+    const parser = new WailWireParser((pid, interval) => { parsedInterval = interval; });
+    parser._parseWire('test', wire.buffer);
+
+    assert(parsedInterval !== null, 'Should parse wire format');
+    assert(parsedInterval.index === 42, 'index should be 42, got ' + parsedInterval.index);
+    assert(parsedInterval.sampleRate === 48000, 'sampleRate should be 48000');
+    assert(parsedInterval.channels === 2, 'channels should be 2 (stereo)');
+    assert(parsedInterval.numFrames === 96000, 'numFrames should be 96000');
+    assert(Math.abs(parsedInterval.bpm - 120.0) < 0.001, 'bpm should be 120.0');
+    assert(Math.abs(parsedInterval.quantum - 4.0) < 0.001, 'quantum should be 4.0');
+    assert(parsedInterval.bars === 4, 'bars should be 4');
+    assert(parsedInterval.opusData.length === 5, 'opus data length should be 5');
+
+    // Test mono flag
+    const monoWire = new Uint8Array(48);
+    const mv = new DataView(monoWire.buffer);
+    monoWire.set([0x57, 0x41, 0x49, 0x4C]);
+    monoWire[4] = 1;
+    monoWire[5] = 0; // mono
+    mv.setUint32(44, 0, true); // no opus data
+    let monoInterval = null;
+    const monoParser = new WailWireParser((pid, interval) => { monoInterval = interval; });
+    monoParser._parseWire('test', monoWire.buffer);
+    assert(monoInterval && monoInterval.channels === 1, 'Should parse mono flag');
+
+    // Test WACH chunk reassembly
+    let reassembledInterval = null;
+    const chunkParser = new WailWireParser((pid, interval) => { reassembledInterval = interval; });
+
+    // Create a WAIL message and split into WACH chunks
+    const fullData = wire; // reuse the 53-byte wire from above
+    const totalLen = fullData.length;
+
+    // Chunk 1: first 30 bytes of payload
+    const chunk1 = new Uint8Array(8 + 30);
+    const c1v = new DataView(chunk1.buffer);
+    c1v.setUint32(0, 0x48434157, true); // WACH magic LE
+    c1v.setUint32(4, totalLen, true);
+    chunk1.set(fullData.slice(0, 30), 8);
+
+    // Chunk 2: remaining bytes
+    const remaining = totalLen - 30;
+    const chunk2 = new Uint8Array(8 + remaining);
+    const c2v = new DataView(chunk2.buffer);
+    c2v.setUint32(0, 0x48434157, true);
+    c2v.setUint32(4, totalLen, true);
+    chunk2.set(fullData.slice(30), 8);
+
+    chunkParser.handleAudioData('peer1', chunk1.buffer);
+    assert(reassembledInterval === null, 'Should not resolve after first chunk');
+    chunkParser.handleAudioData('peer1', chunk2.buffer);
+    assert(reassembledInterval !== null, 'Should resolve after second chunk');
+    assert(reassembledInterval.index === 42, 'Reassembled index should be 42');
+
+    console.log('\n=== WAIL Listener Tests: ' + passed + ' passed, ' + failed + ' failed ===');
+    document.title = failed === 0 ? 'TESTS PASSED' : 'TESTS FAILED (' + failed + ')';
+  })();
+}
+</script>
+</body>
+</html>
