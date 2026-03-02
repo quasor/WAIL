@@ -48,7 +48,7 @@ pub fn join_room(
     server: String,
     room: String,
     password: Option<String>,
-    display_name: Option<String>,
+    display_name: String,
     bpm: Option<f64>,
     bars: Option<u32>,
     quantum: Option<f64>,

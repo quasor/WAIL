@@ -57,7 +57,7 @@ pub struct SessionConfig {
     pub server: String,
     pub room: String,
     pub password: Option<String>,
-    pub display_name: Option<String>,
+    pub display_name: String,
     pub bpm: f64,
     pub bars: u32,
     pub quantum: f64,
@@ -111,8 +111,7 @@ async fn session_loop(
         turn_credential,
     } = config;
 
-    let name_str = display_name.as_deref().unwrap_or("(anonymous)");
-    ui_info!(&app, "Starting peer {peer_id} as {name_str} in room {room} (BPM {bpm}, {bars} bars, quantum {quantum})");
+    ui_info!(&app, "Starting peer {peer_id} as {display_name} in room {room} (BPM {bpm}, {bars} bars, quantum {quantum})");
 
     // Initialize Ableton Link
     let link = LinkBridge::new(bpm, quantum);
@@ -308,7 +307,7 @@ async fn session_loop(
                             display_name: None,
                         });
 
-                        let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: display_name.clone() };
+                        let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: Some(display_name.clone()) };
                         mesh.broadcast(&hello).await;
                         // Mark all connected peers as having been sent Hello
                         // (messages are queued if DataChannel isn't open yet)
@@ -359,7 +358,7 @@ async fn session_loop(
                         if hello_sent.insert(from.clone()) {
                             let reply = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
-                                display_name: display_name.clone(),
+                                display_name: Some(display_name.clone()),
                             };
                             if let Err(e) = mesh.send_to(&from, &reply).await {
                                 debug!(peer = %from, error = %e, "Failed to send Hello reply");

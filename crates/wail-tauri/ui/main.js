@@ -138,7 +138,7 @@ async function joinPublicRoom(room) {
     server: document.getElementById('server').value,
     room: room,
     password: null,
-    displayName: document.getElementById('display-name').value || null,
+    displayName: document.getElementById('display-name').value,
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
@@ -148,6 +148,10 @@ async function joinPublicRoom(room) {
     turnUsername: document.getElementById('turn-username').value || null,
     turnCredential: document.getElementById('turn-credential').value || null,
   };
+  if (!params.displayName.trim()) {
+    showError(joinError, 'Display name is required');
+    return;
+  }
   try {
     const result = await invoke('join_room', params);
     saveSettings();
@@ -213,7 +217,7 @@ joinForm.addEventListener('submit', async (e) => {
     server: document.getElementById('server').value,
     room: document.getElementById('room').value,
     password: document.getElementById('password').value || null,
-    displayName: document.getElementById('display-name').value || null,
+    displayName: document.getElementById('display-name').value,
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
