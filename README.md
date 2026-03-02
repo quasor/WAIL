@@ -10,6 +10,8 @@ Download the latest release from the [Releases page](https://github.com/quasor/W
 
 **Windows** — Run the NSIS installer. Plugins are bundled as CLAP and VST3 files — copy them to your DAW's plugin directory.
 
+> **Important:** Enable Ableton Link in your DAW before using WAIL. In Ableton Live, go to Preferences > Link, Tempo, MIDI and turn on "Show Link Toggle" then enable Link. Other DAWs have similar settings — check your DAW's documentation for Link support.
+
 ## Components
 
 WAIL has three components that work together:
@@ -19,6 +21,12 @@ WAIL has three components that work together:
 - **WAIL Send** (CLAP/VST3 plugin) — Place this on a track or bus in your DAW to capture audio. At each interval boundary, the recorded audio is Opus-encoded and sent to all connected peers via the WAIL app.
 
 - **WAIL Recv** (CLAP/VST3 plugin) — Place this on a track in your DAW to hear remote peers. It receives and decodes incoming audio intervals, mixing them into the main output with additional per-peer auxiliary outputs.
+
+## Troubleshooting
+
+**No sync / peers not connecting** — Make sure Ableton Link is enabled in your DAW. WAIL relies on Link for tempo and phase sync. In Ableton Live: Preferences > Link, Tempo, MIDI > enable Link. In Bitwig: Settings > Synchronization > enable Link.
+
+**No audio from remote peers** — Verify that both WAIL Send and WAIL Recv plugins are loaded and the WAIL app is running and connected to the same room.
 
 ## How it works
 
