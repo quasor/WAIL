@@ -13,11 +13,10 @@ const HELP: &str = "\
 cargo xtask <TASK> [OPTIONS]
 
 TASKS:
-  install         Build, install plugins + wail-app CLI to PATH (full setup)
+  install         Build and install plugins to system plugin directories
   build-plugin    Build the CLAP and VST3 plugin bundles
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
-  run-peer        Start a WAIL peer and join a room
   run-tauri       Run the Tauri desktop app in dev mode
   build-tauri     Build plugins, then build the Tauri distributable
   run-turn        Start a local coturn TURN server
@@ -34,16 +33,6 @@ OPTIONS (install-plugin):
 OPTIONS (package-plugin):
   --no-build      Skip the build step; package existing bundles
 
-OPTIONS (run-peer): all flags are forwarded to `wail-app join`
-  --room <NAME>   Room to join          (required)
-  --bpm  <BPM>    Initial tempo         (default: 120)
-  --ipc-port <N>  IPC port for plugin   (default: 9191)
-  --server <URL>  Signaling server URL  (default: https://wail.val.run/)
-  --bars <N>      Bars per interval     (default: 4)
-  --quantum <F>   Quantum               (default: 4.0)
-  --name <NAME>   Display name for this peer
-  --password <PW> Room password (first peer sets it; others must match)
-
 OPTIONS (run-turn):
   --port <PORT>   Listening port          (default: 3478)
   --user <U:P>    Username:password       (default: wail:wailpass)
@@ -58,9 +47,6 @@ EXAMPLES:
   cargo xtask install-plugin --no-build
   cargo xtask package-plugin
   cargo xtask package-plugin --no-build
-  cargo xtask run-peer --room jam --password secret
-  cargo xtask run-peer --room jam --password secret --bpm 96 --ipc-port 9192
-  cargo xtask run-peer --room jam --password secret --name Quasor
   cargo xtask run-tauri
   cargo xtask build-tauri
   cargo xtask run-turn
@@ -89,10 +75,6 @@ fn main() -> Result<()> {
         Some("package-plugin") => {
             args.remove(0);
             package_plugin(&args)
-        }
-        Some("run-peer") => {
-            args.remove(0);
-            run_peer(&args)
         }
         Some("run-tauri") => {
             args.remove(0);
@@ -245,57 +227,10 @@ fn cargo_version(root: &Path) -> Result<String> {
         .as_array()
         .context("packages not an array")?
         .iter()
-        .find(|p| p["name"] == "wail-app")
+        .find(|p| p["name"] == "wail-plugin")
         .and_then(|p| p["version"].as_str())
         .map(|s| s.to_owned())
-        .context("Could not find wail-app version in cargo metadata")
-}
-
-fn run_peer(extra_args: &[String]) -> Result<()> {
-    // Build up the default join args, then let extra_args override/extend them.
-    // wail-app's clap parser accepts duplicate flags and uses the last value,
-    // so passing defaults first and user args after achieves natural overriding.
-    //
-    // Strip any leading "--" separator that cargo passes through.
-    let extra: Vec<&String> = extra_args.iter().filter(|a| a.as_str() != "--").collect();
-
-    // Parse user-supplied flags so we can skip defaults they've overridden.
-    let has_flag = |flag: &str| extra.iter().any(|a| a.as_str() == flag);
-
-    let mut args: Vec<&str> = Vec::new();
-    if !has_flag("--room") && !has_flag("-r") {
-        eprintln!("Error: --room is required\n");
-        print!("{HELP}");
-        std::process::exit(1);
-    }
-    if !has_flag("--server") {
-        args.extend(["--server", "https://wail.val.run/"]);
-    }
-    if !has_flag("--bpm") {
-        args.extend(["--bpm", "120"]);
-    }
-    if !has_flag("--bars") {
-        args.extend(["--bars", "4"]);
-    }
-    if !has_flag("--quantum") {
-        args.extend(["--quantum", "4"]);
-    }
-    if !has_flag("--ipc-port") {
-        args.extend(["--ipc-port", "9191"]);
-    }
-
-    println!("Starting WAIL peer...");
-    let mut cmd = Command::new("cargo");
-    cmd.args(["run", "-p", "wail-app", "--", "join"])
-        .args(&args)
-        .args(&extra)
-        .env(
-            "RUST_LOG",
-            env::var("RUST_LOG")
-                .unwrap_or_else(|_| "wail_app=info,wail_core=info,wail_net=info".into()),
-        )
-        .current_dir(workspace_dir());
-    run_cmd(cmd)
+        .context("Could not find wail-plugin version in cargo metadata")
 }
 
 fn run_tauri() -> Result<()> {
@@ -459,21 +394,7 @@ fn install_all(args: &[String]) -> Result<()> {
     };
     install_plugin(&plugin_args)?;
 
-    // Step 3: install wail-app binary to ~/.cargo/bin
-    println!("\nInstalling wail-app binary...");
-    let root = workspace_dir();
-    let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["install", "--path", "crates/wail-app", "--locked"])
-        .current_dir(&root);
-    run_cmd(cmd).context("cargo install wail-app failed")?;
-
-    // Step 4: next-steps instructions
-    println!("\n=== WAIL installed successfully ===");
-    println!("To join a session:");
-    println!("  wail-app join --room <ROOM> --password <PASSWORD>");
-    println!();
-    println!("Example:");
-    println!("  wail-app join --room myband --password secret");
+    println!("\n=== WAIL plugins installed successfully ===");
     Ok(())
 }
 
