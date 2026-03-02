@@ -273,7 +273,7 @@ const LISTENER_HTML = `<!DOCTYPE html>
         <label for="password">Password</label>
         <input type="password" id="password" placeholder="room password (empty = public)">
         <label for="display-name">Display Name</label>
-        <input type="text" id="display-name" placeholder="optional">
+        <input type="text" id="display-name" placeholder="Your name" required>
         <details><summary>Advanced</summary>
           <div class="advanced-fields">
             <label for="server-url">Server URL</label>
@@ -661,6 +661,7 @@ async function startListening(room,password){
   var displayName=document.getElementById('display-name').value.trim();
   var errorEl=document.getElementById('join-error');errorEl.hidden=true;
   if(!room){errorEl.textContent='Room name is required';errorEl.hidden=false;return;}
+  if(!displayName){errorEl.textContent='Display name is required';errorEl.hidden=false;return;}
   if(typeof AudioDecoder==='undefined'){errorEl.textContent='Your browser does not support audio decoding (WebCodecs). Use Chrome, Safari, or Firefox.';errorEl.hidden=false;return;}
   var btn=document.getElementById('listen-btn');btn.disabled=true;btn.textContent='CONNECTING...';
   try{session=new WailSession({room:room,password:password||null,displayName:displayName,serverUrl:getServerUrl()});
