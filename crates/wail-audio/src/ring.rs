@@ -109,7 +109,8 @@ impl IntervalRing {
         let beats_per_interval = bars as f64 * quantum;
         // Pre-allocate for slowest expected tempo (20 BPM) so we never grow
         // on the audio thread. At 20 BPM, 16 beats = 48 seconds.
-        let max_seconds = beats_per_interval / 20.0_f64.max(1.0);
+        let min_bps = 20.0_f64 / 60.0; // 20 BPM in beats-per-second
+        let max_seconds = beats_per_interval / min_bps;
         let slot_capacity = (sample_rate as f64 * max_seconds * channels as f64) as usize;
 
         let mut peer_slots = Vec::with_capacity(MAX_REMOTE_PEERS);
@@ -785,5 +786,88 @@ mod tests {
         // Slot 6 has never been assigned
         ring.read_peer_playback(6, &mut output);
         assert!(output.iter().all(|&s| s == 0.0));
+    }
+
+    // --- Test: Realistic DAW timing fills the full interval ---
+
+    #[test]
+    fn interval_fill_ratio_realistic_daw() {
+        // Simulate a real DAW at 120 BPM, 48kHz stereo, buffer size 512 samples.
+        // One interval = 4 bars * 4 beats = 16 beats.
+        // At 120 BPM: 16 beats / (120/60) = 8 seconds.
+        // Expected samples: 48000 * 2 * 8 = 768,000 interleaved samples.
+        let mut ring = make_ring();
+        let bpm = 120.0_f64;
+        let buf_frames: usize = 256; // frames per callback (mono frame count)
+        let buf_size = buf_frames * CH as usize; // interleaved sample count
+
+        // Generate non-zero audio input (440 Hz sine)
+        let input: Vec<f32> = (0..buf_size)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+        let mut output = vec![0.0f32; buf_size];
+
+        // Advance beat position per callback: each callback processes
+        // buf_frames samples at sample_rate, and at bpm BPM there are
+        // bpm/60 beats per second.
+        let beats_per_callback = buf_frames as f64 / SR as f64 * bpm / 60.0;
+        let mut beat = 0.0_f64;
+        let mut callbacks = 0_u32;
+
+        // Fill interval 0 (beats 0..16)
+        while beat < 16.0 {
+            ring.process(&input, &mut output, beat);
+            beat += beats_per_callback;
+            callbacks += 1;
+        }
+
+        // Cross boundary into interval 1
+        ring.process(&input, &mut output, beat);
+        callbacks += 1;
+
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "Should produce exactly 1 completed interval");
+
+        let interval = &completed[0];
+        assert_eq!(interval.index, 0);
+
+        // Expected: ~768,000 interleaved samples (8 seconds of stereo 48kHz)
+        // Actual count depends on exact beat rounding, allow ±1 buffer of tolerance.
+        let expected_samples = (SR as f64 * 8.0 * CH as f64) as usize;
+        let tolerance = buf_size * 2; // ±2 callbacks of tolerance
+
+        assert!(
+            interval.samples.len() > expected_samples - tolerance,
+            "Interval should contain near-full recording. Got {} samples, expected ~{} (callbacks={})",
+            interval.samples.len(),
+            expected_samples,
+            callbacks,
+        );
+        assert!(
+            interval.samples.len() <= expected_samples + tolerance,
+            "Interval should not exceed expected size. Got {} samples, expected ~{}",
+            interval.samples.len(),
+            expected_samples,
+        );
+
+        // Verify the audio is non-silent (RMS > 0)
+        let rms: f32 = (interval.samples.iter().map(|s| s * s).sum::<f32>()
+            / interval.samples.len() as f32)
+            .sqrt();
+        assert!(
+            rms > 0.1,
+            "Completed interval should contain real audio, RMS={rms}"
+        );
+
+        eprintln!(
+            "[test] interval_fill_ratio: callbacks={}, samples={}, expected≈{}, RMS={:.4}",
+            callbacks,
+            interval.samples.len(),
+            expected_samples,
+            rms,
+        );
     }
 }

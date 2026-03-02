@@ -251,6 +251,43 @@ pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut Pe
     }
 }
 
+/// Produce a realistically-sized encoded audio interval from an AudioBridge.
+///
+/// Unlike `produce_interval()` which only records a handful of buffers,
+/// this simulates a real DAW callback loop: 256-frame buffers at 120 BPM,
+/// advancing beat position proportionally, filling the full 8-second interval.
+///
+/// Returns `(wire_bytes, expected_interleaved_samples)`.
+pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
+    let sr = 48000u32;
+    let ch = 2u16;
+    let bpm = 120.0_f64;
+    let buf_frames: usize = 256;
+    let buf_size = buf_frames * ch as usize;
+
+    let mut bridge = AudioBridge::new(sr, ch, 4, 4.0, 128);
+
+    let signal = sine_wave(freq_hz, buf_frames, ch, sr);
+    let mut out = vec![0.0f32; buf_size];
+
+    let beats_per_callback = buf_frames as f64 / sr as f64 * bpm / 60.0;
+    let mut beat = 0.0_f64;
+
+    // Fill interval 0 (beats 0..16)
+    while beat < 16.0 {
+        bridge.process(&signal, &mut out, beat);
+        beat += beats_per_callback;
+    }
+
+    // Cross boundary — this triggers encode and returns wire bytes
+    let wire_msgs = bridge.process(&signal, &mut out, beat);
+    assert_eq!(wire_msgs.len(), 1, "Should produce exactly 1 interval");
+
+    // Expected interleaved sample count for a full interval
+    let expected_samples = (sr as f64 * ch as f64 * 16.0 / (bpm / 60.0)) as usize;
+    (wire_msgs.into_iter().next().unwrap(), expected_samples)
+}
+
 /// Find a random available port by binding to :0.
 pub fn random_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
