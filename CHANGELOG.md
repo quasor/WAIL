@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 (2026-03-02)
+
+### Fixes
+
+- Set up knope for release management and populate initial CHANGELOG
+
 ## 0.4.0
 
 ### Breaking Changes
