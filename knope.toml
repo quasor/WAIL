@@ -1,0 +1,34 @@
+[package]
+versioned_files = ["Cargo.toml", "crates/wail-tauri/tauri.conf.json"]
+changelog = "CHANGELOG.md"
+
+[github]
+owner = "quasor"
+repo = "WAIL"
+
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git add ."
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m 'chore: prepare release'"
+
+[[workflows.steps]]
+type = "Command"
+command = "git push"
+
+[[workflows.steps]]
+type = "Release"
+
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"

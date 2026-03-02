@@ -122,6 +122,38 @@ cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 - wail-audio has no networking dependencies (reusable from plugin)
 - TDD: write tests first, especially for ring buffer and codec
 
+## Versioning and Releases
+
+Managed by [knope](https://github.com/knope-dev/knope) via `knope.toml`. All crates share one version (workspace-level).
+
+**Versioned files** (kept in sync automatically): `Cargo.toml` (workspace), `crates/wail-tauri/tauri.conf.json`
+
+### Recording changes
+
+When making a user-facing change (feature, fix, breaking change), create a changeset file:
+
+```sh
+knope document-change
+```
+
+This creates a markdown file in `.changeset/` describing what changed and the bump type (major/minor/patch). Commit the changeset file with your PR. Conventional commit messages (`feat:`, `fix:`, `feat!:`) also work and are picked up automatically.
+
+### Cutting a release
+
+```sh
+knope release              # bump version, update CHANGELOG.md, commit, push, create GitHub release
+knope release --dry-run    # preview without making changes
+```
+
+`PrepareRelease` consumes all `.changeset/` files + conventional commits since the last tag, determines the version bump, updates versioned files and `CHANGELOG.md`, then `Release` creates the GitHub release and git tag.
+
+### Rules for agents
+
+- **Always create a changeset** for user-facing work. Run `knope document-change` or manually create a `.changeset/<short-name>.md` file.
+- **Never manually edit version numbers** in `Cargo.toml` or `tauri.conf.json` — knope handles this.
+- **Never manually create git tags** for releases — `knope release` handles tagging.
+- Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `feat!:` (breaking).
+
 ## Common Tasks
 
 - **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-tauri/src/session.rs` select loop
