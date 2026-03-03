@@ -7,7 +7,7 @@ WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataCha
 ## Project Structure
 
 ```
-Cargo workspace with 6 crates:
+Cargo workspace with 7 crates:
 
 crates/
 ├── wail-core/           Core sync library (no networking)
@@ -19,11 +19,21 @@ crates/
 │   ├── codec.rs          Opus encode/decode (audiopus)
 │   ├── ring.rs           NINJAM-style interval ring buffer (record + playback)
 │   ├── interval.rs       AudioInterval type, IntervalRecorder, IntervalPlayer
-│   └── wire.rs           Binary wire format for audio over DataChannels
+│   ├── wire.rs           Binary wire format for audio over DataChannels
+│   ├── bridge.rs         AudioBridge: wraps ring + Opus codec for send/recv
+│   ├── ipc.rs            IPC framing protocol (length-prefixed messages)
+│   └── pipeline.rs       Encode/decode pipeline (interval → wire → DataChannel)
 ├── wail-net/            Networking layer
-│   ├── lib.rs            PeerMesh: manages all WebRTC connections
+│   ├── lib.rs            PeerMesh + ICE server config (Metered TURN)
 │   ├── signaling.rs      HTTP polling signaling client
 │   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
+├── wail-tauri/          Tauri desktop app (session orchestration)
+│   ├── main.rs           App entry point
+│   ├── lib.rs            Tauri setup and plugin registration
+│   ├── commands.rs       Tauri IPC commands (join/leave room, etc.)
+│   ├── events.rs         Tauri event types for frontend
+│   ├── session.rs        Session state machine (Link + WebRTC + audio)
+│   └── recorder.rs       Local session recording
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
 │   ├── lib.rs            Plugin entry point, send-only IPC thread
 │   └── params.rs         Plugin parameters (empty — defaults hardcoded)
@@ -31,8 +41,10 @@ crates/
 │   ├── lib.rs            Plugin entry point, recv-only IPC thread
 │   └── params.rs         Plugin parameters (empty — defaults hardcoded)
 
+xtask/                   Build tasks (build-plugin, install-plugin, build-tauri, etc.)
+
 val-town/
-└── signaling.ts      HTTP signaling server (deployed to Val Town)
+└── main.ts           HTTP signaling server (deployed to Val Town)
 
 vendor/
 └── link/             Ableton Link 4.0.0 beta SDK (git submodule)
@@ -63,14 +75,13 @@ cargo tauri dev
 - `audiopus` - Opus audio codec (libopus bindings)
 - `nih_plug` (git) - CLAP/VST3 plugin framework
 - `tokio` - Async runtime
-- `clap` - CLI parsing
 
 ## Architecture
 
 ### Sync Flow
 Each WAIL peer:
 1. Joins local Ableton Link session (LAN multicast)
-2. Connects to HTTP signaling server to join a password-protected "room"
+2. Connects to HTTP signaling server to join a room (public or password-protected)
 3. Establishes WebRTC DataChannels with remote peers (P2P)
 4. Polls Link at 50Hz, broadcasts tempo/phase changes
 5. Applies remote tempo changes to local Link session
@@ -81,7 +92,7 @@ NINJAM-style double-buffer pattern with two separate plugins:
 1. **WAIL Send** plugin captures DAW audio into record slot for current interval
 2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebRTC DataChannel
 3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
-4. Playback slot feeds audio output to DAW (main bus + 7 per-peer aux outputs)
+4. Playback slot feeds audio output to DAW (main bus + up to 15 per-peer aux outputs)
 5. Latency = exactly 1 interval (by design, like NINJAM)
 
 Two WebRTC DataChannels per peer:
@@ -106,7 +117,7 @@ Binary header (48 bytes) + Opus data:
 ## Testing
 
 ```sh
-cargo test                    # run all tests (~104 tests)
+cargo test                    # run all tests (~114 tests)
 cargo test -p wail-core       # core library tests only
 cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 ```
@@ -148,28 +159,28 @@ knope document-change
 
 This creates a markdown file in `.changeset/` describing what changed and the bump type (major/minor/patch). Commit the changeset file with your PR. Conventional commit messages (`feat:`, `fix:`, `feat!:`) also work and are picked up automatically.
 
-### Cutting a release
+### Release pipeline (automated via GitHub Actions)
 
-```sh
-knope release              # bump version, update CHANGELOG.md, commit, push, create GitHub release
-knope release --dry-run    # preview without making changes
-```
+Releases are fully automated — no manual `knope` commands needed:
 
-`PrepareRelease` consumes all `.changeset/` files + conventional commits since the last tag, determines the version bump, updates versioned files and `CHANGELOG.md`, then `Release` creates the GitHub release and git tag.
+1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes `.changeset/` files + conventional commits, bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
+2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
+3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — plugins + Tauri app installers) and uploads them to the GitHub release.
 
 ### Rules for agents
 
 - **Always create a changeset** for user-facing work. Run `knope document-change` or manually create a `.changeset/<short-name>.md` file.
 - **Never manually edit version numbers** in `Cargo.toml` or `tauri.conf.json` — knope handles this.
-- **Never manually create git tags** for releases — `knope release` handles tagging.
+- **Never manually create git tags** for releases — GitHub Actions handles tagging.
+- **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
 - Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `feat!:` (breaking).
 
 ## Common Tasks
 
 - **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-tauri/src/session.rs` select loop
 - **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
-- **Add STUN/TURN servers**: `RTCIceServer` list in `crates/wail-net/src/peer.rs`
-- **Change Opus bitrate**: Default in send plugin params (`crates/wail-plugin-send/src/params.rs`)
+- **Add STUN/TURN servers**: ICE server config in `crates/wail-net/src/lib.rs` (includes dynamic Metered TURN credentials)
+- **Change Opus bitrate**: `AudioBridge::new()` bitrate_kbps param in `crates/wail-audio/src/bridge.rs`
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
 - **Adjust ring buffer crossfade**: `IntervalPlayer::new()` crossfade_ms param
 
