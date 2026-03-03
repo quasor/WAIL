@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.8 (2026-03-03)
+
+### Fixes
+
+- sync Cargo.lock during release to fix Homebrew --locked build (#49)
+
 ## 0.4.7 (2026-03-03)
 
 ### Features
