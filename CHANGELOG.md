@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7 (2026-03-03)
+
+### Features
+
+- add Homebrew from-source installation support (#47)
+
 ## 0.4.6 (2026-03-03)
 
 ### Features
