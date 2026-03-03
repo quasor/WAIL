@@ -66,6 +66,49 @@ fn ensure_buf(buf: &mut Vec<f32>, needed: usize) {
     }
 }
 
+/// Compute beat position from cumulative sample count (fallback when host
+/// doesn't provide `pos_beats()`).
+fn beat_position_fallback(cumulative_samples: u64, bpm: f64, sample_rate: f64) -> f64 {
+    cumulative_samples as f64 * bpm / (60.0 * sample_rate)
+}
+
+/// De-interleave a flat interleaved buffer into per-channel DAW output slices.
+///
+/// `interleaved`: source buffer in interleaved format (L0 R0 L1 R1 ...)
+/// `channels`: mutable slice of per-channel output slices
+/// `num_samples`: number of samples per channel
+fn deinterleave_to_channels(
+    interleaved: &[f32],
+    channels: &mut [&mut [f32]],
+    num_samples: usize,
+) {
+    let num_channels = channels.len();
+    for sample_idx in 0..num_samples {
+        for ch in 0..num_channels {
+            channels[ch][sample_idx] = interleaved[sample_idx * num_channels + ch];
+        }
+    }
+}
+
+/// Copy per-peer interleaved playback buffer into a per-channel auxiliary output.
+///
+/// `peer_buf`: interleaved samples for one peer
+/// `aux_channels`: mutable slice of per-channel aux output slices
+/// `num_samples`: samples to copy per channel
+/// `src_channels`: number of channels in the interleaved source
+fn write_peer_to_aux(
+    peer_buf: &[f32],
+    aux_channels: &mut [&mut [f32]],
+    num_samples: usize,
+    src_channels: usize,
+) {
+    for sample_idx in 0..num_samples {
+        for ch in 0..aux_channels.len().min(src_channels) {
+            aux_channels[ch][sample_idx] = peer_buf[sample_idx * src_channels + ch];
+        }
+    }
+}
+
 impl Plugin for WailRecvPlugin {
     const NAME: &'static str = "WAIL Recv";
     const VENDOR: &'static str = "WAIL Project";
@@ -89,6 +132,12 @@ impl Plugin for WailRecvPlugin {
                 ],
                 ..PortNames::const_default()
             },
+            ..AudioIOLayout::const_default()
+        },
+        // Stereo fallback (no aux — for hosts that don't support aux ports)
+        AudioIOLayout {
+            main_input_channels: NonZeroU32::new(2),
+            main_output_channels: NonZeroU32::new(2),
             ..AudioIOLayout::const_default()
         },
         // Mono fallback (no aux outputs)
@@ -200,7 +249,7 @@ impl Plugin for WailRecvPlugin {
                     self.beat_fallback_warned = true;
                     nih_log!("WAIL Recv: host does not provide beat position — using sample-count fallback");
                 }
-                self.cumulative_samples as f64 * bpm / (60.0 * self.sample_rate as f64)
+                beat_position_fallback(self.cumulative_samples, bpm, self.sample_rate as f64)
             }
         };
         self.cumulative_samples += num_samples as u64;
@@ -236,12 +285,7 @@ impl Plugin for WailRecvPlugin {
                 });
 
                 // Mix playback into DAW main output
-                for sample_idx in 0..num_samples {
-                    for ch in 0..num_channels as usize {
-                        let pb_idx = sample_idx * num_channels as usize + ch;
-                        buffer.as_slice()[ch][sample_idx] = playback[pb_idx];
-                    }
-                }
+                deinterleave_to_channels(playback, buffer.as_slice(), num_samples);
 
                 // Route per-peer audio to auxiliary output buses
                 let num_aux = aux.outputs.len().min(wail_audio::MAX_REMOTE_PEERS);
@@ -252,16 +296,8 @@ impl Plugin for WailRecvPlugin {
                     bridge.read_peer_playback(slot_idx, peer_buf);
 
                     let aux_buf = &mut aux.outputs[slot_idx];
-                    let aux_ch = aux_buf.channels();
-                    let aux_samples = aux_buf.samples();
-                    let n = aux_samples.min(num_samples);
-
-                    for sample_idx in 0..n {
-                        for ch in 0..aux_ch.min(num_channels as usize) {
-                            let pb_idx = sample_idx * num_channels as usize + ch;
-                            aux_buf.as_slice()[ch][sample_idx] = peer_buf[pb_idx];
-                        }
-                    }
+                    let n = aux_buf.samples().min(num_samples);
+                    write_peer_to_aux(peer_buf, aux_buf.as_slice(), n, num_channels as usize);
                 }
             }
         }
@@ -387,3 +423,131 @@ impl Vst3Plugin for WailRecvPlugin {
 
 nih_export_clap!(WailRecvPlugin);
 nih_export_vst3!(WailRecvPlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beat_fallback_at_120bpm() {
+        let sr = 48000.0;
+        let bpm = 120.0;
+        assert!((beat_position_fallback(0, bpm, sr) - 0.0).abs() < 1e-9);
+        assert!((beat_position_fallback(24000, bpm, sr) - 1.0).abs() < 1e-9);
+        assert!((beat_position_fallback(384000, bpm, sr) - 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deinterleave_stereo() {
+        let interleaved = [1.0f32, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0];
+        let mut left = [0.0f32; 4];
+        let mut right = [0.0f32; 4];
+        {
+            let channels: &mut [&mut [f32]] = &mut [&mut left, &mut right];
+            deinterleave_to_channels(&interleaved, channels, 4);
+        }
+        assert_eq!(left, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(right, [5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn deinterleave_mono() {
+        let interleaved = [0.5f32, 0.25, 0.75];
+        let mut mono = [0.0f32; 3];
+        {
+            let channels: &mut [&mut [f32]] = &mut [&mut mono];
+            deinterleave_to_channels(&interleaved, channels, 3);
+        }
+        assert_eq!(mono, [0.5, 0.25, 0.75]);
+    }
+
+    #[test]
+    fn deinterleave_roundtrips_with_interleave() {
+        // Interleave then de-interleave should give back the original channels
+        let left = [1.0f32, 2.0, 3.0, 4.0];
+        let right = [5.0f32, 6.0, 7.0, 8.0];
+        let num_samples = 4;
+        let num_channels = 2;
+
+        // Interleave (same logic as send plugin)
+        let mut interleaved = vec![0.0f32; num_samples * num_channels];
+        for i in 0..num_samples {
+            for ch in 0..num_channels {
+                interleaved[i * num_channels + ch] = if ch == 0 { left[i] } else { right[i] };
+            }
+        }
+
+        // De-interleave
+        let mut out_left = [0.0f32; 4];
+        let mut out_right = [0.0f32; 4];
+        {
+            let channels: &mut [&mut [f32]] = &mut [&mut out_left, &mut out_right];
+            deinterleave_to_channels(&interleaved, channels, num_samples);
+        }
+        assert_eq!(out_left, left);
+        assert_eq!(out_right, right);
+    }
+
+    #[test]
+    fn write_peer_to_aux_stereo() {
+        // Peer buffer: interleaved stereo [L0 R0 L1 R1 L2 R2]
+        let peer_buf = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let mut aux_left = [0.0f32; 3];
+        let mut aux_right = [0.0f32; 3];
+        {
+            let aux: &mut [&mut [f32]] = &mut [&mut aux_left, &mut aux_right];
+            write_peer_to_aux(&peer_buf, aux, 3, 2);
+        }
+        assert_eq!(aux_left, [0.1, 0.3, 0.5]);
+        assert_eq!(aux_right, [0.2, 0.4, 0.6]);
+    }
+
+    #[test]
+    fn write_peer_to_aux_mono_source_stereo_aux() {
+        // Mono source into stereo aux: only first channel gets data
+        let peer_buf = [0.5f32, 0.75, 1.0];
+        let mut aux_left = [0.0f32; 3];
+        let mut aux_right = [0.0f32; 3];
+        {
+            let aux: &mut [&mut [f32]] = &mut [&mut aux_left, &mut aux_right];
+            write_peer_to_aux(&peer_buf, aux, 3, 1);
+        }
+        assert_eq!(aux_left, [0.5, 0.75, 1.0]);
+        assert_eq!(aux_right, [0.0, 0.0, 0.0]); // untouched
+    }
+
+    #[test]
+    fn peer_isolation_different_data() {
+        // Simulate 3 peers with distinct signals, verify isolation
+        let peer0 = [1.0f32, 1.0, 1.0, 1.0]; // stereo: L=1 R=1
+        let peer1 = [2.0f32, 2.0, 2.0, 2.0]; // stereo: L=2 R=2
+        let peer2 = [3.0f32, 3.0, 3.0, 3.0]; // stereo: L=3 R=3
+
+        let peers = [&peer0[..], &peer1[..], &peer2[..]];
+        let mut results = [[0.0f32; 2]; 3]; // 3 peers, 2 samples each (left channel only)
+
+        for (i, peer_buf) in peers.iter().enumerate() {
+            let mut left = [0.0f32; 2];
+            let mut right = [0.0f32; 2];
+            {
+                let aux: &mut [&mut [f32]] = &mut [&mut left, &mut right];
+                write_peer_to_aux(peer_buf, aux, 2, 2);
+            }
+            results[i] = left;
+        }
+
+        // Each peer should produce its own distinct value
+        assert_eq!(results[0], [1.0, 1.0]);
+        assert_eq!(results[1], [2.0, 2.0]);
+        assert_eq!(results[2], [3.0, 3.0]);
+    }
+
+    #[test]
+    fn ensure_buf_grows() {
+        let mut buf = vec![1.0f32; 4];
+        ensure_buf(&mut buf, 8);
+        assert_eq!(buf.len(), 8);
+        assert_eq!(buf[0], 1.0);
+        assert_eq!(buf[4], 0.0);
+    }
+}
