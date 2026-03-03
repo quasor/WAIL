@@ -1,5 +1,6 @@
 mod commands;
 pub mod events;
+mod hb;
 mod recorder;
 mod session;
 
@@ -16,6 +17,9 @@ pub fn emit_log(app: &tauri::AppHandle, level: &str, message: String) {
 }
 
 pub fn run() {
+    hb::init();
+    hb::set_panic_hook();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {

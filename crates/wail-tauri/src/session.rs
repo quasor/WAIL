@@ -81,6 +81,7 @@ pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHan
     tauri::async_runtime::spawn(async move {
         if let Err(e) = session_loop(app.clone(), config, peer_id, cmd_rx).await {
             ui_error!(&app, "Session error: {e}");
+            crate::hb::report(&e.to_string()).await;
             let _ = app.emit("session:error", SessionError { message: e.to_string() });
         }
         let _ = app.emit("session:ended", SessionEnded {});
