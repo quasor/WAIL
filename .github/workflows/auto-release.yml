@@ -33,6 +33,8 @@ jobs:
           curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
             | tar -xz --strip-components=1 -C /usr/local/bin/
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Ensure changeset exists for patch release
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
