@@ -58,6 +58,13 @@ pub struct StatusUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerReconnectingEvent {
+    pub peer_id: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,
     pub message: String,

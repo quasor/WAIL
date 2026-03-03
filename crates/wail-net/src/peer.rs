@@ -91,6 +91,7 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -137,7 +138,13 @@ pub struct PeerConnection {
 
 impl PeerConnection {
     /// Create a new peer connection with the given ICE servers.
-    pub async fn new(remote_peer_id: String, ice_servers: Vec<RTCIceServer>) -> Result<Self> {
+    /// `failure_tx` receives the remote peer ID when the connection fails or disconnects.
+    pub async fn new(
+        remote_peer_id: String,
+        ice_servers: Vec<RTCIceServer>,
+        relay_only: bool,
+        failure_tx: mpsc::UnboundedSender<String>,
+    ) -> Result<Self> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
@@ -154,6 +161,11 @@ impl PeerConnection {
 
         let config = RTCConfiguration {
             ice_servers,
+            ice_transport_policy: if relay_only {
+                RTCIceTransportPolicy::Relay
+            } else {
+                RTCIceTransportPolicy::Unspecified
+            },
             ..Default::default()
         };
 
@@ -161,15 +173,18 @@ impl PeerConnection {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
 
-        // Monitor connection state
+        // Monitor connection state — notify failure channel on Failed/Disconnected
         let rpid = remote_peer_id.clone();
+        let fail_tx = failure_tx;
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
             match state {
                 RTCPeerConnectionState::Failed => {
                     warn!(peer = %rpid, "WebRTC connection FAILED — ICE negotiation could not establish a path");
+                    let _ = fail_tx.send(rpid.clone());
                 }
                 RTCPeerConnectionState::Disconnected => {
                     warn!(peer = %rpid, "WebRTC connection disconnected");
+                    let _ = fail_tx.send(rpid.clone());
                 }
                 _ => {
                     info!(peer = %rpid, %state, "Peer connection state changed");

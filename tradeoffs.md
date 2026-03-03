@@ -45,10 +45,13 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **Fix when ready:** Add `tokio::signal::ctrl_c()` branch in `select!` loop.
 
 ### W11. No reconnection logic
-**Status:** Deferred — infrastructure concern
-**File:** `crates/wail-net/src/signaling.rs`
-**Problem:** Signaling server disconnect kills the session permanently.
-**Fix when ready:** Reconnect with exponential backoff (1s, 2s, 4s, … 30s max).
+**Status:** Completed
+**File:** `crates/wail-net/src/lib.rs`, `crates/wail-tauri/src/session.rs`
+**Problem:** Signaling server disconnect and WebRTC peer failures killed the session permanently.
+**Resolution:** Implemented automatic reconnection for both:
+- **WebRTC peers:** `MeshEvent::PeerFailed` detection via connection state callbacks, `re_initiate()` with exponential backoff (2s–16s, max 5 attempts), UI events (`peer:reconnecting`).
+- **Signaling server:** Reconnect loop with exponential backoff (1s–30s, unlimited attempts), re-fetches ICE servers, replaces PeerMesh.
+- **Tests:** `peer_failure_emits_event`, `peer_reconnects_after_close`, `new_offer_replaces_stale_connection` in `crates/wail-net/tests/network.rs`.
 
 ### W16. Signaling server has no rate limiting
 **Status:** Deferred — infrastructure concern

@@ -227,6 +227,13 @@ async fn session_loop(
         _ => None,
     };
 
+    // Reconnection state
+    let mut peer_reconnect_attempts: HashMap<String, u32> = HashMap::new();
+    let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<String>(16);
+    const MAX_PEER_RECONNECT_ATTEMPTS: u32 = 5;
+    const PEER_RECONNECT_BASE_MS: u64 = 2000;
+    const PEER_RECONNECT_MAX_MS: u64 = 16000;
+
     ui_info!(&app, "Waiting for peers...");
 
     loop {
@@ -386,15 +393,117 @@ async fn session_loop(
                         ui_info!(&app, "Peer {name} left");
                         peer_names.remove(&pid);
                         hello_sent.remove(&pid);
+                        peer_reconnect_attempts.remove(&pid);
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
+                    }
+                    Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
+                        let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid).to_string();
+                        let attempts = peer_reconnect_attempts.entry(pid.clone()).or_insert(0);
+                        *attempts += 1;
+                        let attempt = *attempts;
+
+                        if attempt > MAX_PEER_RECONNECT_ATTEMPTS {
+                            ui_error!(&app, "Peer {name} reconnection failed after {MAX_PEER_RECONNECT_ATTEMPTS} attempts — giving up");
+                            peer_reconnect_attempts.remove(&pid);
+                            peer_names.remove(&pid);
+                            hello_sent.remove(&pid);
+                            mesh.remove_peer(&pid).await;
+                            let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
+                        } else {
+                            let backoff_ms = (PEER_RECONNECT_BASE_MS * 2u64.pow(attempt - 1)).min(PEER_RECONNECT_MAX_MS);
+                            ui_warn!(&app, "Peer {name} connection failed — reconnecting in {backoff_ms}ms (attempt {attempt}/{MAX_PEER_RECONNECT_ATTEMPTS})");
+                            let _ = app.emit("peer:reconnecting", PeerReconnectingEvent {
+                                peer_id: pid.clone(),
+                                attempt,
+                                max_attempts: MAX_PEER_RECONNECT_ATTEMPTS,
+                            });
+
+                            let tx = reconnect_tx.clone();
+                            let pid_clone = pid.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                                let _ = tx.send(pid_clone).await;
+                            });
+                        }
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        ui_warn!(&app, "Signaling connection closed");
-                        break;
+                        ui_warn!(&app, "Signaling connection closed — attempting reconnection");
+                        let _ = app.emit("session:reconnecting", ());
+
+                        let mut signaling_reconnected = false;
+                        for attempt in 1u32.. {
+                            let backoff_ms = (1000u64 * 2u64.pow(attempt.min(5) - 1)).min(30000);
+                            ui_info!(&app, "Signaling reconnect attempt {attempt} in {backoff_ms}ms...");
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                            // Check for disconnect command during backoff
+                            if let Ok(cmd) = cmd_rx.try_recv() {
+                                if matches!(cmd, SessionCommand::Disconnect) {
+                                    ui_info!(&app, "Disconnect during reconnection — exiting");
+                                    break;
+                                }
+                            }
+
+                            // Re-fetch ICE servers (TURN credentials may have expired)
+                            let ice = match wail_net::fetch_metered_ice_servers().await {
+                                Ok(s) => s,
+                                Err(_) => wail_net::metered_stun_fallback(),
+                            };
+
+                            match wail_net::PeerMesh::connect_with_ice(
+                                &server, &room, &peer_id, password.as_deref(), ice,
+                            ).await {
+                                Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
+                                    mesh = new_mesh;
+                                    sync_rx = new_sync_rx;
+                                    audio_rx = new_audio_rx;
+                                    peer_names.clear();
+                                    hello_sent.clear();
+                                    peer_reconnect_attempts.clear();
+                                    clock = ClockSync::new();
+                                    signaling_reconnected = true;
+                                    ui_info!(&app, "Signaling reconnected (attempt {attempt})");
+                                    let _ = app.emit("session:reconnected", ());
+                                    break;
+                                }
+                                Err(e) => {
+                                    ui_warn!(&app, "Signaling reconnect failed: {e}");
+                                }
+                            }
+                        }
+
+                        if !signaling_reconnected {
+                            break;
+                        }
                     }
                     Err(e) => {
                         ui_error!(&app, "Signaling error: {e}");
+                    }
+                }
+            }
+
+            // --- Pending peer reconnection ---
+            Some(pid) = reconnect_rx.recv() => {
+                if peer_reconnect_attempts.contains_key(&pid) {
+                    let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid).to_string();
+                    ui_info!(&app, "Attempting reconnection to {name}...");
+                    match mesh.re_initiate(&pid).await {
+                        Ok(()) => {
+                            ui_info!(&app, "Reconnection offer sent to {name}");
+                            hello_sent.remove(&pid);
+                            let hello = SyncMessage::Hello {
+                                peer_id: peer_id.clone(),
+                                display_name: Some(display_name.clone()),
+                            };
+                            mesh.broadcast(&hello).await;
+                            for p in mesh.connected_peers() {
+                                hello_sent.insert(p);
+                            }
+                        }
+                        Err(e) => {
+                            ui_warn!(&app, "Reconnection to {name} failed: {e}");
+                        }
                     }
                 }
             }
@@ -406,6 +515,11 @@ async fn session_loop(
                         let name_display = name.as_deref().unwrap_or("(anonymous)");
                         ui_info!(&app, "Hello from {name_display} ({pid})");
                         peer_names.insert(pid.clone(), name.clone());
+
+                        // Clear reconnect tracking — peer is alive
+                        if peer_reconnect_attempts.remove(&pid).is_some() {
+                            ui_info!(&app, "Peer {name_display} reconnected successfully");
+                        }
 
                         // Reply with our Hello if we haven't sent one to this peer.
                         // This handles the case where the peer wasn't in mesh.peers

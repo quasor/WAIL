@@ -119,6 +119,11 @@ pub struct PeerMesh {
     sync_tx: mpsc::UnboundedSender<(String, SyncMessage)>,
     audio_tx: mpsc::Sender<(String, Vec<u8>)>,
     ice_servers: Vec<RTCIceServer>,
+    relay_only: bool,
+    /// Sender for peer failure notifications (cloned into each PeerConnection).
+    failure_tx: mpsc::UnboundedSender<String>,
+    /// Receiver for peer failure notifications (polled in poll_signaling).
+    failure_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl PeerMesh {
@@ -166,11 +171,30 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
+        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false).await
+    }
+
+    /// Connect with custom ICE servers, poll interval, and relay-only mode.
+    /// When `relay_only` is true, only TURN relay candidates are used (no host/srflx).
+    pub async fn connect_full(
+        server_url: &str,
+        room: &str,
+        peer_id: &str,
+        password: Option<&str>,
+        ice_servers: Vec<RTCIceServer>,
+        poll_interval_ms: u64,
+        relay_only: bool,
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<(String, SyncMessage)>,
+        mpsc::Receiver<(String, Vec<u8>)>,
+    )> {
         let signaling = SignalingClient::connect_with_poll_interval(
             server_url, room, peer_id, password, poll_interval_ms,
         ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
+        let (failure_tx, failure_rx) = mpsc::unbounded_channel();
 
         let mesh = Self {
             peer_id: peer_id.to_string(),
@@ -179,6 +203,9 @@ impl PeerMesh {
             sync_tx,
             audio_tx,
             ice_servers,
+            relay_only,
+            failure_tx,
+            failure_rx,
         };
 
         Ok((mesh, sync_rx, audio_rx))
@@ -218,18 +245,34 @@ impl PeerMesh {
         Ok(())
     }
 
-    /// Process one signaling message. Call this in a loop.
+    /// Process one signaling or failure event. Call this in a loop.
     pub async fn poll_signaling(&mut self) -> Result<Option<MeshEvent>> {
-        let msg = match self.signaling.incoming_rx.recv().await {
-            Some(m) => m,
-            None => return Ok(None),
-        };
+        tokio::select! {
+            msg = self.signaling.incoming_rx.recv() => {
+                let msg = match msg {
+                    Some(m) => m,
+                    None => return Ok(None),
+                };
+                self.handle_signal_message(msg).await
+            }
+            Some(failed_peer) = self.failure_rx.recv() => {
+                // Only emit if peer is still in the map (not already removed by PeerLeft)
+                if self.peers.contains_key(&failed_peer) {
+                    info!(peer = %failed_peer, "Peer connection failed — emitting PeerFailed");
+                    Ok(Some(MeshEvent::PeerFailed(failed_peer)))
+                } else {
+                    Ok(Some(MeshEvent::SignalingProcessed))
+                }
+            }
+        }
+    }
 
+    /// Handle a single signaling message.
+    async fn handle_signal_message(&mut self, msg: SignalMessage) -> Result<Option<MeshEvent>> {
         match msg {
             SignalMessage::PeerList { peers } => {
                 info!(peers = ?peers, "Received peer list");
                 for remote_id in peers {
-                    // Same tie-breaking as PeerJoined: lower peer_id initiates
                     if remote_id != self.peer_id && self.peer_id < remote_id {
                         self.initiate_connection(&remote_id).await?;
                     }
@@ -239,7 +282,6 @@ impl PeerMesh {
 
             SignalMessage::PeerJoined { peer_id: remote_id } => {
                 info!(peer = %remote_id, "New peer joined room");
-                // Deterministic: lower peer_id initiates
                 if self.peer_id < remote_id {
                     self.initiate_connection(&remote_id).await?;
                 }
@@ -258,20 +300,23 @@ impl PeerMesh {
                 match payload {
                     SignalPayload::Offer { sdp } => {
                         debug!(peer = %from, "Received SDP offer");
-                        let mut pc = PeerConnection::new(from.clone(), self.ice_servers.clone()).await?;
+                        // Clean up stale connection if one exists (reconnection scenario)
+                        if let Some(old_pc) = self.peers.remove(&from) {
+                            warn!(peer = %from, "Replacing stale connection with new offer");
+                            let _ = old_pc.close().await;
+                        }
+                        let mut pc = PeerConnection::new(
+                            from.clone(), self.ice_servers.clone(), self.relay_only, self.failure_tx.clone(),
+                        ).await?;
                         let (answer_sdp, ice_rx) = pc.handle_offer(sdp).await?;
 
-                        // Send answer
                         self.signaling.outgoing_tx.send(SignalMessage::Signal {
                             to: from.clone(),
                             from: self.peer_id.clone(),
                             payload: SignalPayload::Answer { sdp: answer_sdp },
                         })?;
 
-                        // Spawn ICE candidate sender
                         self.spawn_ice_sender(from.clone(), ice_rx);
-
-                        // Spawn message readers (sync + audio)
                         self.spawn_message_reader(&from, &mut pc);
                         self.spawn_audio_reader(&from, &mut pc);
 
@@ -305,8 +350,15 @@ impl PeerMesh {
 
     /// Initiate a WebRTC connection to a remote peer (we create the offer).
     async fn initiate_connection(&mut self, remote_id: &str) -> Result<()> {
+        // Clean up stale connection if one exists (reconnection scenario)
+        if let Some(old_pc) = self.peers.remove(remote_id) {
+            warn!(peer = %remote_id, "Cleaning up stale connection before re-initiation");
+            let _ = old_pc.close().await;
+        }
         info!(peer = %remote_id, "Initiating WebRTC connection");
-        let mut pc = PeerConnection::new(remote_id.to_string(), self.ice_servers.clone()).await?;
+        let mut pc = PeerConnection::new(
+            remote_id.to_string(), self.ice_servers.clone(), self.relay_only, self.failure_tx.clone(),
+        ).await?;
         let (offer_sdp, ice_rx) = pc.create_offer().await?;
 
         // Send offer via signaling
@@ -411,6 +463,37 @@ impl PeerMesh {
     pub fn any_audio_dc_open(&self) -> bool {
         self.peers.values().any(|pc| pc.is_audio_dc_open())
     }
+
+    /// Close a specific peer's WebRTC connection (without removing from the mesh).
+    /// The connection state callback will fire, which can trigger `MeshEvent::PeerFailed`.
+    pub async fn close_peer(&self, peer_id: &str) {
+        if let Some(pc) = self.peers.get(peer_id) {
+            if let Err(e) = pc.close().await {
+                warn!(peer = %peer_id, error = %e, "Error closing peer connection");
+            }
+        }
+    }
+
+    /// Remove a peer from the mesh, closing its WebRTC connection.
+    pub async fn remove_peer(&mut self, peer_id: &str) {
+        if let Some(pc) = self.peers.remove(peer_id) {
+            if let Err(e) = pc.close().await {
+                warn!(peer = %peer_id, error = %e, "Error closing peer connection");
+            }
+            info!(peer = %peer_id, "Removed peer from mesh");
+        }
+    }
+
+    /// Re-initiate a WebRTC connection to a peer after failure.
+    /// Removes the dead peer first, then starts a new connection.
+    /// Respects tie-breaking: only the lower peer_id initiates.
+    pub async fn re_initiate(&mut self, peer_id: &str) -> Result<()> {
+        self.remove_peer(peer_id).await;
+        if *self.peer_id < *peer_id {
+            self.initiate_connection(peer_id).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Events from the peer mesh.
@@ -419,5 +502,7 @@ pub enum MeshEvent {
     PeerListReceived,
     PeerJoined(String),
     PeerLeft(String),
+    /// A peer's WebRTC connection failed or disconnected.
+    PeerFailed(String),
     SignalingProcessed,
 }

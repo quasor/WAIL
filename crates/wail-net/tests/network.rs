@@ -385,3 +385,315 @@ async fn fetch_metered_ice_servers_live() {
         turn_servers.len()
     );
 }
+
+// ---------------------------------------------------------------
+// Test: Live Metered TURN relay — fetch credentials, force relay-only, exchange audio
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires internet: cargo test -p wail-net -- --ignored metered_turn_relay_live
+async fn metered_turn_relay_live() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    // 1. Fetch live TURN credentials from Metered API
+    let ice_servers = wail_net::fetch_metered_ice_servers()
+        .await
+        .expect("Failed to fetch Metered ICE servers — is the API key valid?");
+
+    let turn_count = ice_servers
+        .iter()
+        .filter(|s| s.urls.iter().any(|u| u.starts_with("turn:") || u.starts_with("turns:")))
+        .count();
+    assert!(turn_count > 0, "Metered returned no TURN servers");
+    eprintln!("[test] Fetched {} ICE servers ({} TURN)", ice_servers.len(), turn_count);
+
+    // 2. Start in-process HTTP signaling server
+    let server_url = start_test_signaling_server().await;
+
+    // 3. Connect both peers in relay-only mode (forces TURN, no host/srflx candidates)
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
+        PeerMesh::connect_full(
+            &server_url, "turn-test", "peer-a", Some("test"), ice_servers.clone(), 200, true,
+        )
+            .await
+            .expect("Peer A failed to connect to signaling");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
+        PeerMesh::connect_full(
+            &server_url, "turn-test", "peer-b", Some("test"), ice_servers, 200, true,
+        )
+            .await
+            .expect("Peer B failed to connect to signaling");
+
+    // 4. Establish WebRTC connection via TURN relay (30s timeout for allocation)
+    establish_connection_timeout(&mut mesh_a, &mut mesh_b, 30).await;
+    eprintln!("[test] WebRTC connected via Metered TURN relay");
+
+    // 5. Exchange multiple full-size intervals (120 BPM, quantum=4 → 8s per interval)
+    //    Simulates sustained session: 4 intervals = 32s of audio data through TURN
+    let freqs_a = [440.0, 550.0, 660.0, 880.0];
+    let freqs_b = [330.0, 494.0, 587.0, 740.0];
+    let num_intervals = freqs_a.len();
+
+    let sr = 48000u32;
+    let ch = 2u16;
+    let buf_size = 4096;
+    let silence = vec![0.0f32; buf_size];
+    let mut out = vec![0.0f32; buf_size];
+
+    for i in 0..num_intervals {
+        let (wire_a, _) = produce_full_interval(freqs_a[i]);
+        let (wire_b, _) = produce_full_interval(freqs_b[i]);
+
+        let interval_beats = (i + 1) as f64 * 16.0; // 16, 32, 48, 64 beats
+        let interval_secs = interval_beats / (120.0 / 60.0); // 8, 16, 24, 32 seconds
+
+        eprintln!(
+            "[test] Interval {} — sending ~{}KB each direction ({:.0}s at 120bpm)",
+            i + 1,
+            wire_a.len() / 1024,
+            interval_secs
+        );
+
+        mesh_a.broadcast_audio(&wire_a).await;
+        mesh_b.broadcast_audio(&wire_b).await;
+
+        // Receive from both sides
+        let (from_at_b, received_at_b) = tokio::time::timeout(
+            Duration::from_secs(15),
+            audio_rx_b.recv(),
+        )
+            .await
+            .unwrap_or_else(|_| panic!("Timed out waiting for interval {} from A via TURN", i + 1))
+            .unwrap_or_else(|| panic!("Audio channel B closed at interval {}", i + 1));
+
+        let (from_at_a, received_at_a) = tokio::time::timeout(
+            Duration::from_secs(15),
+            audio_rx_a.recv(),
+        )
+            .await
+            .unwrap_or_else(|_| panic!("Timed out waiting for interval {} from B via TURN", i + 1))
+            .unwrap_or_else(|| panic!("Audio channel A closed at interval {}", i + 1));
+
+        assert_eq!(from_at_b, "peer-a");
+        assert_eq!(from_at_a, "peer-b");
+        assert!(!received_at_b.is_empty(), "Interval {}: B got empty data from A", i + 1);
+        assert!(!received_at_a.is_empty(), "Interval {}: A got empty data from B", i + 1);
+
+        // Decode and verify real audio energy
+        let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
+        bridge_b.process(&silence, &mut out, 0.0);
+        bridge_b.receive_wire(&from_at_b, &received_at_b);
+        bridge_b.process(&silence, &mut out, 16.0);
+        let energy_b = rms(&out);
+        assert!(
+            energy_b > 0.01,
+            "Interval {}: B should hear A's audio via TURN, RMS={energy_b}",
+            i + 1
+        );
+
+        let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
+        bridge_a.process(&silence, &mut out, 0.0);
+        bridge_a.receive_wire(&from_at_a, &received_at_a);
+        bridge_a.process(&silence, &mut out, 16.0);
+        let energy_a = rms(&out);
+        assert!(
+            energy_a > 0.01,
+            "Interval {}: A should hear B's audio via TURN, RMS={energy_a}",
+            i + 1
+        );
+
+        eprintln!(
+            "[test] Interval {} OK — A→B RMS={energy_b:.4}, B→A RMS={energy_a:.4}, wire={}KB",
+            i + 1,
+            received_at_b.len() / 1024
+        );
+    }
+
+    eprintln!(
+        "[test] Metered TURN relay: all {} intervals passed ({} beats = {:.0}s at 120bpm)",
+        num_intervals,
+        num_intervals * 16,
+        num_intervals as f64 * 16.0 / (120.0 / 60.0)
+    );
+}
+
+// ---------------------------------------------------------------
+// Test: Closing a peer's connection emits PeerFailed event
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_failure_emits_event() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    // 1. Start signaling, connect two peers
+    let server_url = start_test_signaling_server().await;
+
+    let (mut mesh_a, _sync_rx_a, _audio_rx_a) =
+        PeerMesh::connect_with_options(
+            &server_url, "fail-test", "peer-a", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer A connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, _audio_rx_b) =
+        PeerMesh::connect_with_options(
+            &server_url, "fail-test", "peer-b", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer B connect failed");
+
+    // 2. Establish WebRTC connection
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+    eprintln!("[test] Connected — now simulating peer-a failure");
+
+    // 3. Close peer-a's connection to simulate failure
+    mesh_a.close_peer("peer-b").await;
+
+    // 4. Poll mesh_b — expect PeerFailed("peer-a")
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut got_failure = false;
+    loop {
+        tokio::select! {
+            event = mesh_b.poll_signaling() => {
+                if let Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) = event {
+                    assert_eq!(pid, "peer-a", "Expected failure from peer-a, got {pid}");
+                    got_failure = true;
+                    break;
+                }
+            }
+            _ = mesh_a.poll_signaling() => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("Timed out waiting for PeerFailed event");
+            }
+        }
+    }
+
+    assert!(got_failure, "Should have received PeerFailed event");
+    eprintln!("[test] PeerFailed event received — test passed");
+}
+
+// ---------------------------------------------------------------
+// Test: Peer reconnects after connection close, audio flows again
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_reconnects_after_close() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    // 1. Connect and establish
+    let server_url = start_test_signaling_server().await;
+
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
+        PeerMesh::connect_with_options(
+            &server_url, "reconn-test", "peer-a", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer A connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
+        PeerMesh::connect_with_options(
+            &server_url, "reconn-test", "peer-b", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer B connect failed");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+    eprintln!("[test] Initial connection established");
+
+    // 2. Verify audio works before failure
+    let wire_a = produce_interval(440.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+    let (_from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("Pre-failure audio timed out")
+        .expect("Audio channel closed");
+    assert!(!data.is_empty(), "Should receive audio before failure");
+    eprintln!("[test] Pre-failure audio verified");
+
+    // 3. Simulate failure: close peer-a's connection
+    mesh_a.close_peer("peer-b").await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // 4. Re-initiate from mesh_a
+    mesh_a.re_initiate("peer-b").await.expect("re_initiate failed");
+    eprintln!("[test] Re-initiation started");
+
+    // 5. Pump signaling until reconnected
+    establish_connection_timeout(&mut mesh_a, &mut mesh_b, 15).await;
+    eprintln!("[test] Reconnected");
+
+    // 6. Verify audio works after reconnection
+    let wire_a2 = produce_interval(880.0);
+    mesh_a.broadcast_audio(&wire_a2).await;
+    let (_from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("Post-reconnect audio timed out")
+        .expect("Audio channel closed after reconnect");
+    assert!(!data.is_empty(), "Should receive audio after reconnection");
+    eprintln!("[test] Post-reconnect audio verified — test passed");
+}
+
+// ---------------------------------------------------------------
+// Test: New SDP offer replaces stale connection
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_offer_replaces_stale_connection() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    // 1. Connect and establish
+    let server_url = start_test_signaling_server().await;
+
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
+        PeerMesh::connect_with_options(
+            &server_url, "stale-test", "peer-a", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer A connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
+        PeerMesh::connect_with_options(
+            &server_url, "stale-test", "peer-b", Some("test"),
+            wail_net::default_ice_servers(), 200,
+        ).await.expect("Peer B connect failed");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+    eprintln!("[test] Initial connection established");
+
+    // 2. Re-initiate from mesh_a (creates new offer for existing peer)
+    mesh_a.re_initiate("peer-b").await.expect("re_initiate failed");
+    eprintln!("[test] Re-initiation triggered (should replace stale connection)");
+
+    // 3. Pump signaling until new connection established
+    establish_connection_timeout(&mut mesh_a, &mut mesh_b, 15).await;
+    eprintln!("[test] New connection established");
+
+    // 4. Verify audio flows on the new connection
+    let wire_a = produce_interval(440.0);
+    let wire_b = produce_interval(880.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+    mesh_b.broadcast_audio(&wire_b).await;
+
+    let (from_b, data_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("Audio to B timed out")
+        .expect("Audio channel B closed");
+    let (from_a, data_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+        .await.expect("Audio to A timed out")
+        .expect("Audio channel A closed");
+
+    assert_eq!(from_b, "peer-a");
+    assert_eq!(from_a, "peer-b");
+    assert!(!data_b.is_empty());
+    assert!(!data_a.is_empty());
+    eprintln!("[test] Audio verified on replaced connection — test passed");
+}
