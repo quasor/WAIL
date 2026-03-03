@@ -1,0 +1,58 @@
+name: Update Homebrew Formula
+
+# Runs after a GitHub release is created, updating the quasor/homebrew-wail tap
+# with the new version and source tarball SHA256.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download source tarball and compute SHA256
+        id: sha
+        run: |
+          URL="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.version.outputs.tag }}.tar.gz"
+          SHA256=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Update homebrew-wail tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.sha.outputs.sha256 }}"
+          URL="${{ steps.sha.outputs.url }}"
+
+          # Clone the tap repo
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/quasor/homebrew-wail.git" /tmp/tap
+          cd /tmp/tap
+
+          # Read the formula template from this repo and substitute values
+          cp "${{ github.workspace }}/Formula/wail.rb" Formula/wail.rb
+
+          # Update version URL and SHA256
+          sed -i "s|url \"https://github.com/quasor/WAIL/archive/refs/tags/v.*\.tar\.gz\"|url \"${URL}\"|" Formula/wail.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" Formula/wail.rb
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/wail.rb
+          git commit -m "wail ${VERSION}" || exit 0
+          git push
