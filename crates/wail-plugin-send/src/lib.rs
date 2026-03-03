@@ -78,6 +78,36 @@ fn ensure_buf(buf: &mut Vec<f32>, needed: usize) {
     }
 }
 
+/// Compute beat position from cumulative sample count (fallback when host
+/// doesn't provide `pos_beats()`).
+fn beat_position_fallback(cumulative_samples: u64, bpm: f64, sample_rate: f64) -> f64 {
+    cumulative_samples as f64 * bpm / (60.0 * sample_rate)
+}
+
+/// Interleave per-channel DAW buffers into a flat interleaved buffer.
+///
+/// `channels`: slice of per-channel sample slices (e.g. `buffer.as_slice()`)
+/// `output`: destination buffer, must be at least `num_samples * num_channels` long
+/// `num_samples`: number of samples per channel
+/// `playing`: if false, output is filled with silence instead
+fn interleave_channels(
+    channels: &[&mut [f32]],
+    output: &mut [f32],
+    num_samples: usize,
+    playing: bool,
+) {
+    let num_channels = channels.len();
+    if !playing {
+        output[..num_samples * num_channels].fill(0.0);
+        return;
+    }
+    for sample_idx in 0..num_samples {
+        for ch in 0..num_channels {
+            output[sample_idx * num_channels + ch] = channels[ch][sample_idx];
+        }
+    }
+}
+
 impl Plugin for WailSendPlugin {
     const NAME: &'static str = "WAIL Send";
     const VENDOR: &'static str = "WAIL Project";
@@ -202,7 +232,7 @@ impl Plugin for WailSendPlugin {
                     self.beat_fallback_warned = true;
                     nih_log!("WAIL Send: host does not provide beat position — using sample-count fallback");
                 }
-                self.cumulative_samples as f64 * bpm / (60.0 * self.sample_rate as f64)
+                beat_position_fallback(self.cumulative_samples, bpm, self.sample_rate as f64)
             }
         };
         self.cumulative_samples += num_samples as u64;
@@ -219,16 +249,7 @@ impl Plugin for WailSendPlugin {
                 let buf_size = num_samples * num_channels as usize;
                 ensure_buf(&mut self.interleave_buf, buf_size);
                 let interleave = &mut self.interleave_buf[..buf_size];
-                if playing {
-                    for sample_idx in 0..num_samples {
-                        for ch in 0..num_channels as usize {
-                            interleave[sample_idx * num_channels as usize + ch] =
-                                buffer.as_slice()[ch][sample_idx];
-                        }
-                    }
-                } else {
-                    interleave.fill(0.0);
-                }
+                interleave_channels(buffer.as_slice(), interleave, num_samples, playing);
 
                 // Dummy playback buffer (we don't use the output)
                 ensure_buf(&mut self.playback_buf, buf_size);
@@ -383,3 +404,102 @@ impl Vst3Plugin for WailSendPlugin {
 
 nih_export_clap!(WailSendPlugin);
 nih_export_vst3!(WailSendPlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn beat_fallback_at_120bpm() {
+        let sr = 48000.0;
+        let bpm = 120.0;
+        // At 120 BPM, 1 beat = 0.5s = 24000 samples
+        assert!((beat_position_fallback(0, bpm, sr) - 0.0).abs() < 1e-9);
+        assert!((beat_position_fallback(24000, bpm, sr) - 1.0).abs() < 1e-9);
+        assert!((beat_position_fallback(48000, bpm, sr) - 2.0).abs() < 1e-9);
+        // Full interval at 4 bars * 4 beats = 16 beats = 384000 samples
+        assert!((beat_position_fallback(384000, bpm, sr) - 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn beat_fallback_at_90bpm() {
+        let sr = 44100.0;
+        let bpm = 90.0;
+        // At 90 BPM, 1 beat = 60/90 = 0.6667s = 29400 samples
+        let one_beat_samples = (sr * 60.0 / bpm) as u64;
+        assert!((beat_position_fallback(one_beat_samples, bpm, sr) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beat_fallback_accumulates_across_buffers() {
+        let sr = 48000.0;
+        let bpm = 120.0;
+        let buf_size: u64 = 256;
+        let mut cumulative: u64 = 0;
+        let beats_per_buffer = buf_size as f64 * bpm / (60.0 * sr);
+
+        for i in 0..100 {
+            let beat = beat_position_fallback(cumulative, bpm, sr);
+            let expected = i as f64 * beats_per_buffer;
+            assert!(
+                (beat - expected).abs() < 1e-9,
+                "buffer {i}: got {beat}, expected {expected}"
+            );
+            cumulative += buf_size;
+        }
+    }
+
+    #[test]
+    fn interleave_stereo() {
+        let mut left = [1.0f32, 2.0, 3.0, 4.0];
+        let mut right = [5.0f32, 6.0, 7.0, 8.0];
+        let channels: &[&mut [f32]] = &[&mut left, &mut right];
+        let mut output = vec![0.0f32; 8];
+
+        interleave_channels(channels, &mut output, 4, true);
+
+        assert_eq!(output, vec![1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn interleave_mono() {
+        let mut mono = [0.5f32, 0.25, 0.75];
+        let channels: &[&mut [f32]] = &[&mut mono];
+        let mut output = vec![0.0f32; 3];
+
+        interleave_channels(channels, &mut output, 3, true);
+
+        assert_eq!(output, vec![0.5, 0.25, 0.75]);
+    }
+
+    #[test]
+    fn interleave_silence_when_not_playing() {
+        let mut left = [1.0f32, 2.0, 3.0];
+        let mut right = [4.0f32, 5.0, 6.0];
+        let channels: &[&mut [f32]] = &[&mut left, &mut right];
+        let mut output = vec![99.0f32; 6];
+
+        interleave_channels(channels, &mut output, 3, false);
+
+        assert_eq!(output, vec![0.0; 6]);
+    }
+
+    #[test]
+    fn ensure_buf_grows() {
+        let mut buf = vec![1.0f32; 4];
+        ensure_buf(&mut buf, 8);
+        assert_eq!(buf.len(), 8);
+        // Original values preserved
+        assert_eq!(buf[0], 1.0);
+        assert_eq!(buf[3], 1.0);
+        // New values are zero
+        assert_eq!(buf[4], 0.0);
+    }
+
+    #[test]
+    fn ensure_buf_no_shrink() {
+        let mut buf = vec![1.0f32; 8];
+        ensure_buf(&mut buf, 4);
+        assert_eq!(buf.len(), 8); // should not shrink
+    }
+}

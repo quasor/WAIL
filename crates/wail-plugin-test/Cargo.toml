@@ -1,0 +1,21 @@
+[package]
+name = "wail-plugin-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+clack-host = { git = "https://github.com/prokopyl/clack.git" }
+wail-audio = { path = "../wail-audio" }
+tokio = { version = "1", features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[test]]
+name = "send_plugin"
+path = "tests/send_plugin.rs"
+
+[[test]]
+name = "recv_plugin"
+path = "tests/recv_plugin.rs"
