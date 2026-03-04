@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.10 (2026-03-04)
+
+### Fixes
+
+- add pkg-config build dep to Homebrew formula for Opus discovery (#54)
+
 ## 0.4.9 (2026-03-04)
 
 ### Fixes
