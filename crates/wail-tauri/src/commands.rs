@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tracing::{info, warn};
 
-use crate::papertrail::TelemetryHandle;
+use crate::loki::TelemetryHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
 

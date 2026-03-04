@@ -447,10 +447,10 @@ impl PeerConnection {
                 }
             }
             Some(dc) => {
-                warn!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
+                debug!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
             }
             None => {
-                warn!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
+                debug!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
             }
         }
         Ok(())

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 use tracing::field::{Field, Visit};
@@ -10,8 +11,24 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-const ENDPOINT: &str = "https://logs.collector.na-01.cloud.solarwinds.com/v1/logs/bulk";
-const TOKEN: &str = "SEm6aCu8rnELg4EKNLpW3ibNfmpKs2CTF-CBOhIxRBTeKVYYdxu4DOyLpkaPZJiLKqOUd2E";
+// Loki credentials come from environment variables:
+//   GRAFANA_LOKI_URL (e.g., https://logs-prod-021.grafana.net/loki/api/v1/push)
+//   GRAFANA_LOKI_USER (e.g., user ID)
+//   GRAFANA_LOKI_TOKEN (e.g., API token)
+// Defaults to no-op if not configured (logs are only sent to console/stdout).
+
+fn get_loki_url() -> Option<String> {
+    std::env::var("GRAFANA_LOKI_URL").ok()
+}
+
+fn get_loki_user() -> Option<String> {
+    std::env::var("GRAFANA_LOKI_USER").ok()
+}
+
+fn get_loki_token() -> Option<String> {
+    std::env::var("GRAFANA_LOKI_TOKEN").ok()
+}
+
 const FLUSH_INTERVAL_SECS: u64 = 5;
 const MAX_BUFFER_LINES: usize = 10_000;
 
@@ -65,7 +82,7 @@ impl Visit for EventVisitor {
 }
 
 // ---------------------------------------------------------------------------
-// PapertrailLayer
+// LokiLayer
 // ---------------------------------------------------------------------------
 
 /// Shared handle to toggle telemetry on/off at runtime.
@@ -80,12 +97,19 @@ impl TelemetryHandle {
     }
 }
 
-pub struct PapertrailLayer {
-    tx: mpsc::UnboundedSender<String>,
+/// A buffered log line with its level for Loki stream labeling.
+struct LogLine {
+    level: String,
+    timestamp_ns: String,
+    message: String,
+}
+
+pub struct LokiLayer {
+    tx: mpsc::UnboundedSender<LogLine>,
     enabled: Arc<AtomicBool>,
 }
 
-impl PapertrailLayer {
+impl LokiLayer {
     pub fn new() -> (Self, TelemetryHandle) {
         let (tx, rx) = mpsc::unbounded_channel();
         let enabled = Arc::new(AtomicBool::new(true));
@@ -93,15 +117,15 @@ impl PapertrailLayer {
         // Spawn flusher on a dedicated thread with its own tokio runtime so it
         // doesn't depend on the Tauri async runtime lifecycle.
         std::thread::Builder::new()
-            .name("papertrail-flusher".into())
+            .name("loki-flusher".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .expect("papertrail tokio runtime");
+                    .expect("loki tokio runtime");
                 rt.block_on(flusher_loop(rx));
             })
-            .expect("papertrail thread");
+            .expect("loki thread");
 
         let handle = TelemetryHandle {
             enabled: enabled.clone(),
@@ -110,7 +134,7 @@ impl PapertrailLayer {
     }
 }
 
-impl<S> Layer<S> for PapertrailLayer
+impl<S> Layer<S> for LokiLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -136,9 +160,8 @@ where
             return;
         }
 
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let metadata = event.metadata();
-        let level = metadata.level();
+        let level = metadata.level().as_str().to_lowercase();
         let target = metadata.target();
 
         // Extract event message and fields
@@ -170,8 +193,18 @@ where
             format!(" [{}]", pairs.join(" "))
         };
 
-        let line = format!("{now} {level} {target}{span_str} {}", visitor.message);
-        let _ = self.tx.send(line);
+        let timestamp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string();
+
+        let message = format!("{target}{span_str} {}", visitor.message);
+        let _ = self.tx.send(LogLine {
+            level,
+            timestamp_ns,
+            message,
+        });
     }
 }
 
@@ -179,9 +212,9 @@ where
 // Background flusher
 // ---------------------------------------------------------------------------
 
-async fn flusher_loop(mut rx: mpsc::UnboundedReceiver<String>) {
+async fn flusher_loop(mut rx: mpsc::UnboundedReceiver<LogLine>) {
     let client = reqwest::Client::new();
-    let mut buffer: Vec<String> = Vec::new();
+    let mut buffer: Vec<LogLine> = Vec::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(FLUSH_INTERVAL_SECS));
 
     loop {
@@ -210,18 +243,58 @@ async fn flusher_loop(mut rx: mpsc::UnboundedReceiver<String>) {
     }
 }
 
-async fn flush(client: &reqwest::Client, buffer: &mut Vec<String>) {
+async fn flush(client: &reqwest::Client, buffer: &mut Vec<LogLine>) {
     if buffer.is_empty() {
         return;
     }
 
-    let body = buffer.join("\n");
+    // If Loki credentials are not configured, skip remote flush (logs only go to console).
+    let url = match get_loki_url() {
+        Some(u) => u,
+        None => {
+            return;
+        }
+    };
+
+    let user = match get_loki_user() {
+        Some(u) => u,
+        None => {
+            return;
+        }
+    };
+
+    let token = match get_loki_token() {
+        Some(t) => t,
+        None => {
+            return;
+        }
+    };
+
+    // Group log lines by level for Loki stream semantics
+    let mut streams: BTreeMap<&str, Vec<[&str; 2]>> = BTreeMap::new();
+    for line in buffer.iter() {
+        streams
+            .entry(&line.level)
+            .or_default()
+            .push([&line.timestamp_ns, &line.message]);
+    }
+
+    let streams_json: Vec<serde_json::Value> = streams
+        .into_iter()
+        .map(|(level, values)| {
+            serde_json::json!({
+                "stream": { "app": "wail-tauri", "level": level },
+                "values": values,
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({ "streams": streams_json });
 
     match client
-        .post(ENDPOINT)
-        .header("Content-Type", "application/octet-stream")
-        .header("Authorization", format!("Bearer {TOKEN}"))
-        .body(body)
+        .post(&url)
+        .basic_auth(&user, Some(&token))
+        .json(&body)
         .send()
         .await
     {
@@ -230,14 +303,14 @@ async fn flush(client: &reqwest::Client, buffer: &mut Vec<String>) {
         }
         Ok(resp) => {
             eprintln!(
-                "[papertrail] flush failed: HTTP {} — keeping {} lines in buffer",
+                "[loki] flush failed: HTTP {} — keeping {} lines in buffer",
                 resp.status(),
                 buffer.len()
             );
         }
         Err(e) => {
             eprintln!(
-                "[papertrail] flush error: {e} — keeping {} lines in buffer",
+                "[loki] flush error: {e} — keeping {} lines in buffer",
                 buffer.len()
             );
         }

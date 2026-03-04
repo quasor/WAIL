@@ -1,7 +1,7 @@
 mod commands;
 pub mod events;
 mod hb;
-mod papertrail;
+mod loki;
 mod recorder;
 mod session;
 
@@ -27,11 +27,11 @@ pub fn run() {
     });
 
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
-    let (papertrail_layer, telemetry_handle) = papertrail::PapertrailLayer::new();
+    let (loki_layer, telemetry_handle) = loki::LokiLayer::new();
 
     tracing_subscriber::registry()
         .with(fmt_layer)
-        .with(papertrail_layer)
+        .with(loki_layer)
         .init();
 
     tauri::Builder::default()
