@@ -25,6 +25,11 @@ class Wail < Formula
   depends_on :macos # requires macOS WebKit (used by Tauri)
 
   def install
+    # Homebrew's superenv pkg-config shim references the legacy "pkg-config"
+    # opt path, but modern Homebrew provides it via "pkgconf". Point the Rust
+    # pkg-config crate directly to the real binary so audiopus_sys finds Opus.
+    ENV["PKG_CONFIG"] = Formula["pkgconf"].opt_bin/"pkg-config"
+
     # CMake 4.x rejects old cmake_minimum_required() values in rusty_link's
     # vendored Ableton Link SDK. This env var tells CMake to accept them.
     ENV["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"

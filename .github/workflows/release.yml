@@ -277,6 +277,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
 
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          path: source
+          sparse-checkout: homebrew
+
       - name: Determine tag
         id: tag
         run: |
@@ -334,6 +340,9 @@ jobs:
           URL="https://github.com/quasor/WAIL/releases/download/v${VERSION}/wail-${VERSION}-src.tar.gz"
 
           git clone "https://x-access-token:${GH_TOKEN}@github.com/quasor/homebrew-wail.git" tap
+          # Copy full formula from source so all formula changes are deployed
+          cp source/homebrew/wail.rb tap/Formula/wail.rb
+          # Patch URL and SHA for this release
           sed -i \
             "s|url \".*\"|url \"${URL}\"|" \
             tap/Formula/wail.rb
