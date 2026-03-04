@@ -60,6 +60,19 @@ WAIL has three components that work together:
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for build instructions, project structure, and testing.
 
+## Thanks
+
+WAIL's intervalic audio model is directly inspired by [NINJAM](https://www.ninjam.com/), created by Justin Frankel at [Cockos](https://www.cockos.com/). The idea that you can jam with anyone in the world by accepting one interval of latency changed everything.
+
+Built on the shoulders of great open-source projects:
+[Ableton Link](https://www.ableton.com/link/) (tempo/phase sync),
+[webrtc-rs](https://github.com/webrtc-rs/webrtc) (pure Rust WebRTC),
+[nih-plug](https://github.com/robbert-vdh/nih-plug) (CLAP/VST3 plugin framework),
+[Opus](https://opus-codec.org/) (audio codec),
+[Tauri](https://tauri.app/) (desktop app framework).
+
+Thanks to early supporters [Jeff Hopkins](https://www.youtube.com/@JeffHopkinsMusic) and [Geren M](https://www.youtube.com/@GerenM63) for testing, feedback, and encouragement.
+
 ## License
 
 MIT
