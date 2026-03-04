@@ -5,7 +5,7 @@ allowed-tools: [Bash]
 
 # Release
 
-Find and merge the open release PR (titled "chore: prepare release v*").
+Find and merge the open release PR (titled "chore: prepare release").
 
 ## Instructions
 
