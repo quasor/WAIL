@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.14 (2026-03-04)
+
+### Fixes
+
+- remove post_install from homebrew formula to fix sandbox EPERM (#66)
+
 ## 0.4.13 (2026-03-04)
 
 ### Features
