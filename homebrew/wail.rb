@@ -53,38 +53,16 @@ class Wail < Formula
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
   end
 
-  def post_install
-    clap_dest = Pathname.new(Dir.home)/"Library/Audio/Plug-Ins/CLAP"
-    vst3_dest = Pathname.new(Dir.home)/"Library/Audio/Plug-Ins/VST3"
-    clap_dest.mkpath
-    vst3_dest.mkpath
-
-    %w[wail-plugin-send wail-plugin-recv].each do |name|
-      clap_src = lib/"#{name}.clap"
-      vst3_src = lib/"#{name}.vst3"
-      if clap_src.exist?
-        dest = clap_dest/"#{name}.clap"
-        dest.rmtree if dest.exist?
-        cp_r clap_src, dest
-      end
-      if vst3_src.exist?
-        dest = vst3_dest/"#{name}.vst3"
-        dest.rmtree if dest.exist?
-        cp_r vst3_src, dest
-      end
-    end
-  end
-
   def caveats
     <<~EOS
-      CLAP and VST3 plugins have been installed to:
+      To install the CLAP and VST3 plugins to your DAW's plugin directories, run:
+        wail-install-plugins
+
+      This copies plugin bundles to:
         ~/Library/Audio/Plug-Ins/CLAP/
         ~/Library/Audio/Plug-Ins/VST3/
 
       Rescan plugins in your DAW to pick them up.
-
-      To reinstall plugins manually at any time, run:
-        wail-install-plugins
 
       Note: `wail` launches the app binary directly. For the polished macOS .app
       bundle (dock icon, native menu bar), download the DMG from:
