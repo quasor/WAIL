@@ -328,8 +328,16 @@ impl IntervalRing {
         if let Some(pos) = self.affinity_map.iter().position(|(ident, _)| ident == identity) {
             let (_, slot_idx) = self.affinity_map.remove(pos);
             if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
-                // Reclaim the reserved slot — update peer_slot_map to point to this slot
-                self.peer_slot_map.retain(|(pid, _)| pid != peer_id);
+                // Free any existing slot before reclaiming the affinity slot
+                if let Some(old_pos) = self.peer_slot_map.iter().position(|(pid, _)| pid == peer_id) {
+                    let (_, old_idx) = self.peer_slot_map.remove(old_pos);
+                    if old_idx != slot_idx && old_idx < self.peer_slots.len() {
+                        self.peer_slots[old_idx].active = false;
+                        self.peer_slots[old_idx].samples.clear();
+                        self.peer_slots[old_idx].read_pos = 0;
+                    }
+                }
+                // Reclaim the reserved slot
                 self.peer_slot_map.push((peer_id.to_string(), slot_idx));
                 self.peer_slots[slot_idx].peer_id = peer_id.to_string();
                 self.peer_slots[slot_idx].active = true;

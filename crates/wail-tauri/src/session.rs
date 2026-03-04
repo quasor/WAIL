@@ -529,8 +529,6 @@ async fn session_loop(
                                     mesh = new_mesh;
                                     sync_rx = new_sync_rx;
                                     audio_rx = new_audio_rx;
-                                    peer_names.clear();
-                                    peer_identities.clear();
                                     // Don't clear slot_affinity — preserve across signaling reconnect
                                     // so peers get the same slot when they rejoin
                                     for (pid, slot) in peer_slots.drain() {
@@ -540,6 +538,8 @@ async fn session_loop(
                                             slot_affinity.insert(ident.clone(), slot);
                                         }
                                     }
+                                    peer_names.clear();
+                                    peer_identities.clear();
                                     hello_sent.clear();
                                     peer_reconnect_attempts.clear();
                                     clock = ClockSync::new();
