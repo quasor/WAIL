@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.9 (2026-03-04)
+
+### Fixes
+
+- set CMAKE_POLICY_VERSION_MINIMUM for CMake 4.x compat in Homebrew (#51)
+
 ## 0.4.8 (2026-03-03)
 
 ### Fixes
