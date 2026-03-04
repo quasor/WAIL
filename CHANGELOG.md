@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.13 (2026-03-04)
+
+### Features
+
+- add /release slash command to merge release PRs (#62)
+
+### Fixes
+
+- auto-install DAW plugins during brew install (#60)
+- Homebrew formula now automatically installs CLAP/VST3 plugins to ~/Library/Audio/Plug-Ins/ during `brew install`, removing the need for a separate `wail-install-plugins` command. The helper script is still available for manual reinstallation.
+
 ## 0.4.12 (2026-03-04)
 
 ### Fixes
