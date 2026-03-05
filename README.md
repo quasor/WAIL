@@ -28,6 +28,7 @@ This builds the WAIL binary and DAW plugins from source. The CLAP and VST3 plugi
 2. **Enable Ableton Link in your DAW.** WAIL relies on Link for tempo and phase sync.
    - *Ableton Live:* Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
    - *Bitwig Studio:* Settings > Synchronization > enable Link.
+   - *REAPER:* Install [ReaBlink](https://github.com/ak5k/reablink), which adds Ableton Link support via a REAPER extension.
    - Other DAWs — check your DAW's documentation for Link support.
 
 3. **Load WAIL Send** on the track or bus you want to share. This plugin captures audio and sends it to your peers at each interval boundary.
