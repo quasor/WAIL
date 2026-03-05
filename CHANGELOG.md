@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.18 (2026-03-05)
+
+### Features
+
+- enforce strict conventional commit prefix rules (#88)
+- Add CI test job gating builds, bundle CLAP/VST3 plugins into installers, and remove manual plugin install button from UI.
+
 ## 0.4.17 (2026-03-05)
 
 ### Features
