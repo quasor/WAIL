@@ -195,7 +195,8 @@ App→Plugin: remote peer's interval, peer_id identifies the sender.
 
 ```
 1. Peer A fetches ICE servers (Metered TURN credentials via API)
-2. Peer A POSTs join to HTTP signaling server (with room password + stream_count)
+2. Peer A POSTs join to HTTP signaling server (with room password, stream_count, client_version)
+   - Server rejects outdated clients with 426 Upgrade Required (minimum version enforced server-side)
 3. Server replies with list of existing peers
 4. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
 5. Offer relayed through signaling server (HTTP polling)
@@ -247,7 +248,7 @@ These clocks are **not interchangeable**. ClockSync offsets cannot adjust Link t
 
 | Message | Direction | Purpose |
 |---------|-----------|---------|
-| `Join` | Client → Server | Join a named room (includes `stream_count`) |
+| `Join` | Client → Server | Join a named room (includes `stream_count`, `client_version`) |
 | `PeerList` | Server → Client | Current room members |
 | `PeerJoined` | Server → Client | New peer notification |
 | `PeerLeft` | Server → Client | Peer disconnect notification |
