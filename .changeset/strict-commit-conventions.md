@@ -2,4 +2,4 @@
 default: minor
 ---
 
-Enforce strict conventional commit prefix rules in CLAUDE.md to ensure correct version bumps.
+Add CI test job gating builds, bundle CLAP/VST3 plugins into installers, and remove manual plugin install button from UI.
