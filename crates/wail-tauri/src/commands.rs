@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::State;
 use tracing::{info, warn};
 
 use crate::identity::PeerIdentity;
@@ -145,135 +145,6 @@ pub fn set_test_tone(state: State<'_, SessionState>, enabled: bool) -> Result<()
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PluginStatus {
-    pub send_clap: bool,
-    pub send_vst3: bool,
-    pub recv_clap: bool,
-    pub recv_vst3: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PluginPaths {
-    pub send_clap_path: String,
-    pub send_vst3_path: String,
-    pub recv_clap_path: String,
-    pub recv_vst3_path: String,
-}
-
-const PLUGIN_NAMES: [&str; 2] = ["wail-plugin-send", "wail-plugin-recv"];
-
-#[tauri::command]
-pub fn check_plugins_installed() -> Result<PluginStatus, String> {
-    let (clap_dir, vst3_dir) = plugin_dirs().map_err(|e| e.to_string())?;
-    Ok(PluginStatus {
-        send_clap: clap_dir.join("wail-plugin-send.clap").exists(),
-        send_vst3: vst3_dir.join("wail-plugin-send.vst3").exists(),
-        recv_clap: clap_dir.join("wail-plugin-recv.clap").exists(),
-        recv_vst3: vst3_dir.join("wail-plugin-recv.vst3").exists(),
-    })
-}
-
-#[tauri::command]
-pub fn install_plugins(app: tauri::AppHandle) -> Result<PluginPaths, String> {
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Cannot find resource dir: {e}"))?;
-
-    let (clap_dir, vst3_dir) = plugin_dirs().map_err(|e| e.to_string())?;
-
-    std::fs::create_dir_all(&clap_dir)
-        .map_err(|e| format!("Could not create {}: {e}", clap_dir.display()))?;
-    std::fs::create_dir_all(&vst3_dir)
-        .map_err(|e| format!("Could not create {}: {e}", vst3_dir.display()))?;
-
-    for plugin in &PLUGIN_NAMES {
-        let clap_src = resource_path.join(format!("plugins/{plugin}.clap"));
-        let vst3_src = resource_path.join(format!("plugins/{plugin}.vst3"));
-
-        if !clap_src.exists() {
-            return Err(format!(
-                "CLAP plugin not found in app bundle at {}",
-                clap_src.display()
-            ));
-        }
-        if !vst3_src.exists() {
-            return Err(format!(
-                "VST3 plugin not found in app bundle at {}",
-                vst3_src.display()
-            ));
-        }
-
-        copy_bundle(&clap_src, &clap_dir).map_err(|e| e.to_string())?;
-        copy_bundle(&vst3_src, &vst3_dir).map_err(|e| e.to_string())?;
-    }
-
-    Ok(PluginPaths {
-        send_clap_path: clap_dir.join("wail-plugin-send.clap").to_string_lossy().into(),
-        send_vst3_path: vst3_dir.join("wail-plugin-send.vst3").to_string_lossy().into(),
-        recv_clap_path: clap_dir.join("wail-plugin-recv.clap").to_string_lossy().into(),
-        recv_vst3_path: vst3_dir.join("wail-plugin-recv.vst3").to_string_lossy().into(),
-    })
-}
-
-fn plugin_dirs() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
-    #[cfg(target_os = "macos")]
-    {
-        let home = home_dir()?;
-        let base = home.join("Library/Audio/Plug-Ins");
-        Ok((base.join("CLAP"), base.join("VST3")))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let home = home_dir()?;
-        Ok((home.join(".clap"), home.join(".vst3")))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let common = std::path::PathBuf::from(
-            std::env::var("COMMONPROGRAMFILES")
-                .map_err(|_| anyhow::anyhow!("COMMONPROGRAMFILES not set"))?,
-        );
-        Ok((common.join("CLAP"), common.join("VST3")))
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    anyhow::bail!("Unsupported platform")
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn home_dir() -> anyhow::Result<std::path::PathBuf> {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("HOME environment variable not set"))
-}
-
-fn copy_bundle(src: &std::path::Path, dest_dir: &std::path::Path) -> anyhow::Result<()> {
-    let dest = dest_dir.join(src.file_name().unwrap());
-    if src.is_dir() {
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)?;
-        }
-        copy_dir_all(src, &dest)?;
-    } else {
-        std::fs::copy(src, &dest)?;
-    }
-    info!(path = %dest.display(), "Plugin installed");
-    Ok(())
-}
-
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
-        } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
 
 #[tauri::command]
 pub fn get_default_recording_dir() -> Result<String, String> {

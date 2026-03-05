@@ -54,8 +54,6 @@ pub fn run() {
             commands::change_bpm,
             commands::set_test_tone,
             commands::set_telemetry,
-            commands::install_plugins,
-            commands::check_plugins_installed,
             commands::list_public_rooms,
             commands::get_default_recording_dir,
             commands::cleanup_recordings,

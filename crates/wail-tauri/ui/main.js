@@ -10,8 +10,6 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const setBpmBtn = document.getElementById('set-bpm-btn');
-const installPluginsBtn = document.getElementById('install-plugins-btn');
-const pluginStatus = document.getElementById('plugin-status');
 const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
 
 // State
@@ -441,43 +439,3 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// --- Plugin Install ---
-async function checkPlugins() {
-  try {
-    const status = await invoke('check_plugins_installed');
-    if (status.send_clap && status.send_vst3 && status.recv_clap && status.recv_vst3) {
-      pluginStatus.textContent = 'Plugins installed';
-      pluginStatus.className = 'connected';
-      installPluginsBtn.style.display = 'none';
-    } else {
-      const missing = [];
-      if (!status.send_clap) missing.push('Send CLAP');
-      if (!status.send_vst3) missing.push('Send VST3');
-      if (!status.recv_clap) missing.push('Recv CLAP');
-      if (!status.recv_vst3) missing.push('Recv VST3');
-      pluginStatus.textContent = `Missing: ${missing.join(', ')}`;
-      installPluginsBtn.style.display = '';
-    }
-  } catch (err) {
-    pluginStatus.textContent = 'Could not check plugin status';
-    installPluginsBtn.style.display = 'none';
-  }
-}
-
-installPluginsBtn.addEventListener('click', async () => {
-  installPluginsBtn.disabled = true;
-  installPluginsBtn.textContent = 'Installing...';
-  try {
-    const result = await invoke('install_plugins');
-    pluginStatus.textContent = 'Plugins installed';
-    pluginStatus.className = 'connected';
-    installPluginsBtn.style.display = 'none';
-  } catch (err) {
-    showError(joinError, `Plugin install failed: ${err}`);
-    installPluginsBtn.disabled = false;
-    installPluginsBtn.textContent = 'Install Plugins';
-  }
-});
-
-// Check plugin status on load
-checkPlugins();
