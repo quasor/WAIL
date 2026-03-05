@@ -244,6 +244,9 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
+      - name: Run plugin integration tests
+        run: cargo test -p wail-plugin-test
+
       - name: Build Tauri app
         run: cargo tauri build
 
