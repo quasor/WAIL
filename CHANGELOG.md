@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.16 (2026-03-05)
+
+### Features
+
+- implement multi-send-streams feature (#77)
+- Add local session recording to the WAIL app. New recording options in the Advanced settings panel let you capture jam sessions as WAV files to disk. Supports recording per-peer stems (separate WAV per participant) or a single mixed WAV. Includes configurable recording directory, retention policy (auto-delete old sessions after N days), and a live recording indicator with file size display in the session view.
+- Enable multiple WAIL Send plugin instances to send independent audio streams to the same peer. Each unique (peer_id, stream_id) pair gets its own auxiliary output slot in the Recv plugin. Send plugin includes stream_index parameter (0-30). Audio wire format bumped to v2 with stream_id encoding. Server enforces global capacity limit (SUM of stream_counts ≤ 31 per room) with 409 response on overflow.
+- Add public rooms: rooms created without a password are listed in a browsable directory. Both the desktop app and web listener show a "Public Rooms" tab with auto-refreshing room list. Signaling server gains `?action=list` and `?action=update` endpoints.
+
+### Fixes
+
+- simplify release skill search command (#76)
+- gate audio sending until beat-locked when joining a room (#78)
+- replace Grafana Loki telemetry with local rotating logs (#81)
+- call audio_gate.on_peer_list() for all peer counts, not just n > 0 (#82)
+- correct changeset frontmatter format for knope version bumping (#83)
+
+#### fix: gate audio sending until beat-locked when joining a room with existing peers
+
+When a peer joins a non-empty room, audio intervals are now held back until the first `StateSnapshot` message establishes beat sync with the room. This prevents unsynchronized audio from reaching remote peers outside interval boundaries. First peer and reconnection-to-empty-room cases remain ungated immediately. Gate state is also exposed in `StatusUpdate` for UI display.
+
+#### Local debug log
+
+The telemetry checkbox now saves logs to a local rotating flat file (`wail.log` in the app data directory, up to 10 × 50 MB archives) instead of streaming to Grafana Loki.
+
 ## 0.4.15 (2026-03-04)
 
 ### Features
