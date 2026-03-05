@@ -1,8 +1,8 @@
 mod commands;
 pub mod events;
+mod filelog;
 mod hb;
 mod identity;
-mod loki;
 mod recorder;
 mod session;
 
@@ -28,18 +28,22 @@ pub fn run() {
     });
 
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
-    let (loki_layer, telemetry_handle) = loki::LokiLayer::new();
+    let (file_layer, telemetry_handle) = filelog::FileLogLayer::new();
 
     tracing_subscriber::registry()
         .with(fmt_layer)
-        .with(loki_layer)
+        .with(file_layer)
         .init();
 
+    let th = telemetry_handle.clone();
     tauri::Builder::default()
         .manage(SessionState::default())
         .manage(telemetry_handle)
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
+            if let Err(e) = th.set_log_dir(&data_dir.join("logs")) {
+                eprintln!("[filelog] failed to open log file: {e}");
+            }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity));
             Ok(())
