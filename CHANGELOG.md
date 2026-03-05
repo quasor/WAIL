@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.17 (2026-03-05)
+
+### Features
+
+- Thread `stream_count` through the join flow and add client version check. The signaling server now validates a minimum client version (0.4.16) and rejects outdated clients with 426 Upgrade Required, providing an actionable error message directing users to update.
+
 ## 0.4.16 (2026-03-05)
 
 ### Features
