@@ -58,7 +58,7 @@ jobs:
             echo "No changesets or conventional commits found. Creating fallback patch changeset."
             mkdir -p .changeset
             COMMIT_MSG=$(git log -1 --format='%s')
-            printf -- '---\ntype: patch\n---\n\n%s\n' "$COMMIT_MSG" > .changeset/auto-patch.md
+            printf -- '---\ndefault: patch\n---\n\n%s\n' "$COMMIT_MSG" > .changeset/auto-patch.md
           fi
 
       - name: Run knope prepare-release

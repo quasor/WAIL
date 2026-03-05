@@ -159,6 +159,15 @@ knope document-change
 
 This creates a markdown file in `.changeset/` describing what changed and the bump type (major/minor/patch). Commit the changeset file with your PR. Conventional commit messages (`feat:`, `fix:`, `feat!:`) also work and are picked up automatically.
 
+**Changeset frontmatter format:** The YAML frontmatter must use `default: <type>` (e.g., `default: minor`). Do NOT use `type: <type>` or package names — knope silently ignores unrecognized package keys. Example:
+```markdown
+---
+default: minor
+---
+
+Description of the change.
+```
+
 ### Release pipeline (automated via GitHub Actions)
 
 Releases are fully automated — no manual `knope` commands needed:

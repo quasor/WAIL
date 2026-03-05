@@ -1,6 +1,5 @@
 ---
-"wail-tauri": patch
-"wail-net": patch
+default: patch
 ---
 
 fix: gate audio sending until beat-locked when joining a room with existing peers
