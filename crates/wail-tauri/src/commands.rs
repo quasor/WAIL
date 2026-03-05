@@ -63,6 +63,7 @@ pub fn join_room(
     recording_directory: Option<String>,
     recording_stems: Option<bool>,
     recording_retention_days: Option<u32>,
+    stream_count: Option<u16>,
 ) -> Result<JoinResult, String> {
     let mut session = state.lock().map_err(|e| e.to_string())?;
     if session.is_some() {
@@ -92,6 +93,7 @@ pub fn join_room(
         } else {
             None
         },
+        stream_count: stream_count.unwrap_or(1),
     };
 
     let handle = crate::session::spawn_session(app, config).map_err(|e| e.to_string())?;

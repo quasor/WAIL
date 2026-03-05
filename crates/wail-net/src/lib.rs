@@ -171,10 +171,10 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false).await
+        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false, 1).await
     }
 
-    /// Connect with custom ICE servers, poll interval, and relay-only mode.
+    /// Connect with custom ICE servers, poll interval, relay-only mode, and stream count.
     /// When `relay_only` is true, only TURN relay candidates are used (no host/srflx).
     pub async fn connect_full(
         server_url: &str,
@@ -184,13 +184,14 @@ impl PeerMesh {
         ice_servers: Vec<RTCIceServer>,
         poll_interval_ms: u64,
         relay_only: bool,
+        stream_count: u16,
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        let signaling = SignalingClient::connect_with_poll_interval(
-            server_url, room, peer_id, password, poll_interval_ms,
+        let signaling = SignalingClient::connect_with_options(
+            server_url, room, peer_id, password, poll_interval_ms, stream_count,
         ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);

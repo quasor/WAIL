@@ -75,6 +75,21 @@ async function hashPassword(password: string): Promise<string> {
     .join("");
 }
 
+const MIN_CLIENT_VERSION = "0.4.16";
+
+/** Compare two semver strings. Returns -1, 0, or 1. */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -725,8 +740,13 @@ export default async function(req: Request): Promise<Response> {
       // POST ?action=join  body: { room, peer_id, password }
       // -------------------------------------------------------------------
       case "join": {
-        const { room, peer_id, password, display_name, bpm, stream_count: reqStreamCount } = await req.json();
+        const { room, peer_id, password, display_name, bpm, stream_count: reqStreamCount, client_version } = await req.json();
         if (!room || !peer_id) return json({ error: "room and peer_id required" }, 400);
+
+        // Reject clients that are too old or don't send a version
+        if (!client_version || compareSemver(client_version, MIN_CLIENT_VERSION) < 0) {
+          return json({ error: "client version too old", min_version: MIN_CLIENT_VERSION }, 426);
+        }
 
         const streamCount = Math.max(1, Math.min(31, reqStreamCount || 1));
 

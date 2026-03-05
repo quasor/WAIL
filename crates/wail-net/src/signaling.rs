@@ -104,6 +104,7 @@ impl SignalingClient {
             "room": room,
             "peer_id": peer_id,
             "stream_count": stream_count,
+            "client_version": env!("CARGO_PKG_VERSION"),
         });
         if let Some(pw) = password {
             body["password"] = serde_json::Value::String(pw.to_string());
@@ -122,6 +123,15 @@ impl SignalingClient {
             let error_body: serde_json::Value = resp.json().await.unwrap_or_default();
             let slots = error_body["slots_available"].as_u64().unwrap_or(0);
             anyhow::bail!("Room full — only {slots} stream slots available");
+        }
+
+        if resp.status() == reqwest::StatusCode::UPGRADE_REQUIRED {
+            let error_body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let min_version = error_body["min_version"].as_str().unwrap_or("unknown");
+            anyhow::bail!(
+                "Your WAIL version ({}) is outdated. Please update to at least version {min_version}.",
+                env!("CARGO_PKG_VERSION")
+            );
         }
 
         let join_resp: JoinResponse = resp.error_for_status()?.json().await?;

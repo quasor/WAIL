@@ -66,6 +66,7 @@ pub struct SessionConfig {
     pub ipc_port: u16,
     pub test_tone: bool,
     pub recording: Option<RecordingConfig>,
+    pub stream_count: u16,
 }
 
 pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHandle> {
@@ -126,6 +127,7 @@ async fn session_loop(
         ipc_port,
         test_tone,
         recording: recording_config,
+        stream_count,
     } = config;
 
     ui_info!(&app, "Starting peer {peer_id} as {display_name} in room {room} (BPM {bpm}, {bars} bars, quantum {quantum})");
@@ -150,7 +152,7 @@ async fn session_loop(
 
     // Connect to signaling server
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect_with_ice(&server, &room, &peer_id, password.as_deref(), ice_servers).await?;
+        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, 5_000, false, stream_count).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(

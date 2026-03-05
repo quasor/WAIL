@@ -415,7 +415,7 @@ async fn metered_turn_relay_live() {
     // 3. Connect both peers in relay-only mode (forces TURN, no host/srflx candidates)
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
         PeerMesh::connect_full(
-            &server_url, "turn-test", "peer-a", Some("test"), ice_servers.clone(), 200, true,
+            &server_url, "turn-test", "peer-a", Some("test"), ice_servers.clone(), 200, true, 1,
         )
             .await
             .expect("Peer A failed to connect to signaling");
@@ -424,7 +424,7 @@ async fn metered_turn_relay_live() {
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
         PeerMesh::connect_full(
-            &server_url, "turn-test", "peer-b", Some("test"), ice_servers, 200, true,
+            &server_url, "turn-test", "peer-b", Some("test"), ice_servers, 200, true, 1,
         )
             .await
             .expect("Peer B failed to connect to signaling");
