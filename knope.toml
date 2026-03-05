@@ -3,7 +3,7 @@ versioned_files = ["Cargo.toml", "crates/wail-tauri/tauri.conf.json"]
 changelog = "CHANGELOG.md"
 
 [github]
-owner = "quasor"
+owner = "MostDistant"
 repo = "WAIL"
 
 [[workflows]]

@@ -337,7 +337,7 @@ jobs:
             ${{ steps.files.outputs.src_tarball }}
 
       # Update the Homebrew tap formula with the new version and SHA256.
-      # Requires a HOMEBREW_TAP_TOKEN secret with push access to quasor/homebrew-wail.
+      # Requires a HOMEBREW_TAP_TOKEN secret with push access to MostDistant/homebrew-wail.
       # If the secret is not configured, this step is skipped gracefully.
       - name: Update Homebrew tap
         continue-on-error: true
@@ -347,9 +347,9 @@ jobs:
           [ -z "${GH_TOKEN}" ] && echo "HOMEBREW_TAP_TOKEN not set, skipping tap update." && exit 0
           VERSION="${{ steps.tag.outputs.version }}"
           SHA=$(cat wail-homebrew-src/wail-*-src.tar.gz.sha256 | head -1)
-          URL="https://github.com/quasor/WAIL/releases/download/v${VERSION}/wail-${VERSION}-src.tar.gz"
+          URL="https://github.com/MostDistant/WAIL/releases/download/v${VERSION}/wail-${VERSION}-src.tar.gz"
 
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/quasor/homebrew-wail.git" tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/MostDistant/homebrew-wail.git" tap
           # Copy full formula from source so all formula changes are deployed
           cp source/homebrew/wail.rb tap/Formula/wail.rb
           # Patch URL and SHA for this release

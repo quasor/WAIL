@@ -4,15 +4,15 @@ WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across 
 
 ## Install
 
-Download the latest release from the [Releases page](https://github.com/quasor/WAIL/releases).
+Download the latest release from the [Releases page](https://github.com/MostDistant/WAIL/releases).
 
 **macOS** — Open the DMG and drag WAIL to Applications. Run the included `.pkg` installer to install the audio plugins.
 
 **macOS (Homebrew, from source)** — Build and install directly from source:
 
 ```sh
-brew tap quasor/wail
-brew install quasor/wail/wail
+brew tap MostDistant/wail
+brew install MostDistant/wail/wail
 ```
 
 This builds the WAIL binary and DAW plugins from source. The CLAP and VST3 plugins are automatically installed to `~/Library/Audio/Plug-Ins/` — just rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
