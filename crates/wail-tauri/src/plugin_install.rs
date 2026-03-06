@@ -1,6 +1,14 @@
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
+/// All plugin bundle names we expect to find.
+const PLUGIN_NAMES: &[&str] = &[
+    "wail-plugin-send.clap",
+    "wail-plugin-recv.clap",
+    "wail-plugin-send.vst3",
+    "wail-plugin-recv.vst3",
+];
+
 struct PluginDirs {
     clap: PathBuf,
     vst3: PathBuf,
@@ -24,10 +32,50 @@ fn system_plugin_dirs() -> Option<PluginDirs> {
     }
 }
 
-/// Install plugins from bundled resources if they are not already present in
-/// the system plugin directories. Returns a list of error messages for any
-/// plugins that failed to install (already-present plugins are not errors).
-pub fn install_if_missing(resource_dir: &Path) -> Vec<String> {
+/// Returns true if `dir` contains at least one expected plugin bundle.
+fn dir_has_plugins(dir: &Path) -> bool {
+    PLUGIN_NAMES.iter().any(|name| dir.join(name).exists())
+}
+
+/// Locate the directory containing bundled plugin files.
+///
+/// Search order:
+/// 1. Tauri resource dir: `{resource_dir}/plugins/`
+/// 2. Homebrew-style: `{exe_dir}/../lib/` (resolves Cellar symlinks)
+pub fn find_plugin_dir(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    // 1. Tauri bundle: resource_dir/plugins/
+    if let Some(rd) = resource_dir {
+        let p = rd.join("plugins");
+        if dir_has_plugins(&p) {
+            tracing::debug!("plugin_install: found plugins in Tauri resource dir: {}", p.display());
+            return Some(p);
+        }
+    }
+
+    // 2. Homebrew: {exe}/../lib/
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(canon) = exe.canonicalize() {
+            if let Some(bin) = canon.parent() {
+                let lib = bin.join("../lib");
+                let lib = lib.canonicalize().unwrap_or(lib);
+                if dir_has_plugins(&lib) {
+                    tracing::debug!("plugin_install: found plugins in sibling lib dir: {}", lib.display());
+                    return Some(lib);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Install plugins from a source directory if they are not already present in
+/// the system plugin directories. `plugin_dir` should directly contain the
+/// plugin bundles (e.g., `wail-plugin-send.clap`).
+///
+/// Returns a list of error messages for any plugins that failed to install
+/// (already-present and missing-source plugins are not errors).
+pub fn install_if_missing(plugin_dir: &Path) -> Vec<String> {
     let Some(dirs) = system_plugin_dirs() else {
         let msg = "Could not determine system plugin directories. Please install WAIL Send and WAIL Recv manually using cargo xtask install-plugin.".to_string();
         warn!("plugin_install: {msg}");
@@ -43,7 +91,7 @@ pub fn install_if_missing(resource_dir: &Path) -> Vec<String> {
 
     let mut errors = Vec::new();
     for (name, dest_dir) in plugins {
-        let src = resource_dir.join("plugins").join(name);
+        let src = plugin_dir.join(name);
         let dest = dest_dir.join(name);
 
         if dest.exists() {

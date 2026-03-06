@@ -6,8 +6,7 @@ fn main() {
     for name in ["wail-plugin-send", "wail-plugin-recv"] {
         let clap = bundled.join(format!("{name}.clap"));
         if !clap.exists() {
-            std::fs::create_dir_all(bundled).ok();
-            std::fs::write(&clap, []).ok();
+            std::fs::create_dir_all(&clap).ok();
         }
         let vst3 = bundled.join(format!("{name}.vst3"));
         if !vst3.exists() {
@@ -23,5 +22,14 @@ fn main() {
         let _ = std::fs::create_dir_all(&out_dir);
     }
 
-    tauri_build::build();
+    // Hard-fail only when building via Tauri CLI (TAURI_CONFIG is set by `cargo tauri build/dev`).
+    // During `cargo test`, TAURI_CONFIG is absent and tauri_build panics on plugin bundle
+    // directories containing Mach-O dylibs — emit a warning instead.
+    match tauri_build::try_build(tauri_build::Attributes::new()) {
+        Ok(()) => {}
+        Err(e) if std::env::var_os("TAURI_CONFIG").is_none() => {
+            println!("cargo:warning=tauri_build: {e} (non-Tauri build, skipping)");
+        }
+        Err(e) => panic!("tauri_build failed: {e}"),
+    }
 }

@@ -398,21 +398,18 @@ mod tests {
         let mut reg = PeerRegistry::new();
         reg.add("peer1".to_string(), None);
 
-        assert_eq!(reg.derive_status("peer1", false, false), "connecting");
+        assert_eq!(reg.derive_status("peer1"), "connecting");
 
         reg.get_mut("peer1").unwrap().display_name = Some("Alice".to_string());
-        assert_eq!(reg.derive_status("peer1", false, false), "connected");
+        assert_eq!(reg.derive_status("peer1"), "connected");
 
         reg.get_mut("peer1").unwrap().reconnect_attempts = 1;
-        assert_eq!(reg.derive_status("peer1", true, true), "reconnecting");
+        assert_eq!(reg.derive_status("peer1"), "reconnecting");
 
         reg.get_mut("peer1").unwrap().reconnect_attempts = 0;
-        assert_eq!(reg.derive_status("peer1", true, true), "full-duplex");
-        assert_eq!(reg.derive_status("peer1", true, false), "receiving");
-        assert_eq!(reg.derive_status("peer1", false, true), "sending");
-        assert_eq!(reg.derive_status("peer1", false, false), "connected");
+        assert_eq!(reg.derive_status("peer1"), "connected");
 
-        assert_eq!(reg.derive_status("unknown", false, false), "connecting");
+        assert_eq!(reg.derive_status("unknown"), "connecting");
     }
 
     #[test]

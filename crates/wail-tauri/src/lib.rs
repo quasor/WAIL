@@ -53,11 +53,17 @@ pub fn run() {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity));
-            let install_errors = match app.path().resource_dir() {
-                Ok(resource_dir) => plugin_install::install_if_missing(&resource_dir),
-                Err(e) => {
-                    tracing::warn!("plugin_install: could not resolve resource directory, skipping auto-install: {e}");
-                    vec![format!("Could not locate bundled plugins (resource directory unavailable: {e}). Please install WAIL Send and WAIL Recv manually using cargo xtask install-plugin.")]
+            let resource_dir = app.path().resource_dir().ok();
+            let install_errors = match plugin_install::find_plugin_dir(resource_dir.as_deref()) {
+                Some(plugin_dir) => plugin_install::install_if_missing(&plugin_dir),
+                None => {
+                    if cfg!(debug_assertions) {
+                        tracing::debug!("plugin_install: dev mode, skipping auto-install");
+                        vec![]
+                    } else {
+                        tracing::warn!("plugin_install: no bundled plugins found");
+                        vec!["Could not locate bundled plugins. Run wail-install-plugins to install manually.".to_string()]
+                    }
                 }
             };
             if !install_errors.is_empty() {
