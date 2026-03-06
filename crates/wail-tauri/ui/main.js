@@ -461,8 +461,12 @@ async function setupListeners() {
         const name = p.display_name ? `${p.display_name} (${shortId})` : shortId;
         const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '...';
         const statusClass = `peer-status status-${p.status}`;
+        const slotLabel = p.slot != null ? `<span class="peer-slot">Peer ${p.slot}</span>` : '';
+        const upClass = `peer-arrow arrow-up${p.is_sending ? ' active' : ''}`;
+        const downClass = `peer-arrow arrow-down${p.is_receiving ? ' active' : ''}`;
         return `<div class="peer-item">
-          <span class="peer-name">${escapeHtml(name)}</span>
+          <span class="peer-name">${escapeHtml(name)}${slotLabel}</span>
+          <span class="peer-arrows"><span class="${upClass}">↑</span><span class="${downClass}">↓</span></span>
           <span class="${statusClass}">${escapeHtml(p.status)}</span>
           <span class="peer-rtt">${rtt}</span>
         </div>`;

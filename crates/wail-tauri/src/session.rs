@@ -931,7 +931,7 @@ async fn session_loop(
                             };
                             let is_receiving = recv_now > recv_prev;
                             let is_sending_to_peer = is_sending && mesh.is_peer_audio_dc_open(p);
-                            let status = peers.derive_status(p, is_receiving, is_sending_to_peer);
+                            let status = peers.derive_status(p);
 
                             // Log status transitions and update prev_status (requires mutable borrow)
                             if prev_status != status {
@@ -952,6 +952,8 @@ async fn session_loop(
                                 rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
                                 slot: peers.slot_for(p, 0).map(|s| s as u32 + 1),
                                 status: status.to_string(),
+                                is_sending: is_sending_to_peer,
+                                is_receiving,
                             }
                         })
                         .collect();

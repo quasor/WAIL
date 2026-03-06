@@ -230,10 +230,11 @@ impl PeerRegistry {
             .map(|(id, _)| id.clone())
     }
 
-    /// Derive a display status string for a peer given current audio flow.
+    /// Derive a display status string for a peer.
     ///
-    /// Priority: reconnecting > connecting > full-duplex > receiving > sending > connected
-    pub fn derive_status(&self, peer_id: &str, is_receiving: bool, is_sending: bool) -> &'static str {
+    /// Returns only stable connection states: connecting, reconnecting, connected.
+    /// Audio flow direction is exposed separately via PeerInfo::is_sending/is_receiving.
+    pub fn derive_status(&self, peer_id: &str) -> &'static str {
         let peer = match self.peers.get(peer_id) {
             Some(p) => p,
             None => return "connecting",
@@ -242,12 +243,6 @@ impl PeerRegistry {
             "reconnecting"
         } else if peer.display_name.is_none() {
             "connecting"
-        } else if is_receiving && is_sending {
-            "full-duplex"
-        } else if is_receiving {
-            "receiving"
-        } else if is_sending {
-            "sending"
         } else {
             "connected"
         }

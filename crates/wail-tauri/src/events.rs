@@ -42,9 +42,12 @@ pub struct PeerInfo {
     /// Populated when the peer's identity is known for affinity tracking.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<u32>,
-    /// Peer connection/audio status: "connecting", "reconnecting", "connected",
-    /// "receiving", "sending", "full-duplex".
+    /// Peer connection status: "connecting", "reconnecting", "connected".
     pub status: String,
+    /// Audio was sent to this peer since the last status tick.
+    pub is_sending: bool,
+    /// Audio was received from this peer since the last status tick.
+    pub is_receiving: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
