@@ -35,7 +35,8 @@ struct RawInterval {
 }
 
 /// WAIL Send Plugin: captures DAW audio per interval and sends it to wail-app
-/// for network transmission. Output is silent (capture only).
+/// for network transmission. Output is silent by default; enable the Passthrough
+/// parameter to pass input audio through to the output.
 ///
 /// Architecture:
 /// - Audio thread: drives IntervalRing (record only, no playback)
@@ -118,7 +119,7 @@ impl Plugin for WailSendPlugin {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        // Stereo in/out (output is silent — capture only)
+        // Stereo in/out (output silent by default; passthrough param controls this)
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
             main_output_channels: NonZeroU32::new(2),
@@ -287,10 +288,11 @@ impl Plugin for WailSendPlugin {
             }
         }
 
-        // Output silence (capture only — don't modify the buffer)
-        for ch in buffer.as_slice() {
-            for sample in ch.iter_mut() {
-                *sample = 0.0;
+        if !self.params.passthrough.value() {
+            for ch in buffer.as_slice() {
+                for sample in ch.iter_mut() {
+                    *sample = 0.0;
+                }
             }
         }
 
