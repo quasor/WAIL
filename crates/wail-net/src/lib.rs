@@ -474,6 +474,11 @@ impl PeerMesh {
         self.peers.values().any(|pc| pc.is_audio_dc_open())
     }
 
+    /// Check whether a specific peer has an open audio DataChannel.
+    pub fn is_peer_audio_dc_open(&self, peer_id: &str) -> bool {
+        self.peers.get(peer_id).map_or(false, |pc| pc.is_audio_dc_open())
+    }
+
     /// Close a specific peer's WebRTC connection (without removing from the mesh).
     /// The connection state callback will fire, which can trigger `MeshEvent::PeerFailed`.
     pub async fn close_peer(&self, peer_id: &str) {

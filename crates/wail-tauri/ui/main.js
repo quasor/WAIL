@@ -358,8 +358,10 @@ async function setupListeners() {
       peerList.innerHTML = s.peers.map(p => {
         const name = p.display_name || p.peer_id.slice(0, 6);
         const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '...';
+        const statusClass = `peer-status status-${p.status}`;
         return `<div class="peer-item">
           <span class="peer-name">${escapeHtml(name)}</span>
+          <span class="${statusClass}">${escapeHtml(p.status)}</span>
           <span class="peer-rtt">${rtt}</span>
         </div>`;
       }).join('');

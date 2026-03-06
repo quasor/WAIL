@@ -54,6 +54,30 @@ pub enum SessionCommand {
     Disconnect,
 }
 
+/// Derive a peer's display status from session state.
+///
+/// Priority: reconnecting > connecting > full-duplex > receiving > sending > connected
+fn derive_peer_status(
+    reconnect_attempts: Option<&u32>,
+    display_name: Option<&Option<String>>,
+    is_receiving: bool,
+    is_sending: bool,
+) -> &'static str {
+    if reconnect_attempts.is_some_and(|&a| a > 0) {
+        "reconnecting"
+    } else if display_name.map_or(true, |n| n.is_none()) {
+        "connecting"
+    } else if is_receiving && is_sending {
+        "full-duplex"
+    } else if is_receiving {
+        "receiving"
+    } else if is_sending {
+        "sending"
+    } else {
+        "connected"
+    }
+}
+
 pub struct SessionConfig {
     pub server: String,
     pub room: String,
@@ -193,6 +217,12 @@ async fn session_loop(
     let mut audio_intervals_received: u64 = 0;
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
+
+    // Per-peer status tracking
+    let mut peer_audio_recv_count: HashMap<String, u64> = HashMap::new();
+    let mut peer_audio_recv_prev: HashMap<String, u64> = HashMap::new();
+    let mut audio_intervals_sent_prev: u64 = 0;
+    let mut peer_prev_status: HashMap<String, String> = HashMap::new();
 
     // Test tone state
     let mut test_tone_enabled = test_tone;
@@ -481,6 +511,9 @@ async fn session_loop(
                         hello_sent.remove(&pid);
                         peer_reconnect_attempts.remove(&pid);
                         peer_last_seen.remove(&pid);
+                        peer_audio_recv_count.remove(&pid);
+                        peer_audio_recv_prev.remove(&pid);
+                        peer_prev_status.remove(&pid);
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
                     Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
@@ -527,6 +560,9 @@ async fn session_loop(
                             peer_identities.remove(&pid);
                             hello_sent.remove(&pid);
                             peer_last_seen.remove(&pid);
+                            peer_audio_recv_count.remove(&pid);
+                            peer_audio_recv_prev.remove(&pid);
+                            peer_prev_status.remove(&pid);
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                         } else {
@@ -605,6 +641,10 @@ async fn session_loop(
                                     hello_sent.clear();
                                     peer_reconnect_attempts.clear();
                                     peer_last_seen.clear();
+                                    peer_audio_recv_count.clear();
+                                    peer_audio_recv_prev.clear();
+                                    audio_intervals_sent_prev = audio_intervals_sent;
+                                    peer_prev_status.clear();
                                     clock = ClockSync::new();
                                     beat_synced = false;
                                     audio_gate.on_reconnect();
@@ -802,6 +842,7 @@ async fn session_loop(
             Some((from, data)) = audio_rx.recv() => {
                 peer_last_seen.insert(from.clone(), Instant::now());
                 audio_intervals_received += 1;
+                *peer_audio_recv_count.entry(from.clone()).or_insert(0) += 1;
                 audio_bytes_recv += data.len() as u64;
                 let peer_name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
 
@@ -970,15 +1011,47 @@ async fn session_loop(
                 if let Ok(state) = rx.await {
                     let connected = mesh.connected_peers();
                     let dc_open = mesh.any_audio_dc_open();
+                    let is_sending = audio_intervals_sent > audio_intervals_sent_prev;
                     let peers: Vec<PeerInfo> = connected
                         .iter()
-                        .map(|p| PeerInfo {
-                            peer_id: p.clone(),
-                            display_name: peer_names.get(p).cloned().flatten(),
-                            rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
-                            slot: peer_slots.get(&(p.clone(), 0u16)).map(|&s| s as u32 + 1),
+                        .map(|p| {
+                            let recv_now = peer_audio_recv_count.get(p).copied().unwrap_or(0);
+                            let recv_prev = peer_audio_recv_prev.get(p).copied().unwrap_or(0);
+                            let is_receiving = recv_now > recv_prev;
+                            let is_sending_to_peer = is_sending && mesh.is_peer_audio_dc_open(p);
+                            let status = derive_peer_status(
+                                peer_reconnect_attempts.get(p),
+                                peer_names.get(p),
+                                is_receiving,
+                                is_sending_to_peer,
+                            );
+
+                            // Log status transitions
+                            let prev = peer_prev_status.get(p).map(|s| s.as_str()).unwrap_or("");
+                            if prev != status {
+                                let name = peer_names.get(p).and_then(|n| n.as_deref()).unwrap_or(p);
+                                if prev.is_empty() {
+                                    ui_info!(&app, "Peer {name} status: {status}");
+                                } else {
+                                    ui_info!(&app, "Peer {name} status: {prev} → {status}");
+                                }
+                                peer_prev_status.insert(p.clone(), status.to_string());
+                            }
+
+                            PeerInfo {
+                                peer_id: p.clone(),
+                                display_name: peer_names.get(p).cloned().flatten(),
+                                rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
+                                slot: peer_slots.get(&(p.clone(), 0u16)).map(|&s| s as u32 + 1),
+                                status: status.to_string(),
+                            }
                         })
                         .collect();
+
+                    // Update snapshots for next tick
+                    peer_audio_recv_prev = peer_audio_recv_count.clone();
+                    audio_intervals_sent_prev = audio_intervals_sent;
+                    peer_prev_status.retain(|id, _| connected.contains(id));
 
                     let _ = app.emit("status:update", StatusUpdate {
                         bpm: state.bpm,
@@ -1131,7 +1204,7 @@ impl AudioSendGate {
 
 #[cfg(test)]
 mod tests {
-    use super::AudioSendGate;
+    use super::{AudioSendGate, derive_peer_status};
 
     #[test]
     fn first_peer_not_gated() {
@@ -1170,5 +1243,48 @@ mod tests {
         assert!(gate.is_gated());
         gate.on_peer_list(0);
         assert!(!gate.is_gated());
+    }
+
+    #[test]
+    fn status_connecting_when_no_hello() {
+        assert_eq!(derive_peer_status(None, None, false, false), "connecting");
+        assert_eq!(derive_peer_status(None, Some(&None), false, false), "connecting");
+    }
+
+    #[test]
+    fn status_reconnecting_overrides_other_states() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(Some(&2), Some(&name), true, true), "reconnecting");
+        assert_eq!(derive_peer_status(Some(&1), None, false, false), "reconnecting");
+    }
+
+    #[test]
+    fn status_connected_when_hello_but_no_audio() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(None, Some(&name), false, false), "connected");
+    }
+
+    #[test]
+    fn status_receiving_only() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(None, Some(&name), true, false), "receiving");
+    }
+
+    #[test]
+    fn status_sending_only() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(None, Some(&name), false, true), "sending");
+    }
+
+    #[test]
+    fn status_full_duplex() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(None, Some(&name), true, true), "full-duplex");
+    }
+
+    #[test]
+    fn status_zero_reconnect_attempts_is_not_reconnecting() {
+        let name = Some("Alice".to_string());
+        assert_eq!(derive_peer_status(Some(&0), Some(&name), false, false), "connected");
     }
 }

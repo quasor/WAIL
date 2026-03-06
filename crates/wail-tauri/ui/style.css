@@ -302,6 +302,45 @@ summary {
   font-size: 11px;
 }
 
+.peer-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+.status-connecting {
+  color: var(--fg-dim);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.status-reconnecting {
+  color: #d4a843;
+  background: rgba(184, 134, 11, 0.15);
+}
+
+.status-connected {
+  color: var(--accent-bright);
+  background: rgba(78, 154, 241, 0.15);
+}
+
+.status-receiving {
+  color: var(--success);
+  background: rgba(46, 204, 113, 0.15);
+}
+
+.status-sending {
+  color: #e67e22;
+  background: rgba(230, 126, 34, 0.15);
+}
+
+.status-full-duplex {
+  color: var(--success);
+  background: rgba(46, 204, 113, 0.25);
+}
+
 .audio-bytes {
   color: var(--fg-dim);
   font-size: 11px;
