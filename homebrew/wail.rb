@@ -39,8 +39,12 @@ class Wail < Formula
     system "cargo", "build", "--release", "--package", "wail-tauri", "--locked"
     bin.install "target/release/wail-tauri" => "wail"
 
-    # Build and assemble CLAP/VST3 plugin bundles without requiring cargo-nih-plug.
-    system "cargo", "run", "--package", "xtask", "--release", "--locked", "--", "bundle-plugin"
+    # Build plugin libraries first (separate --locked invocations, no nested cargo).
+    system "cargo", "build", "--release", "--locked", "--package", "wail-plugin-send", "--lib"
+    system "cargo", "build", "--release", "--locked", "--package", "wail-plugin-recv", "--lib"
+
+    # Assemble CLAP/VST3 bundle directories from the pre-built dylibs (file ops only).
+    system "cargo", "run", "--package", "xtask", "--release", "--locked", "--", "bundle-plugin", "--no-build"
 
     # Install plugin bundles to #{lib}. Run `wail-install-plugins` afterwards
     # to copy them to ~/Library/Audio/Plug-Ins/.

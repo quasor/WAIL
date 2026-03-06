@@ -25,8 +25,12 @@ TASKS:
 OPTIONS (install):
   --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
 
-OPTIONS (build-plugin, bundle-plugin, install-plugin):
+OPTIONS (build-plugin, install-plugin):
   --debug         Build in debug mode instead of release
+
+OPTIONS (bundle-plugin):
+  --debug         Build in debug mode instead of release
+  --no-build      Skip compilation; assemble bundles from pre-built dylibs
 
 OPTIONS (install-plugin):
   --no-build      Skip the build step; install existing bundles
@@ -141,6 +145,7 @@ fn build_plugin(args: &[String]) -> Result<()> {
 /// On Windows, CLAP is a flat renamed .dll; VST3 uses the x86_64-win layout.
 fn bundle_plugin(args: &[String]) -> Result<()> {
     let release = !args.contains(&"--debug".to_string());
+    let no_build = args.contains(&"--no-build".to_string());
     let profile = if release { "release" } else { "debug" };
 
     let root = workspace_dir();
@@ -165,18 +170,23 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
 
     #[allow(unused_variables)]
     for &(pkg, lib, display_name, bundle_id) in plugins {
-        println!("Building {pkg} ({profile})...");
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.args(["build", "--package", pkg, "--lib"]);
-        if release {
-            cmd.arg("--release");
+        if no_build {
+            println!("Bundling {pkg} (skipping build)...");
+        } else {
+            println!("Building {pkg} ({profile})...");
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args(["build", "--package", pkg, "--lib", "--locked"]);
+            if release {
+                cmd.arg("--release");
+            }
+            cmd.current_dir(&root);
+            run_cmd(cmd).with_context(|| format!("cargo build {pkg} failed"))?;
         }
-        cmd.current_dir(&root);
-        run_cmd(cmd).with_context(|| format!("cargo build {pkg} failed"))?;
 
         let out = root.join("target").join(profile);
         let bundled = root.join("target/bundled");
-        fs::create_dir_all(&bundled)?;
+        fs::create_dir_all(&bundled)
+            .with_context(|| format!("create bundled dir: {}", bundled.display()))?;
 
         #[cfg(target_os = "macos")]
         {
@@ -194,13 +204,15 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
                         fs::remove_file(&bundle)?;
                     }
                 }
-                fs::create_dir_all(&macos_dir)?;
+                fs::create_dir_all(&macos_dir)
+                    .with_context(|| format!("create MacOS dir in {pkg}.{ext}"))?;
                 fs::copy(&dylib, macos_dir.join(pkg))
                     .with_context(|| format!("copy dylib into {pkg}.{ext}"))?;
                 fs::write(
                     bundle.join("Contents/Info.plist"),
                     make_plist(pkg, display_name, bundle_id, ext, &version),
-                )?;
+                )
+                .with_context(|| format!("write Info.plist for {pkg}.{ext}"))?;
                 println!("  Bundled: {}", bundle.display());
             }
         }
