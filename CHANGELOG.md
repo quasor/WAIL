@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0 (2026-03-06)
+
+### Features
+
+- WAIL now automatically installs the Send and Recv plugins to your DAW's plugin directories on first launch. No manual installation step required.
+- Show stable peer status with send/receive arrow indicators and slot number in the peer list. The status badge no longer cycles between CONNECTED/SENDING/RECEIVING — instead, small ↑/↓ arrows light up when audio flows. Each peer now shows their DAW slot ("Peer N") beside their name.
+
+### Fixes
+
+- suppress audio transmission and warn when Link has no peers (#104)
+- Suppress audio transmission and show a UI warning when Ableton Link has no peers (Link Peers = 0). Without Link running in a DAW, interval boundaries are unsynchronized and transmitting audio serves no purpose.
+
 ## 1.3.0 (2026-03-06)
 
 ### Features
