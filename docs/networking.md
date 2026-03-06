@@ -1,0 +1,645 @@
+# WAIL Networking Design Document
+
+This document describes the complete networking stack in WAIL — from the moment a user clicks Join to the moment audio flows between peers. It covers the signaling server, WebRTC lifecycle, sync protocol, audio pipeline, failure detection, and reconnection logic.
+
+---
+
+## Table of Contents
+
+1. [Architecture Overview](#1-architecture-overview)
+2. [Layer Stack](#2-layer-stack)
+3. [Signaling Server](#3-signaling-server)
+4. [Connection Lifecycle](#4-connection-lifecycle)
+5. [ICE Negotiation and TURN](#5-ice-negotiation-and-turn)
+6. [DataChannel Setup](#6-datachannel-setup)
+7. [Sync Protocol](#7-sync-protocol)
+8. [Audio Pipeline](#8-audio-pipeline)
+9. [Failure Detection and Reconnection](#9-failure-detection-and-reconnection)
+10. [Peer Status State Machine](#10-peer-status-state-machine)
+11. [AudioSendGate](#11-audioSendGate)
+12. [Clock Synchronization](#12-clock-synchronization)
+13. [Known Edge Cases and Issues](#13-known-edge-cases-and-issues)
+
+---
+
+## 1. Architecture Overview
+
+WAIL connects musicians over the internet using WebRTC DataChannels for both sync (JSON) and audio (binary). The networking stack has three layers:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   wail-tauri / session.rs               │
+│   Session orchestrator: Link + WebRTC + IPC + UI        │
+├─────────────────────────────────────────────────────────┤
+│                   wail-net / PeerMesh                   │
+│   WebRTC peer management + signaling polling            │
+│   ┌──────────────┐  ┌────────────────────────────────┐  │
+│   │ SignalingClient│  │ PeerConnection (one per peer)  │  │
+│   │ HTTP polling  │  │ - "sync" DataChannel (JSON)    │  │
+│   └──────────────┘  │ - "audio" DataChannel (binary) │  │
+│                     └────────────────────────────────┘  │
+├─────────────────────────────────────────────────────────┤
+│               val-town/main.ts (signaling server)       │
+│   HTTP endpoint: join / signal / poll / leave / list    │
+│   SQLite: peers, messages, rooms                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+Peers communicate directly (P2P) once WebRTC connects. The signaling server is only used during connection setup — it relays SDP offers/answers and ICE candidates. Once DataChannels open, the server is never contacted again (except for the 5-second heartbeat poll).
+
+---
+
+## 2. Layer Stack
+
+| Layer | Crate/File | Responsibility |
+|-------|-----------|----------------|
+| Session orchestration | `wail-tauri/session.rs` | Drives the `tokio::select!` loop, owns all state, routes messages between Link, mesh, plugins, and frontend |
+| Peer mesh | `wail-net/lib.rs` | Manages the `HashMap<peer_id, PeerConnection>` and the signaling polling loop |
+| Single peer | `wail-net/peer.rs` | One WebRTC peer connection with two DataChannels |
+| Signaling | `wail-net/signaling.rs` | HTTP polling client; drives outgoing signals and polls for incoming |
+| Signaling server | `val-town/main.ts` | Val Town HTTP endpoint; stores peers/messages in SQLite |
+| Core protocol | `wail-core/protocol.rs` | `SyncMessage` and `SignalMessage` type definitions |
+| Ableton Link | `wail-core/link.rs` | FFI bridge to the Link SDK; 50 Hz poller |
+| Clock sync | `wail-core/clock.rs` | NTP-style RTT estimation |
+| Interval tracker | `wail-core/interval.rs` | NINJAM-style interval boundary tracking |
+
+---
+
+## 3. Signaling Server
+
+### Storage
+
+The Val Town server uses SQLite with three tables:
+
+- `peers(room, peer_id, last_seen, display_name, bpm, stream_count)` — one row per live peer
+- `messages(id, room, to_peer, body, created_at)` — queued signaling messages addressed to a specific peer
+- `rooms(room, password_hash, created_at)` — room metadata and optional password
+
+### Endpoints
+
+| Method | Action | Description |
+|--------|--------|-------------|
+| `POST` | `?action=join` | Peer registers itself; returns list of existing peers |
+| `POST` | `?action=signal` | Relay a signaling message (offer/answer/ICE) to another peer |
+| `GET` | `?action=poll` | Fetch pending messages for this peer, update heartbeat |
+| `POST` | `?action=leave` | Peer deregisters; notifies remaining peers |
+| `GET` | `?action=list` | Public room list |
+| `GET` | (no action) | Serves the browser listener UI |
+
+### Join flow
+
+On `?action=join`, the server:
+1. Checks `client_version >= MIN_CLIENT_VERSION` ("0.4.16"). Older clients get 426 Upgrade Required.
+2. Checks/creates the room, verifies password (SHA-256 hash comparison).
+3. Checks room capacity: `8 * stream_count` total stream slots. Full rooms get 409 Conflict.
+4. Inserts peer into `peers`.
+5. Enqueues a `PeerJoined` message for all existing peers.
+6. Returns the list of existing `peer_id`s and their display names.
+
+### Heartbeat and stale peer cleanup
+
+The polling client sends `?action=poll` every 5 seconds. This updates `last_seen`. On each poll request, the server runs `cleanStalePeers()`:
+- Peers not seen in 30+ seconds are removed.
+- `PeerLeft` is enqueued for remaining peers.
+- If the room is now empty, the room row is deleted (freeing the name/password).
+- Messages older than 60 seconds are deleted.
+
+The poll response includes an `evicted` boolean. When `true`, the polling loop exits immediately, closing `incoming_rx`. The session layer sees `Ok(None)` from `poll_signaling()` and triggers signaling reconnection.
+
+### Rate limiting
+
+If the server returns 429, the polling client doubles `current_poll_ms` up to a 30-second cap. It resets to the base interval on the next successful response.
+
+---
+
+## 4. Connection Lifecycle
+
+### Full sequence for two peers joining
+
+```
+Peer A (lower peer_id)                  Signaling Server               Peer B (higher peer_id)
+───────────────────────                 ────────────────               ───────────────────────
+POST ?action=join ──────────────────────────►│
+◄──────────────── { peers: [] } ────────────│
+(room empty, no connections needed)          │
+                                             │
+                    POST ?action=join ───────────────────────────────►│
+                    ◄──── { peers: ["A"] } ──────────────────────────│
+                                             │
+                                             │◄── POST ?action=signal (PeerJoined{B}) ──(enqueued for A)
+                                             │
+A polls: GET ?action=poll ──────────────────►│
+◄── { messages: [PeerJoined{B}] } ──────────│
+                                             │
+A: lower peer_id → initiates WebRTC to B     │
+A creates offer SDP                          │
+A sets local description                     │
+A: POST ?action=signal (Offer{sdp}) ────────►│──── enqueue for B ────►│
+                                             │                         │
+A: ICE candidates discovered (async)         │                         │
+A: POST ?action=signal (IceCandidate) ──────►│──── enqueue for B ────►│
+                                             │                         │
+                  B polls: GET ?action=poll ──────────────────────────►│
+                  ◄── { messages: [Offer{sdp}, IceCandidate...] } ─────│
+                                             │                         │
+                  B: creates PeerConnection, handle_offer()            │
+                  B: sets remote description (offer)                   │
+                  B: applies pending ICE candidates                    │
+                  B: creates answer SDP                                │
+                  B: sets local description                            │
+                  B: POST ?action=signal (Answer{sdp}) ──────────────►│──── enqueue for A
+                  B: ICE candidates discovered                         │
+                  B: POST ?action=signal (IceCandidate) ─────────────►│──── enqueue for A
+                                             │
+A polls: GET ?action=poll ──────────────────►│
+◄── { messages: [Answer{sdp}, IceCandidate...] } ────────────────────│
+                                             │
+A: handle_answer() → sets remote description │
+A: adds ICE candidates                       │
+                                             │
+                     [ICE connectivity checks run P2P]
+                                             │
+                     [WebRTC connection established]
+                     [DataChannels open]
+                                             │
+A → B: Hello{peer_id, display_name, identity}
+B → A: Hello{peer_id, display_name, identity}  (reply)
+A → B: IntervalConfig{bars, quantum}
+A → B: AudioCapabilities{...}
+A → B: StateSnapshot{bpm, beat, phase, ...}  (every ~200ms via Link poller)
+```
+
+### Tie-breaking rule
+
+Only the peer with the **lexicographically lower** `peer_id` initiates offers. Peer IDs are 8-character UUID prefixes (e.g., `"3f8a1b2c"`). This rule applies both at join time (from the PeerList) and when a new peer joins mid-session (PeerJoined event). It prevents both peers from simultaneously creating offers to each other.
+
+Concretely, in `handle_signal_message`:
+```rust
+// PeerList: initiate only if our ID < theirs
+if remote_id != self.peer_id && self.peer_id < remote_id {
+    self.initiate_connection(&remote_id).await?;
+}
+
+// PeerJoined: same rule
+if self.peer_id < remote_id {
+    self.initiate_connection(&remote_id).await?;
+}
+```
+
+The higher-peer-ID side waits for an incoming offer via the `on_data_channel` callback.
+
+### What happens if both sides think they should initiate
+
+This can't happen under normal conditions given the strict `<` comparison. However, there is one edge case: if peer B joins, A initiates to B; then A disconnects and reconnects with a new peer_id that is now higher than B's. In that case B will initiate to A on the PeerJoined signal. The server sends PeerJoined to both sides when a new peer joins, but only the lower-ID side does anything with it (the higher-ID side waits). The responder's `on_data_channel` callback handles the incoming channels.
+
+---
+
+## 5. ICE Negotiation and TURN
+
+### ICE server setup
+
+At session start (`session_loop`), WAIL fetches fresh TURN credentials from the Metered API:
+
+```
+GET https://wail.metered.live/api/v1/turn/credentials?apiKey=...
+```
+
+The response includes STUN and TURN URLs with short-lived credentials. On API failure, WAIL falls back to `stun:stun.relay.metered.ca:80` (STUN only, no relay).
+
+The Metered fetch happens **before** `PeerMesh::connect_full()`, so all peer connections in the session share the same ICE server list. TURN credentials are not refreshed mid-session; if the session runs longer than the credential TTL, ICE reconnection attempts may fail for NAT traversal even though the WebRTC connection itself is alive.
+
+### ICE candidate flow
+
+ICE candidates are discovered asynchronously after `set_local_description`. Each candidate is sent via the `on_ice_candidate` callback into an `mpsc::UnboundedSender<RTCIceCandidate>`, which `spawn_ice_sender` drains and forwards to the signaling server.
+
+ICE candidates may arrive at the responder **before** the remote description is set (because the signaling poll batches messages). The `PeerConnection` stores early candidates in `pending_candidates: Vec<RTCIceCandidateInit>` and applies them immediately after `set_remote_description`:
+
+```rust
+if self.remote_desc_set {
+    self.pc.add_ice_candidate(init).await?;
+} else {
+    self.pending_candidates.push(init);
+}
+```
+
+### Relay-only mode
+
+`relay_only: bool` (default `false`) sets `RTCIceTransportPolicy::Relay`, forcing all traffic through TURN. Used in tests to simulate constrained NAT and in debug scenarios.
+
+### mDNS
+
+mDNS is explicitly disabled (`MulticastDnsMode::Disabled`) so that LAN peers don't leak hostnames through the signaling server.
+
+---
+
+## 6. DataChannel Setup
+
+### Two channels per peer
+
+| Channel | Label | Mode | Buffer | Purpose |
+|---------|-------|------|--------|---------|
+| sync | `"sync"` | Text (UTF-8 JSON) | Unbounded | Tempo, beat, phase, Hello, Ping/Pong, interval config |
+| audio | `"audio"` | Binary | Bounded (64) | Opus-encoded audio intervals |
+
+### Initiator vs. responder paths
+
+**Initiator** (`create_offer`):
+- Calls `pc.create_data_channel("sync", None)` and `create_data_channel("audio", None)` **before** creating the SDP offer. This embeds the DC negotiation in the offer SDP.
+- Calls `setup_sync_channel()` / `setup_audio_channel()` which register all callbacks and store the `Arc<RTCDataChannel>` in `OnceLock`.
+
+**Responder** (`handle_offer`):
+- Registers `pc.on_data_channel()` callback **before** setting the remote description. The callback fires when each DC is received.
+- Inside the callback, labels are checked: `"sync"` → `setup_sync_channel`-equivalent logic; `"audio"` → `setup_audio_channel`-equivalent logic. The `OnceLock` slots are set here.
+- Unknown DC labels are silently ignored.
+
+Both paths use `OnceLock<Arc<RTCDataChannel>>` so that `send()` and `send_audio()` can check `dc_sync.get()` from any context without holding a lock.
+
+### Message queuing before DC open
+
+Sync messages sent before the DataChannel transitions to `Open` are queued in `pending_sync: Arc<Mutex<Vec<String>>>`. On `on_open`, the queue is drained and sent in order. This ensures `Hello`, `IntervalConfig`, and `AudioCapabilities` reach the peer even if broadcast immediately after initiating.
+
+The audio DC has no such queue — audio sent before `Open` is silently dropped. This is intentional since audio is interval-based and there's no meaningful "replay" of old intervals.
+
+### Audio chunking
+
+SCTP fragmentation in `webrtc-rs` is unreliable on real internet paths. Audio intervals can be large (5–50 KB), so WAIL chunks them at the application layer:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Each chunk (≤ 1200 bytes total):                           │
+│  [WACH][total_len u32 LE][payload up to 1192 bytes]         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+The receiver's `AudioReassembly` struct (inside a `Mutex`) accumulates chunks until `buffer.len() >= expected_len`, then delivers the complete message downstream.
+
+Small messages (≤ 1200 bytes) bypass chunking entirely — they are sent without the `WACH` header. The reassembly handler checks for the magic prefix to distinguish chunked from non-chunked messages.
+
+**Potential issue:** The reassembly buffer has no timeout. If a chunk is lost, the buffer grows indefinitely until the connection closes. There is also no sequence number or message boundary — if chunks from two concurrent large messages interleave, reassembly would produce garbage. In practice, WebRTC DataChannels guarantee ordered, reliable delivery (SCTP), so this shouldn't happen; but the code has no defensive check.
+
+---
+
+## 7. Sync Protocol
+
+### SyncMessage types
+
+| Type | Direction | Frequency | Purpose |
+|------|-----------|-----------|---------|
+| `Hello` | bidirectional | Once on connect, once on reconnect | Exchange peer_id, display_name, identity |
+| `Ping` | broadcast | Every 2s | Clock sync RTT measurement |
+| `Pong` | reply | Per Ping | Clock sync RTT response |
+| `TempoChange` | broadcast | On tempo change (threshold: 0.01 BPM) | Propagate Link tempo changes |
+| `StateSnapshot` | broadcast | Every ~200ms | Full Link state (bpm, beat, phase, quantum) |
+| `IntervalConfig` | broadcast | On join | Tell peers our bars/quantum settings |
+| `AudioCapabilities` | broadcast | On join | Announce what we can send/receive |
+| `AudioIntervalReady` | broadcast | Per test tone interval | Announce incoming audio (test tone path only) |
+| `IntervalBoundary` | broadcast | Per interval | Notify peers of our interval index |
+| `AudioStatus` | broadcast | Every 2s | Diagnostic: DC open, intervals sent/received |
+
+### Hello exchange
+
+Hello is sent:
+1. When we receive a `PeerJoined` event from signaling — broadcast to all connected peers.
+2. When we receive a `Hello` from a peer we haven't replied to yet — unicast reply.
+
+The `hello_sent: HashSet<String>` set tracks which peers have received our Hello, preventing infinite Hello loops. `hello_sent.insert(from)` returns `false` if already present, which guards the reply path.
+
+When a peer reconnects after `PeerFailed`, `hello_sent.remove(&pid)` is called before `re_initiate()`, so the Hello handshake runs again on the new connection.
+
+### Tempo sync
+
+Tempo propagation uses **echo suppression** at two levels:
+
+1. **Link bridge echo guard** (`link.rs`): After applying a remote `SetTempo` or `ForceBeat` command, an `echo_guard_until` timestamp is set 150ms in the future. During this window, the Link poller suppresses `TempoChanged` events (even if Link reports the change locally).
+
+2. **Session-level last_broadcast_bpm**: `last_broadcast_bpm` tracks the last BPM we either set or received. Both `TempoChanged` (outgoing) and `TempoChange`/`StateSnapshot` (incoming) update this value. Changes are only sent if `abs(new - last) > 0.01 BPM`.
+
+Without both guards, the sequence `A changes tempo → broadcasts → B applies → B's Link fires TempoChanged → B broadcasts back → A applies → A's Link fires → ...` would loop indefinitely.
+
+### Beat sync and StateSnapshot
+
+The first `StateSnapshot` received triggers **beat sync**:
+1. `beat_synced = true`
+2. `audio_gate.on_beat_synced()` — lifts the audio send gate
+3. `LinkCommand::ForceBeat(remote_beat)` — snaps local Link to peer's beat position
+4. `interval.set_config(bars, quantum)` — adopts remote interval configuration
+
+Subsequent StateSnapshots are used only to track tempo drift (not to re-snap beat position).
+
+### IntervalBoundary sync
+
+When a peer's `IntervalBoundary { index }` arrives:
+- If our local `interval.current_index()` is behind (or None), we call `interval.sync_to(index)`.
+- `sync_to` sets the internal `last_interval_index` to the remote index, suppressing local boundaries until our beat clock naturally advances past it.
+- This is monotonic: we never sync backward.
+
+---
+
+## 8. Audio Pipeline
+
+### End-to-end path
+
+```
+DAW → [WAIL Send plugin] → TCP IPC → session_loop
+                                         │
+                              ipc_from_plugin_rx
+                                         │
+                              AudioSendGate.is_gated()?
+                                   yes → drop
+                                   no  ↓
+                              mesh.broadcast_audio(wire_data)
+                                         │
+                              PeerConnection.send_audio()
+                                         │
+                              chunk into ≤1200 byte messages
+                                         │
+                              WebRTC "audio" DataChannel
+                                         │ (internet / TURN)
+                              remote peer's DataChannel
+                                         │
+                              AudioReassembly → complete message
+                                         │
+                              audio_tx (bounded, capacity=64)
+                                         │
+                              audio_rx in session_loop
+                                         │
+                              IpcMessage::encode_audio()
+                                         │
+                              TCP IPC → [WAIL Recv plugin] → DAW
+```
+
+### Channel capacities and backpressure
+
+| Channel | Capacity | Drop behavior |
+|---------|----------|---------------|
+| `PeerConnection.audio_tx` | 64 | `try_send` → log debug, drop |
+| `PeerMesh.audio_tx` | 64 | `try_send` → log debug, drop |
+| `ipc_from_plugin_tx` | 64 | `try_send` → log debug, drop |
+
+Both audio channels are bounded at 64. Under congestion, frames are **silently dropped** (debug-logged but not counted or reported to the UI). The audio stats (`audio_intervals_received`) count frames that reach `audio_rx.recv()` in the session loop — frames dropped before that point are invisible to the UI.
+
+### Wire format (AudioWire)
+
+Binary header (48 bytes) followed by Opus data:
+
+```
+Magic: "WAIL" (4 bytes)
+Version: 1 (1 byte)
+Flags: (1 byte)
+Stream ID: u16 LE (2 bytes)
+Interval index: i64 LE (8 bytes)
+Sample rate: u32 LE (4 bytes)
+BPM: f64 LE (8 bytes)
+Quantum: f64 LE (8 bytes)
+Bars: u32 LE (4 bytes)
+Num frames: u32 LE (4 bytes)
+Channels: u8 (1 byte)
+Opus data length: u32 LE (4 bytes) [not present in wire — inferred]
+... Opus data ...
+```
+
+### Slot assignment
+
+When audio arrives from a peer with a new `(peer_id, stream_id)` pair, the session assigns it a **slot** (0–30, matching `MAX_REMOTE_PEERS`). The recv plugin uses this slot to route audio to the correct output bus.
+
+Slot assignment logic (mirrored in both the session and the recv plugin):
+1. Check `slot_affinity` for `(identity, stream_id)` — if the peer has connected before with the same persistent identity, reuse their old slot.
+2. If no affinity, find the first unoccupied slot in `slot_occupied[0..MAX_REMOTE_PEERS]`.
+3. Record `peer_slots.insert((peer_id, stream_id), slot)`.
+
+When a peer leaves (`PeerLeft` or `PeerFailed` after max attempts):
+1. All slots for that peer are freed.
+2. Affinity entries `(identity, stream_id) → slot` are created so the peer gets the same slot if they rejoin.
+
+---
+
+## 9. Failure Detection and Reconnection
+
+### Failure detection mechanisms
+
+There are **three independent** mechanisms that can trigger a `PeerFailed` event:
+
+#### 1. DataChannel `on_close` callback
+Both the sync and audio DataChannels have `on_close` callbacks that immediately send `failure_tx.send(peer_id)`. This fires when the remote peer closes the connection cleanly or when the underlying SCTP association closes.
+
+#### 2. Reader task exit
+The `spawn_message_reader` and `spawn_audio_reader` tasks loop on `rx.recv()`. When the channel closes (because the PeerConnection was dropped), the loop exits and sends `failure_tx.send(peer_id)`.
+
+Both DC `on_close` and the reader task exit will fire for the same peer failure. The second signal is deduplicated in `poll_signaling`:
+```rust
+if self.peers.contains_key(&failed_peer) {
+    Ok(Some(MeshEvent::PeerFailed(failed_peer)))
+} else {
+    Ok(Some(MeshEvent::SignalingProcessed))  // already removed
+}
+```
+
+#### 3. WebRTC connection state callback
+`on_peer_connection_state_change` fires `failure_tx` on `Failed` or `Disconnected`. This catches ICE failure (no candidate pair) before DataChannels even open.
+
+#### 4. Liveness watchdog
+A separate `liveness_interval` fires every 15 seconds. It checks `peer_last_seen` — if a peer hasn't sent any message in `PEER_LIVENESS_TIMEOUT` (30 seconds), it calls `mesh.close_peer(peer_id)`. Closing triggers the DC `on_close` callbacks, which feed back into mechanism 1 above.
+
+`peer_last_seen` is updated on both sync and audio messages, and is seeded when a peer first appears (via `PeerJoined`, `PeerListReceived`, or `re_initiate`). This ensures peers that connect but never send a message are still timed out.
+
+### Peer reconnection state machine
+
+```
+                        PeerFailed received
+                               │
+                    increment peer_reconnect_attempts[pid]
+                               │
+              ┌────────────────▼───────────────────┐
+              │  attempts > MAX_PEER_RECONNECT (5)?  │
+              └──────────────────────────────────────┘
+                   yes │                    no │
+                       │                       │
+                       ▼                       ▼
+            emit PeerLeftEvent       emit PeerReconnectingEvent
+            free slots               calculate backoff:
+            remove all state           min(BASE_MS * 2^(attempt-1), MAX_MS)
+                                       = min(2000 * 2^(n-1), 16000)
+                                     spawn timer task → reconnect_rx
+                                               │
+                              ┌────────────────▼────────────────┐
+                              │  reconnect_rx fires (after sleep) │
+                              └────────────────────────────────────┘
+                                               │
+                                 peer_reconnect_attempts.contains_key(pid)?
+                                    no → skip (PeerLeft arrived in meantime)
+                                   yes ↓
+                                 mesh.re_initiate(pid)
+                                  └── remove_peer(pid)
+                                  └── if our_id < pid: initiate_connection(pid)
+                                               │
+                               send Hello broadcast
+```
+
+Backoff schedule:
+- Attempt 1: 2 000 ms
+- Attempt 2: 4 000 ms
+- Attempt 3: 8 000 ms
+- Attempt 4: 16 000 ms
+- Attempt 5: 16 000 ms (capped)
+- Attempt 6+: emit PeerLeftEvent, give up
+
+After `re_initiate()`, the new connection must go through the full ICE + DataChannel handshake. Hello is resent so the peer learns our display name on the new connection.
+
+**Known issue:** If the higher-ID peer is the one calling `re_initiate()`, the function only removes the dead peer and does nothing (`our_id >= pid` → no `initiate_connection`). The higher-ID peer is waiting for the lower-ID peer to send a new offer. If the lower-ID peer is also calling `re_initiate()`, they will send a new offer. But there is no timeout on how long the higher-ID peer waits — it will just hang in a "reconnecting" state until either a new offer arrives or the signaling server sends a `PeerLeft` for the lower-ID peer.
+
+### Signaling reconnection
+
+When `poll_signaling()` returns `Ok(None)` (the signaling channel closed), the session enters a **signaling reconnection loop** that runs *inside* the `tokio::select!` arm (blocking the other arms):
+
+```
+Ok(None) from poll_signaling
+          │
+emit session:reconnecting
+          │
+          ├── attempt 1: backoff 1000ms, re-fetch ICE, PeerMesh::connect_full()
+          ├── attempt 2: backoff 2000ms, ...
+          ├── attempt 3: backoff 4000ms, ...
+          ├── ...
+          ├── attempt 10: emit session:stale, keep retrying
+          └── on success: replace mesh/sync_rx/audio_rx, clear peer state, re-gate audio
+```
+
+On success:
+- `mesh`, `sync_rx`, `audio_rx` are replaced with the new session's values.
+- All peer tracking state is cleared (`peer_names`, `peer_identities`, `hello_sent`, `peer_reconnect_attempts`, `peer_last_seen`, slot assignments).
+- `beat_synced` is reset to `false`.
+- `audio_gate.on_reconnect()` re-gates audio until beat sync is re-established.
+- `slot_affinity` is **preserved** — peers can recover their slot assignments after reconnection.
+
+**Known issue:** During the signaling reconnection loop, the `select!` is blocked. No audio can be received, no Link events are processed, and no UI status updates are emitted. If the reconnection loop runs for a long time (e.g., the signaling server is down), the UI freezes on the last status update. Link continues to run its own poller task but the tempo changes are buffered and not forwarded.
+
+---
+
+## 10. Peer Status State Machine
+
+The UI displays a status string per peer. Priority order (highest wins):
+
+```
+reconnecting  ←  peer_reconnect_attempts[pid] > 0
+connecting    ←  display_name not yet known (Hello not received)
+full-duplex   ←  sending to AND receiving from this peer
+receiving     ←  receiving audio from this peer
+sending       ←  sending audio to this peer (and DC is open)
+connected     ←  Hello received, no audio flowing
+```
+
+Status derivation is centralized in `PeerRegistry::derive_status()`, which takes `is_receiving` and `is_sending` booleans and returns the highest-priority label. Status transitions are tracked in `PeerState::prev_status` and logged as `"old → new"` on each status tick (every 2 seconds). This means status transitions have up to a 2-second delay in the UI.
+
+---
+
+## 11. AudioSendGate
+
+The AudioSendGate prevents audio transmission until the new peer is beat-synchronized with the session. Without this, a late-joining peer would transmit audio that is misaligned with the interval boundaries the other peers are using.
+
+```
+State: gated = false
+
+on_peer_list(n):
+  if n > 0 → gated = true   (joining a room that has peers)
+  if n = 0 → gated = false  (first peer, nothing to sync to)
+
+on_beat_synced():
+  gated = false              (first StateSnapshot received → beat aligned)
+
+on_reconnect():
+  gated = true               (signaling reconnect → must re-sync)
+
+is_gated():
+  if gated → drop all outgoing audio intervals
+```
+
+The gate only applies to the **local → remote** direction. Incoming audio from peers is always accepted regardless of gate state.
+
+**Edge case:** The gate is lifted by the first `StateSnapshot` received. If all peers in the room are also newly joined (e.g., simultaneous join), none of them will have sent a StateSnapshot yet. In this case, all peers will be gated forever — no one sends audio.
+
+The gate is never lifted unless a StateSnapshot arrives. A workaround exists: if you join an empty room (`n = 0`), the gate is not set, so the first peer starts sending. But if two peers join simultaneously and both see `n = 0` in the PeerList (race condition possible if join requests are processed simultaneously by the server), neither will be gated either.
+
+---
+
+## 12. Clock Synchronization
+
+WAIL uses an NTP-style algorithm for peer RTT measurement:
+
+```
+A → B: Ping { id, sent_at_us: T1 }
+B → A: Pong { id, ping_sent_at_us: T1, pong_sent_at_us: T2 }
+
+On A receiving Pong at time T3:
+  RTT = T3 - T1
+```
+
+Each peer maintains a `VecDeque<i64>` of the last 8 RTT samples per remote peer. The median is used as the working estimate, making it robust to jitter and outliers.
+
+Clock offset computation was intentionally removed: `ClockSync` timestamps (`Instant::now()`) and Link timestamps (`link.clock_micros()`) are different clock domains and cannot be combined. RTT is available via `ClockSync::rtt_us(peer_id)` and displayed in the UI as the peer's round-trip time.
+
+Pings are broadcast to all peers every 2 seconds (`PING_INTERVAL_MS = 2000`). Pong is sent unicast to the ping sender. Both go over the sync DataChannel.
+
+---
+
+## 13. Known Edge Cases and Issues
+
+### A. Duplicate PeerFailed signals
+
+The `on_close` callback, `spawn_message_reader` exit, and `spawn_audio_reader` exit all independently send to `failure_tx`. All three can fire for the same connection failure. The deduplication in `poll_signaling` (checking `self.peers.contains_key`) handles this correctly **only if** `PeerFailed` is processed before the peer is removed from the map. However, once `PeerFailed` reaches session.rs and `re_initiate()` is called (which calls `remove_peer()`), any subsequent `failure_tx` messages from the old connection's tasks will be silently discarded as `SignalingProcessed`. This is correct behavior.
+
+### B. ICE candidate race on fast peers
+
+If A sends an offer and ICE candidates immediately (before B polls), B's `?action=poll` response may contain the offer, ICE candidates, and possibly the answer all in the same batch (in sequence-numbered order). The current code handles candidates before `remote_desc_set` correctly using `pending_candidates`. But if the **answer** arrives before the initiator has processed all its own ICE candidates, this is also fine — the initiator calls `add_ice_candidate` after receiving the answer.
+
+### C. Missing Hello for responder
+
+When peer B receives an offer from A and sends an answer, B inserts A into `self.peers`. Session.rs then broadcasts `Hello` and gets `connected_peers()` → inserts all current peers into `hello_sent`. But A hasn't yet received the answer, so A's DataChannel isn't open. The Hello is **queued** in `pending_sync` and flushed on `on_open` — this is correct and handled.
+
+### D. Re-initiate for the higher-ID peer
+
+As noted in section 9, when the higher-ID peer calls `re_initiate()`, it only removes the dead peer and waits for a new offer. There is no mechanism to ensure the lower-ID peer is actually alive and will send a new offer. If the lower-ID peer is also gone (e.g., both lost internet), the higher-ID peer is stuck in `reconnecting` state with no way out except:
+- A new `PeerLeft` arriving from the signaling server (if the lower-ID peer's heartbeat expires).
+- The session itself being disconnected.
+
+After `MAX_PEER_RECONNECT_ATTEMPTS` failures (5), the peer is treated as permanently left, which correctly unblocks the slot. But each failure requires waiting for the full reconnection attempt with backoff.
+
+### E. Signaling reconnect (fixed)
+
+Signaling reconnection is implemented as a non-blocking state machine (`SignalingReconnect`) polled by the main `select!` loop. While reconnecting, all other arms continue running: Link events are processed, status updates are emitted, audio from plugins is drained, the liveness watchdog ticks, and `Disconnect` commands are handled immediately.
+
+The `mesh.poll_signaling()` arm is guarded with `if signaling_reconnect.is_none()` so the dead mesh is not polled during reconnection.
+
+### F. Audio send gate "all peers join simultaneously" deadlock
+
+Described in section 11. Two peers joining simultaneously both see `PeerList { peers: [] }` (empty), so neither is gated. They exchange StateSnapshots and both lift the gate. This works correctly.
+
+The problematic case is if two peers join nearly simultaneously and both see `n = 1` (the other peer is in the list). Both will be gated and wait for a StateSnapshot. But StateSnapshots are sent by the Link poller (every ~200ms via `LinkEvent::StateUpdate`). These events happen regardless of the gate — the gate only blocks outgoing **audio**, not outgoing StateSnapshots. So both peers will lift their gate once they receive the other peer's StateSnapshot. This works correctly.
+
+The only real deadlock is if a peer joins a room where all existing peers are gated and not sending StateSnapshots. But StateSnapshots are sent by the Link state poller unconditionally — they are not gated.
+
+### G. TURN credential expiry mid-session
+
+TURN credentials are fetched once at session start. If the session outlasts the credential TTL and a peer fails mid-session, `re_initiate()` will use the stale credentials. The credentials are not refreshed on reconnect.
+
+The signaling reconnect path **does** re-fetch ICE servers:
+```rust
+let ice = match wail_net::fetch_metered_ice_servers().await {
+    Ok(s) => s,
+    Err(_) => wail_net::metered_stun_fallback(),
+};
+```
+But individual peer reconnections (PeerFailed → re_initiate) do not. The mesh holds its `ice_servers` from construction time.
+
+### H. Outgoing signal queue drains at most 5 per poll tick
+
+The polling loop processes at most 5 outgoing signals per tick (5-second interval). If ICE negotiation with many peers generates more than 5 signals (e.g., 3 peers × 3 ICE candidates = 9), the 6th–9th signals are deferred to the next poll tick (5 seconds later). This significantly slows down connection setup in larger rooms.
+
+### I. Liveness watchdog peer seeding (fixed)
+
+`peer_last_seen` is updated on both sync and audio messages. Previously, peers that appeared in the mesh (via `PeerJoined` or `PeerListReceived`) but never sent a single message were invisible to the watchdog and could sit in "connecting" state forever.
+
+Now fixed: `peer_last_seen` is seeded with `Instant::now()` when a peer first appears — on `PeerJoined`, on `PeerListReceived` (for initial peers), and after `re_initiate` (for reconnecting peers). A peer that connects but stalls will be timed out by the watchdog after 30 seconds.
+
+### J. Audio channel drop with no feedback
+
+When the audio bounded channel (capacity 64) is full, frames are dropped with a `debug!` log. This is invisible to the UI — `audio_intervals_received` is only incremented when a frame reaches the `audio_rx.recv()` call in the session loop, which happens after the drop point. The UI cannot distinguish "received 100 intervals" from "received 100, dropped 20."

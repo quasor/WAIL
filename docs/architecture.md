@@ -226,9 +226,7 @@ Two independent time domains exist in the system:
 
 1. **Link clock** (`link.clock_micros()`): Ableton Link's internal monotonic clock, used for beat/phase synchronization. This is the authoritative clock for interval boundaries.
 
-2. **ClockSync epoch** (`std::time::Instant::now()`): Used by WAIL's Ping/Pong protocol to estimate peer-to-peer RTT and clock offset.
-
-These clocks are **not interchangeable**. ClockSync offsets cannot adjust Link timestamps because they measure different things. ClockSync RTT remains useful for diagnostics (displaying latency to peers) but does not participate in interval boundary calculations.
+2. **ClockSync epoch** (`std::time::Instant::now()`): Used by WAIL's Ping/Pong protocol to measure peer-to-peer RTT. Clock offset computation was removed — these two clocks are different domains and cannot be combined. ClockSync RTT is useful for diagnostics (displaying latency to peers) but does not participate in interval boundary calculations.
 
 ## Sync Protocol Messages
 

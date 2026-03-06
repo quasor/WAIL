@@ -248,4 +248,80 @@ mod tests {
         let data = vec![0u8; 10];
         assert!(AudioWire::decode(&data).is_err());
     }
+
+    // §5.2 — Unknown version byte returns a graceful Err, not a panic.
+    #[test]
+    fn decode_unknown_version_returns_err() {
+        let mut data = vec![0u8; 50]; // 48-byte header + 2 opus bytes
+        data[0..4].copy_from_slice(b"WAIL");
+        data[4] = 99; // unsupported version
+        data[5] = 0; // flags
+        data[6..8].copy_from_slice(&[0, 0]); // stream_id
+        data[8..16].copy_from_slice(&0i64.to_le_bytes());
+        data[16..20].copy_from_slice(&48000u32.to_le_bytes());
+        data[20..24].copy_from_slice(&960u32.to_le_bytes());
+        data[24..32].copy_from_slice(&120.0f64.to_le_bytes());
+        data[32..40].copy_from_slice(&4.0f64.to_le_bytes());
+        data[40..44].copy_from_slice(&4u32.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes()); // opus_len = 2
+
+        let result = AudioWire::decode(&data);
+        assert!(result.is_err(), "Unknown version must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Unsupported") || msg.contains("version"),
+            "Error message should mention version: {msg}"
+        );
+    }
+
+    // §5.2 — An interval with zero frames and empty opus data encodes and decodes cleanly.
+    #[test]
+    fn encode_zero_frame_interval_does_not_panic() {
+        let interval = AudioInterval {
+            index: 0,
+            stream_id: 0,
+            opus_data: vec![],
+            sample_rate: 48000,
+            channels: 1,
+            num_frames: 0,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+
+        let encoded = AudioWire::encode(&interval);
+        let decoded = AudioWire::decode(&encoded).unwrap();
+        assert_eq!(decoded.num_frames, 0);
+        assert!(decoded.opus_data.is_empty());
+    }
+
+    // §5.2 — A very long interval (large num_frames, large opus payload) round-trips
+    // without integer overflow or panic.
+    #[test]
+    fn encode_large_interval_roundtrips_without_overflow() {
+        // Simulate ~60s of audio at 48 kHz = 2,880,000 frames (fits in u32).
+        let large_num_frames: u32 = 2_880_000;
+        // Use a realistically large-ish Opus payload (200 KB).
+        let opus_data = vec![0xAB; 200_000];
+
+        let interval = AudioInterval {
+            index: i64::MAX - 1,
+            stream_id: u16::MAX,
+            opus_data: opus_data.clone(),
+            sample_rate: 48000,
+            channels: 2,
+            num_frames: large_num_frames,
+            bpm: 30.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+
+        let encoded = AudioWire::encode(&interval);
+        let decoded = AudioWire::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.index, i64::MAX - 1);
+        assert_eq!(decoded.stream_id, u16::MAX);
+        assert_eq!(decoded.num_frames, large_num_frames);
+        assert_eq!(decoded.opus_data, opus_data);
+    }
 }

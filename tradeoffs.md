@@ -70,11 +70,10 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **Known limitation — same-LAN disruption:** `forceBeatAtTime` propagates to all LAN Link peers. If the joining peer (C) and the existing peers (A, B) share a LAN, C's snap will jolt A and B by approximately `RTT/2 * BPM/60` beats. At 100ms RTT, 120 BPM this is ~0.1 beats — imperceptible. At 500ms RTT it's ~0.5 beats — audible. In the typical WAIL use case (musicians on separate LANs), there is no cross-LAN Link interaction so no disruption occurs.
 **Known limitation — latency compensation:** ForceBeat uses `link.clock_micros()` (local time, now) and `remote_beat` (remote time, past). The beat value is slightly stale by `RTT/2`. A future improvement could add `RTT/2 * BPM/60` beats to compensate, once ClockSync is wired to the Link clock domain.
 
-### W15. Clock offset computed but never applied
-**Status:** Won't fix — clock domain mismatch
-**File:** `crates/wail-app/src/main.rs:150-153`
-**Problem:** Clock sync computes per-peer offset but never uses it to adjust beat timestamps.
-**Rationale:** Link timestamps (`link.clock_micros()`) and ClockSync timestamps (`Instant::now()`) are different clock domains. Applying ClockSync offsets to Link timestamps would be incorrect. ClockSync RTT remains useful for diagnostics (displaying latency to peers). Interval boundaries are computed independently per peer from local beat position — this is intentional for NINJAM semantics where drift up to 1 interval is tolerable.
+### W15. Clock offset computation removed
+**Status:** Done — dead code removed
+**File:** `crates/wail-core/src/clock.rs`
+**Rationale:** Link timestamps (`link.clock_micros()`) and ClockSync timestamps (`Instant::now()`) are different clock domains. Offset computation was dead code — it was never applied to anything. `ClockSync` now tracks RTT only (`VecDeque<i64>` of RTT samples per peer), using a median over the last 8 samples. RTT is available via `rtt_us(peer_id)` for diagnostics.
 
 ---
 

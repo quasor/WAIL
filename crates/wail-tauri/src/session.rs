@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
 
@@ -15,6 +14,7 @@ use wail_net::PeerMesh;
 
 use crate::events::*;
 use crate::emit_log;
+use crate::peers::{IpcWriterPool, PeerRegistry};
 use crate::recorder::{RecordingConfig, SessionRecorder};
 
 /// Shorthand: log to tracing + emit to UI
@@ -54,28 +54,11 @@ pub enum SessionCommand {
     Disconnect,
 }
 
-/// Derive a peer's display status from session state.
-///
-/// Priority: reconnecting > connecting > full-duplex > receiving > sending > connected
-fn derive_peer_status(
-    reconnect_attempts: Option<&u32>,
-    display_name: Option<&Option<String>>,
-    is_receiving: bool,
-    is_sending: bool,
-) -> &'static str {
-    if reconnect_attempts.is_some_and(|&a| a > 0) {
-        "reconnecting"
-    } else if display_name.map_or(true, |n| n.is_none()) {
-        "connecting"
-    } else if is_receiving && is_sending {
-        "full-duplex"
-    } else if is_receiving {
-        "receiving"
-    } else if is_sending {
-        "sending"
-    } else {
-        "connected"
-    }
+/// State for non-blocking signaling reconnection.
+/// Instead of blocking the select! loop, reconnection is driven as a polled state machine.
+struct SignalingReconnect {
+    attempt: u32,
+    next_try: tokio::time::Instant,
 }
 
 pub struct SessionConfig {
@@ -131,6 +114,16 @@ pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHan
     );
 
     Ok(handle)
+}
+
+/// Notify recv plugins that a peer has left and remove the peer from the registry.
+async fn remove_peer_fully(peers: &mut PeerRegistry, ipc_pool: &mut IpcWriterPool, peer_id: &str) {
+    if !ipc_pool.is_empty() {
+        let msg = IpcMessage::encode_peer_left(peer_id);
+        let frame = IpcFramer::encode_frame(&msg);
+        ipc_pool.broadcast(&frame).await;
+    }
+    peers.remove(peer_id);
 }
 
 async fn session_loop(
@@ -195,17 +188,9 @@ async fn session_loop(
         tokio::time::interval(Duration::from_millis(ClockSync::ping_interval_ms()));
     let mut status_interval = tokio::time::interval(Duration::from_secs(2));
 
-    // Track peers' display names (seeded from signaling join response)
-    let mut peer_names: HashMap<String, Option<String>> = mesh.take_initial_peer_names();
-    // Track peers' persistent identities (for slot affinity)
-    let mut peer_identities: HashMap<String, String> = HashMap::new();
-    // Track (peer_id, stream_id) → slot assignments (mirrors recv plugin's ring for UI labeling)
-    let mut peer_slots: HashMap<(String, u16), usize> = HashMap::new();
-    // Affinity: (identity, stream_id) → slot for peers that left
-    let mut slot_affinity: HashMap<(String, u16), usize> = HashMap::new();
-    let mut slot_occupied: [bool; wail_audio::MAX_REMOTE_PEERS] = [false; wail_audio::MAX_REMOTE_PEERS];
-    // Track which peers we've sent Hello to (prevents infinite Hello loops)
-    let mut hello_sent: HashSet<String> = HashSet::new();
+    // Consolidated peer state registry (replaces 11 separate HashMaps)
+    let mut peers = PeerRegistry::new();
+    peers.seed_names(mesh.take_initial_peer_names());
 
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
@@ -217,12 +202,7 @@ async fn session_loop(
     let mut audio_intervals_received: u64 = 0;
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
-
-    // Per-peer status tracking
-    let mut peer_audio_recv_count: HashMap<String, u64> = HashMap::new();
-    let mut peer_audio_recv_prev: HashMap<String, u64> = HashMap::new();
     let mut audio_intervals_sent_prev: u64 = 0;
-    let mut peer_prev_status: HashMap<String, String> = HashMap::new();
 
     // Test tone state
     let mut test_tone_enabled = test_tone;
@@ -256,7 +236,7 @@ async fn session_loop(
     let ipc_listener = tokio::net::TcpListener::bind(("127.0.0.1", ipc_port)).await?;
     ui_info!(&app, "IPC listening on port {ipc_port}");
 
-    let mut ipc_recv_writers: Vec<(usize, tokio::net::tcp::OwnedWriteHalf)> = Vec::new();
+    let mut ipc_pool = IpcWriterPool::new();
     let mut next_conn_id: usize = 0;
     let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
     let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
@@ -279,16 +259,20 @@ async fn session_loop(
     };
 
     // Peer liveness tracking — detect silent disconnections
-    let mut peer_last_seen: HashMap<String, Instant> = HashMap::new();
     let mut liveness_interval = tokio::time::interval(Duration::from_secs(15));
     const PEER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
 
-    // Reconnection state
-    let mut peer_reconnect_attempts: HashMap<String, u32> = HashMap::new();
+    // Peer reconnection channels
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<String>(16);
     const MAX_PEER_RECONNECT_ATTEMPTS: u32 = 5;
     const PEER_RECONNECT_BASE_MS: u64 = 2000;
     const PEER_RECONNECT_MAX_MS: u64 = 16000;
+    const SIGNALING_RECONNECT_BASE_MS: u64 = 1000;
+    const SIGNALING_RECONNECT_MAX_MS: u64 = 30_000;
+    const SIGNALING_RECONNECT_STALE_ATTEMPT: u32 = 10;
+
+    // Non-blocking signaling reconnection state (None = connected)
+    let mut signaling_reconnect: Option<SignalingReconnect> = None;
 
     ui_info!(&app, "Waiting for peers...");
 
@@ -370,7 +354,7 @@ async fn session_loop(
 
                         // Only recv plugins get forwarded audio from remote peers
                         if role == IPC_ROLE_RECV {
-                            ipc_recv_writers.push((conn_id, write_half));
+                            ipc_pool.push(conn_id, write_half);
                         } else {
                             // Send plugin — we don't need its write half (it only sends audio TO us)
                             drop(write_half);
@@ -436,18 +420,18 @@ async fn session_loop(
                     mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
                     audio_bytes_sent += wire_data.len() as u64;
-                    let peers = mesh.connected_peers();
-                    ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), peers.join(", "), audio_intervals_sent);
+                    let connected_peers = mesh.connected_peers();
+                    ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), connected_peers.join(", "), audio_intervals_sent);
                 }
             }
 
-            // --- Signaling messages ---
-            event = mesh.poll_signaling() => {
+            // --- Signaling messages (disabled during reconnection — old mesh is dead) ---
+            event = mesh.poll_signaling(), if signaling_reconnect.is_none() => {
                 match event {
                     Ok(Some(wail_net::MeshEvent::PeerJoined { peer_id: pid, display_name: sig_name })) => {
                         let display = sig_name.as_deref().unwrap_or(&pid);
                         ui_info!(&app, "Peer {display} joined room");
-                        peer_names.insert(pid.clone(), sig_name.clone());
+                        peers.add(pid.clone(), sig_name.clone());
                         let _ = app.emit("peer:joined", PeerJoinedEvent {
                             peer_id: pid.clone(),
                             display_name: sig_name,
@@ -458,7 +442,7 @@ async fn session_loop(
                         // Mark all connected peers as having been sent Hello
                         // (messages are queued if DataChannel isn't open yet)
                         for p in mesh.connected_peers() {
-                            hello_sent.insert(p);
+                            peers.mark_hello_sent(&p);
                         }
 
                         let config_msg = SyncMessage::IntervalConfig { bars, quantum };
@@ -474,96 +458,23 @@ async fn session_loop(
                         mesh.broadcast(&caps).await;
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
-                        let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid);
+                        let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
                         ui_info!(&app, "Peer {name} left");
-
-                        // Notify recv plugins so they can free the slot and set affinity
-                        if !ipc_recv_writers.is_empty() {
-                            let msg = IpcMessage::encode_peer_left(&pid);
-                            let frame = IpcFramer::encode_frame(&msg);
-                            let mut dead = Vec::new();
-                            for (id, writer) in &mut ipc_recv_writers {
-                                if writer.write_all(&frame).await.is_err() {
-                                    dead.push(*id);
-                                }
-                            }
-                            for id in &dead {
-                                ui_warn!(&app, "Removing failed IPC writer (conn {id})");
-                            }
-                            ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
-                        }
-
-                        // Free all slots for this peer and create affinity reservations
-                        let peer_keys: Vec<(String, u16)> = peer_slots.keys()
-                            .filter(|(p, _)| p == &pid)
-                            .cloned()
-                            .collect();
-                        for key in peer_keys {
-                            if let Some(slot) = peer_slots.remove(&key) {
-                                slot_occupied[slot] = false;
-                                if let Some(ident) = peer_identities.get(&pid) {
-                                    slot_affinity.insert((ident.clone(), key.1), slot);
-                                }
-                            }
-                        }
-
-                        peer_names.remove(&pid);
-                        peer_identities.remove(&pid);
-                        hello_sent.remove(&pid);
-                        peer_reconnect_attempts.remove(&pid);
-                        peer_last_seen.remove(&pid);
-                        peer_audio_recv_count.remove(&pid);
-                        peer_audio_recv_prev.remove(&pid);
-                        peer_prev_status.remove(&pid);
+                        remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
                     Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
-                        let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid).to_string();
-                        let attempts = peer_reconnect_attempts.entry(pid.clone()).or_insert(0);
-                        *attempts += 1;
-                        let attempt = *attempts;
+                        let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
+                        let attempt = if let Some(peer) = peers.get_mut(&pid) {
+                            peer.reconnect_attempts += 1;
+                            peer.reconnect_attempts
+                        } else {
+                            1
+                        };
 
                         if attempt > MAX_PEER_RECONNECT_ATTEMPTS {
                             ui_error!(&app, "Peer {name} reconnection failed after {MAX_PEER_RECONNECT_ATTEMPTS} attempts — giving up");
-
-                            // Notify recv plugins so they can free the slot and set affinity
-                            if !ipc_recv_writers.is_empty() {
-                                let msg = IpcMessage::encode_peer_left(&pid);
-                                let frame = IpcFramer::encode_frame(&msg);
-                                let mut dead = Vec::new();
-                                for (id, writer) in &mut ipc_recv_writers {
-                                    if writer.write_all(&frame).await.is_err() {
-                                        dead.push(*id);
-                                    }
-                                }
-                                for id in &dead {
-                                    ui_warn!(&app, "Removing failed IPC writer (conn {id})");
-                                }
-                                ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
-                            }
-
-                            // Free all slots and create affinity reservations
-                            let peer_keys: Vec<(String, u16)> = peer_slots.keys()
-                                .filter(|(p, _)| p == &pid)
-                                .cloned()
-                                .collect();
-                            for key in peer_keys {
-                                if let Some(slot) = peer_slots.remove(&key) {
-                                    slot_occupied[slot] = false;
-                                    if let Some(ident) = peer_identities.get(&pid) {
-                                        slot_affinity.insert((ident.clone(), key.1), slot);
-                                    }
-                                }
-                            }
-
-                            peer_reconnect_attempts.remove(&pid);
-                            peer_names.remove(&pid);
-                            peer_identities.remove(&pid);
-                            hello_sent.remove(&pid);
-                            peer_last_seen.remove(&pid);
-                            peer_audio_recv_count.remove(&pid);
-                            peer_audio_recv_prev.remove(&pid);
-                            peer_prev_status.remove(&pid);
+                            remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                         } else {
@@ -585,6 +496,9 @@ async fn session_loop(
                     }
                     Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
                         audio_gate.on_peer_list(n);
+                        // Seed liveness for initial peers so the watchdog can
+                        // detect peers that connect but never send any messages.
+                        peers.seed_last_seen();
                         if n == 0 {
                             ui_info!(&app, "First peer in room — audio send ungated");
                         } else {
@@ -595,76 +509,11 @@ async fn session_loop(
                     Ok(None) => {
                         ui_warn!(&app, "Signaling connection closed — attempting reconnection");
                         let _ = app.emit("session:reconnecting", ());
-
-                        let mut signaling_reconnected = false;
-                        for attempt in 1u32.. {
-                            let backoff_ms = (1000u64 * 2u64.pow(attempt.min(5) - 1)).min(30000);
-                            ui_info!(&app, "Signaling reconnect attempt {attempt} in {backoff_ms}ms...");
-                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-
-                            if attempt == 10 {
-                                ui_warn!(&app, "Signaling reconnection stale after {attempt} attempts — still retrying");
-                                let _ = app.emit("session:stale", SessionStale { attempts: attempt });
-                            }
-
-                            // Check for disconnect command during backoff
-                            if let Ok(cmd) = cmd_rx.try_recv() {
-                                if matches!(cmd, SessionCommand::Disconnect) {
-                                    ui_info!(&app, "Disconnect during reconnection — exiting");
-                                    break;
-                                }
-                            }
-
-                            // Re-fetch ICE servers (TURN credentials may have expired)
-                            let ice = match wail_net::fetch_metered_ice_servers().await {
-                                Ok(s) => s,
-                                Err(_) => wail_net::metered_stun_fallback(),
-                            };
-
-                            match wail_net::PeerMesh::connect_full(
-                                &server, &room, &peer_id, password.as_deref(), ice,
-                                5_000, false, stream_count, Some(&display_name),
-                            ).await {
-                                Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
-                                    mesh = new_mesh;
-                                    sync_rx = new_sync_rx;
-                                    audio_rx = new_audio_rx;
-                                    // Don't clear slot_affinity — preserve across signaling reconnect
-                                    // so peers get the same slot when they rejoin
-                                    for ((pid, stream_id), slot) in peer_slots.drain() {
-                                        slot_occupied[slot] = false;
-                                        // Create affinity for all current peers
-                                        if let Some(ident) = peer_identities.get(&pid) {
-                                            slot_affinity.insert((ident.clone(), stream_id), slot);
-                                        }
-                                    }
-                                    // Seed peer_names from signaling response
-                                    peer_names = mesh.take_initial_peer_names();
-                                    peer_identities.clear();
-                                    hello_sent.clear();
-                                    peer_reconnect_attempts.clear();
-                                    peer_last_seen.clear();
-                                    peer_audio_recv_count.clear();
-                                    peer_audio_recv_prev.clear();
-                                    audio_intervals_sent_prev = audio_intervals_sent;
-                                    peer_prev_status.clear();
-                                    clock = ClockSync::new();
-                                    beat_synced = false;
-                                    audio_gate.on_reconnect();
-                                    signaling_reconnected = true;
-                                    ui_info!(&app, "Signaling reconnected (attempt {attempt})");
-                                    let _ = app.emit("session:reconnected", ());
-                                    break;
-                                }
-                                Err(e) => {
-                                    ui_warn!(&app, "Signaling reconnect failed: {e}");
-                                }
-                            }
-                        }
-
-                        if !signaling_reconnected {
-                            break;
-                        }
+                        signaling_reconnect = Some(SignalingReconnect {
+                            attempt: 1,
+                            next_try: tokio::time::Instant::now()
+                                + Duration::from_millis(SIGNALING_RECONNECT_BASE_MS),
+                        });
                     }
                     Err(e) => {
                         ui_error!(&app, "Signaling error: {e}");
@@ -674,13 +523,16 @@ async fn session_loop(
 
             // --- Pending peer reconnection ---
             Some(pid) = reconnect_rx.recv() => {
-                if peer_reconnect_attempts.contains_key(&pid) {
-                    let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid).to_string();
+                if peers.get(&pid).is_some_and(|p| p.reconnect_attempts > 0) {
+                    let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
                     ui_info!(&app, "Attempting reconnection to {name}...");
                     match mesh.re_initiate(&pid).await {
                         Ok(()) => {
                             ui_info!(&app, "Reconnection offer sent to {name}");
-                            hello_sent.remove(&pid);
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                peer.last_seen = Instant::now();
+                                peer.hello_sent = false;
+                            }
                             let hello = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
                                 display_name: Some(display_name.clone()),
@@ -688,7 +540,7 @@ async fn session_loop(
                             };
                             mesh.broadcast(&hello).await;
                             for p in mesh.connected_peers() {
-                                hello_sent.insert(p);
+                                peers.mark_hello_sent(&p);
                             }
                         }
                         Err(e) => {
@@ -698,118 +550,127 @@ async fn session_loop(
                 }
             }
 
+            // --- Signaling reconnection state machine (non-blocking) ---
+            _ = async {
+                if let Some(ref sr) = signaling_reconnect {
+                    tokio::time::sleep_until(sr.next_try).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if signaling_reconnect.is_some() => {
+                let sr = signaling_reconnect.as_mut().unwrap();
+                let attempt = sr.attempt;
+
+                if attempt == SIGNALING_RECONNECT_STALE_ATTEMPT {
+                    ui_warn!(&app, "Signaling reconnection stale after {attempt} attempts — still retrying");
+                    let _ = app.emit("session:stale", SessionStale { attempts: attempt });
+                }
+
+                ui_info!(&app, "Signaling reconnect attempt {attempt}...");
+
+                // Re-fetch ICE servers (TURN credentials may have expired)
+                let ice = match wail_net::fetch_metered_ice_servers().await {
+                    Ok(s) => s,
+                    Err(_) => wail_net::metered_stun_fallback(),
+                };
+
+                match wail_net::PeerMesh::connect_full(
+                    &server, &room, &peer_id, password.as_deref(), ice,
+                    5_000, false, stream_count, Some(&display_name),
+                ).await {
+                    Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
+                        mesh = new_mesh;
+                        sync_rx = new_sync_rx;
+                        audio_rx = new_audio_rx;
+                        // Reset peer state, preserve slot affinity so peers reclaim their slots
+                        peers.reset_for_reconnect(mesh.take_initial_peer_names());
+                        audio_intervals_sent_prev = audio_intervals_sent;
+                        clock = ClockSync::new();
+                        beat_synced = false;
+                        audio_gate.on_reconnect();
+                        signaling_reconnect = None;
+                        ui_info!(&app, "Signaling reconnected (attempt {attempt})");
+                        let _ = app.emit("session:reconnected", ());
+                    }
+                    Err(e) => {
+                        ui_warn!(&app, "Signaling reconnect failed: {e}");
+                        let next_attempt = attempt + 1;
+                        let backoff_ms = (SIGNALING_RECONNECT_BASE_MS
+                            * 2u64.pow(next_attempt.min(5) - 1))
+                            .min(SIGNALING_RECONNECT_MAX_MS);
+                        sr.attempt = next_attempt;
+                        sr.next_try = tokio::time::Instant::now()
+                            + Duration::from_millis(backoff_ms);
+                    }
+                }
+            }
+
             // --- Incoming sync messages from peers ---
             Some((from, msg)) = sync_rx.recv() => {
-                peer_last_seen.insert(from.clone(), Instant::now());
+                if let Some(peer) = peers.get_mut(&from) {
+                    peer.last_seen = Instant::now();
+                }
                 match msg {
                     SyncMessage::Hello { peer_id: pid, display_name: name, identity: remote_identity } => {
-                        let name_display = name.as_deref().unwrap_or("(anonymous)");
+                        let name_display = name.as_deref().unwrap_or("(anonymous)").to_string();
                         ui_info!(&app, "Hello from {name_display} ({pid})");
-                        peer_names.insert(pid.clone(), name.clone());
+
+                        // Update or add peer entry
+                        if let Some(peer) = peers.get_mut(&pid) {
+                            peer.display_name = name.clone();
+                        } else {
+                            peers.add(pid.clone(), name.clone());
+                        }
+
                         if let Some(ref rid) = remote_identity {
                             // Evict any stale peer_id that holds this identity.
                             // This happens when a peer crashes and reconnects with a new peer_id
                             // before the old connection has been cleaned up — without eviction the
                             // old slot would still be occupied, forcing the reconnecting peer onto
                             // a new slot and breaking channel affinity.
-                            let old_pid: Option<String> = peer_identities
-                                .iter()
-                                .find(|(p, ident)| ident.as_str() == rid.as_str() && p.as_str() != pid.as_str())
-                                .map(|(p, _)| p.clone());
+                            let old_pid = peers
+                                .find_by_identity(rid.as_str())
+                                .filter(|old| old.as_str() != pid.as_str());
 
                             if let Some(ref old) = old_pid {
                                 ui_info!(&app, "Peer {name_display} reconnected with new peer_id (old={old}, new={pid}) — evicting stale entry");
-
-                                // Notify recv plugins to free the old slot
-                                if !ipc_recv_writers.is_empty() {
-                                    let evict_msg = IpcMessage::encode_peer_left(old);
-                                    let evict_frame = IpcFramer::encode_frame(&evict_msg);
-                                    let mut dead = Vec::new();
-                                    for (id, writer) in &mut ipc_recv_writers {
-                                        if writer.write_all(&evict_frame).await.is_err() {
-                                            dead.push(*id);
-                                        }
-                                    }
-                                    for id in &dead {
-                                        ui_warn!(&app, "Removing failed IPC writer (conn {id})");
-                                    }
-                                    ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
-                                }
-
-                                // Free session-side slots and store affinity for the identity
-                                let old_keys: Vec<(String, u16)> = peer_slots.keys()
-                                    .filter(|(p, _)| p == old)
-                                    .cloned()
-                                    .collect();
-                                for key in old_keys {
-                                    if let Some(slot) = peer_slots.remove(&key) {
-                                        slot_occupied[slot] = false;
-                                        slot_affinity.insert((rid.clone(), key.1), slot);
-                                    }
-                                }
-
-                                // Clean up old peer from all tracking maps
-                                peer_identities.remove(old);
-                                peer_names.remove(old);
-                                hello_sent.remove(old);
-                                peer_reconnect_attempts.remove(old);
-                                peer_last_seen.remove(old);
-                                peer_audio_recv_count.remove(old);
-                                peer_audio_recv_prev.remove(old);
-                                peer_prev_status.remove(old);
-
-                                // Close stale WebRTC connection
+                                remove_peer_fully(&mut peers, &mut ipc_pool, old).await;
                                 mesh.remove_peer(old).await;
-
-                                // Notify UI
                                 let _ = app.emit("peer:left", PeerLeftEvent { peer_id: old.clone() });
                             }
 
-                            peer_identities.insert(pid.clone(), rid.clone());
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                peer.identity = Some(rid.clone());
+                            }
 
                             // Assign slot for stream 0 (mirror recv plugin's logic for UI labeling)
-                            let key = (pid.clone(), 0u16);
-                            if !peer_slots.contains_key(&key) {
-                                // Check affinity first
-                                let affinity_key = (rid.clone(), 0u16);
-                                let affinity_slot = slot_affinity.remove(&affinity_key)
-                                    .filter(|&s| s < wail_audio::MAX_REMOTE_PEERS && !slot_occupied[s]);
-                                let slot = affinity_slot.or_else(|| {
-                                    slot_occupied.iter().position(|&occupied| !occupied)
-                                });
-                                if let Some(s) = slot {
-                                    slot_occupied[s] = true;
-                                    peer_slots.insert(key, s);
-                                    ui_info!(&app, "Peer {name_display} assigned to slot {} (Peer {})", s, s + 1);
+                            let already_had_slot = peers.slot_for(&pid, 0).is_some();
+                            if let Some(slot) = peers.assign_slot(&pid, 0) {
+                                if !already_had_slot {
+                                    ui_info!(&app, "Peer {name_display} assigned to slot {} (Peer {})", slot, slot + 1);
                                 }
                             }
 
                             // Notify recv plugins about peer identity for slot affinity
-                            if !ipc_recv_writers.is_empty() {
+                            if !ipc_pool.is_empty() {
                                 let msg = IpcMessage::encode_peer_joined(&pid, rid);
                                 let frame = IpcFramer::encode_frame(&msg);
-                                let mut dead = Vec::new();
-                                for (id, writer) in &mut ipc_recv_writers {
-                                    if writer.write_all(&frame).await.is_err() {
-                                        dead.push(*id);
-                                    }
-                                }
-                                for id in &dead {
-                                    ui_warn!(&app, "Removing failed IPC writer (conn {id})");
-                                }
-                                ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
+                                ipc_pool.broadcast(&frame).await;
                             }
                         }
 
                         // Clear reconnect tracking — peer is alive
-                        if peer_reconnect_attempts.remove(&pid).is_some() {
-                            ui_info!(&app, "Peer {name_display} reconnected successfully");
+                        if let Some(peer) = peers.get_mut(&pid) {
+                            if peer.reconnect_attempts > 0 {
+                                peer.reconnect_attempts = 0;
+                                ui_info!(&app, "Peer {name_display} reconnected successfully");
+                            }
                         }
 
                         // Reply with our Hello if we haven't sent one to this peer.
                         // This handles the case where the peer wasn't in mesh.peers
                         // when we originally broadcast Hello (responder timing).
-                        if hello_sent.insert(from.clone()) {
+                        if peers.mark_hello_sent(&from) {
                             let reply = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
                                 display_name: Some(display_name.clone()),
@@ -817,7 +678,7 @@ async fn session_loop(
                             };
                             if let Err(e) = mesh.send_to(&from, &reply).await {
                                 debug!(peer = %from, error = %e, "Failed to send Hello reply");
-                                hello_sent.remove(&from);
+                                peers.clear_hello_sent(&from);
                             }
                         }
 
@@ -839,7 +700,7 @@ async fn session_loop(
                     }
 
                     SyncMessage::TempoChange { bpm: remote_bpm, .. } => {
-                        let name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
+                        let name = peers.get(&from).and_then(|p| p.display_name.as_deref()).unwrap_or(&from);
                         ui_info!(&app, "Tempo change from {name}: {remote_bpm:.1} BPM");
                         last_broadcast_bpm = remote_bpm;
                         if link_cmd_tx.send(LinkCommand::SetTempo(remote_bpm)).is_err() {
@@ -893,7 +754,7 @@ async fn session_loop(
                     }
 
                     SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected } => {
-                        let name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
+                        let name = peers.get(&from).and_then(|p| p.display_name.as_deref()).unwrap_or(&from);
                         ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
                     }
                 }
@@ -901,29 +762,23 @@ async fn session_loop(
 
             // --- Incoming audio data from peers → forward to plugin ---
             Some((from, data)) = audio_rx.recv() => {
-                peer_last_seen.insert(from.clone(), Instant::now());
+                if let Some(peer) = peers.get_mut(&from) {
+                    peer.last_seen = Instant::now();
+                    peer.audio_recv_count += 1;
+                }
                 audio_intervals_received += 1;
-                *peer_audio_recv_count.entry(from.clone()).or_insert(0) += 1;
                 audio_bytes_recv += data.len() as u64;
-                let peer_name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
+                let peer_name: String = peers.get(&from)
+                    .and_then(|p| p.display_name.clone())
+                    .unwrap_or_else(|| from.clone());
 
                 match AudioWire::decode(&data) {
                     Ok(audio_interval) => {
                         // Assign slot for new (peer, stream_id) pairs
-                        let slot_key = (from.clone(), audio_interval.stream_id);
-                        if !peer_slots.contains_key(&slot_key) {
-                            let ident = peer_identities.get(&from);
-                            let affinity_key = ident.map(|id| (id.clone(), audio_interval.stream_id));
-                            let affinity_slot = affinity_key.as_ref()
-                                .and_then(|k| slot_affinity.remove(k))
-                                .filter(|&s| s < wail_audio::MAX_REMOTE_PEERS && !slot_occupied[s]);
-                            let slot = affinity_slot.or_else(|| {
-                                slot_occupied.iter().position(|&occupied| !occupied)
-                            });
-                            if let Some(s) = slot {
-                                slot_occupied[s] = true;
-                                peer_slots.insert(slot_key.clone(), s);
-                                ui_info!(&app, "Peer {peer_name} stream {} assigned to slot {} (Peer {})", audio_interval.stream_id, s, s + 1);
+                        let already_had_slot = peers.slot_for(&from, audio_interval.stream_id).is_some();
+                        if let Some(slot) = peers.assign_slot(&from, audio_interval.stream_id) {
+                            if !already_had_slot {
+                                ui_info!(&app, "Peer {peer_name} stream {} assigned to slot {} (Peer {})", audio_interval.stream_id, slot, slot + 1);
                             }
                         }
 
@@ -960,31 +815,20 @@ async fn session_loop(
                 }
 
                 if let Some(ref rec) = recorder {
-                    let name = peer_names.get(&from).and_then(|n| n.clone());
+                    let name = peers.get(&from).and_then(|p| p.display_name.clone());
                     rec.record_peer(from.clone(), name, data.clone());
                 }
 
-                if !ipc_recv_writers.is_empty() {
+                if !ipc_pool.is_empty() {
                     let msg = IpcMessage::encode_audio(&from, &data);
                     let frame = IpcFramer::encode_frame(&msg);
-                    let mut dead = Vec::new();
-                    for (id, writer) in &mut ipc_recv_writers {
-                        if writer.write_all(&frame).await.is_err() {
-                            dead.push(*id);
-                        }
-                    }
-                    if !dead.is_empty() {
-                        for id in &dead {
-                            ui_warn!(&app, "Removing failed IPC writer (conn {id})");
-                        }
-                        ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
-                    }
+                    ipc_pool.broadcast(&frame).await;
                 }
             }
 
             // --- IPC disconnect notification ---
             Some(conn_id) = ipc_disconnect_rx.recv() => {
-                ipc_recv_writers.retain(|(id, _)| *id != conn_id);
+                ipc_pool.remove(conn_id);
                 ui_info!(&app, "IPC connection {conn_id} removed");
             }
 
@@ -1043,15 +887,14 @@ async fn session_loop(
 
             // --- Peer liveness watchdog ---
             _ = liveness_interval.tick() => {
-                let now = Instant::now();
-                let dead_peers: Vec<String> = peer_last_seen.iter()
-                    .filter(|(_, &last)| now.duration_since(last) > PEER_LIVENESS_TIMEOUT)
-                    .map(|(id, _)| id.clone())
-                    .collect();
+                let dead_peers = peers.timed_out_peers(PEER_LIVENESS_TIMEOUT);
                 for dead_id in dead_peers {
-                    let name = peer_names.get(&dead_id).and_then(|n| n.as_deref()).unwrap_or(&dead_id);
+                    let name = peers.get(&dead_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&dead_id).to_string();
                     ui_warn!(&app, "Peer {name} timed out (no messages for {PEER_LIVENESS_TIMEOUT:?})");
-                    peer_last_seen.remove(&dead_id);
+                    // Bump last_seen to prevent re-detection before the PeerFailed event arrives
+                    if let Some(peer) = peers.get_mut(&dead_id) {
+                        peer.last_seen = Instant::now();
+                    }
                     mesh.close_peer(&dead_id).await;
                 }
             }
@@ -1073,60 +916,63 @@ async fn session_loop(
                     let connected = mesh.connected_peers();
                     let dc_open = mesh.any_audio_dc_open();
                     let is_sending = audio_intervals_sent > audio_intervals_sent_prev;
-                    let peers: Vec<PeerInfo> = connected
+                    let peer_infos: Vec<PeerInfo> = connected
                         .iter()
                         .map(|p| {
-                            let recv_now = peer_audio_recv_count.get(p).copied().unwrap_or(0);
-                            let recv_prev = peer_audio_recv_prev.get(p).copied().unwrap_or(0);
+                            // Extract all data from the immutable borrow before any mutable borrow
+                            let (recv_now, recv_prev, prev_status, display_name) = {
+                                let ps = peers.get(p);
+                                (
+                                    ps.map_or(0, |s| s.audio_recv_count),
+                                    ps.map_or(0, |s| s.audio_recv_prev),
+                                    ps.map_or(String::new(), |s| s.prev_status.clone()),
+                                    ps.and_then(|s| s.display_name.clone()),
+                                )
+                            };
                             let is_receiving = recv_now > recv_prev;
                             let is_sending_to_peer = is_sending && mesh.is_peer_audio_dc_open(p);
-                            let status = derive_peer_status(
-                                peer_reconnect_attempts.get(p),
-                                peer_names.get(p),
-                                is_receiving,
-                                is_sending_to_peer,
-                            );
+                            let status = peers.derive_status(p, is_receiving, is_sending_to_peer);
 
-                            // Log status transitions
-                            let prev = peer_prev_status.get(p).map(|s| s.as_str()).unwrap_or("");
-                            if prev != status {
-                                let name = peer_names.get(p).and_then(|n| n.as_deref()).unwrap_or(p);
-                                if prev.is_empty() {
+                            // Log status transitions and update prev_status (requires mutable borrow)
+                            if prev_status != status {
+                                let name = display_name.as_deref().unwrap_or(p);
+                                if prev_status.is_empty() {
                                     ui_info!(&app, "Peer {name} status: {status}");
                                 } else {
-                                    ui_info!(&app, "Peer {name} status: {prev} → {status}");
+                                    ui_info!(&app, "Peer {name} status: {prev_status} → {status}");
                                 }
-                                peer_prev_status.insert(p.clone(), status.to_string());
+                                if let Some(peer) = peers.get_mut(p) {
+                                    peer.prev_status = status.to_string();
+                                }
                             }
 
                             PeerInfo {
                                 peer_id: p.clone(),
-                                display_name: peer_names.get(p).cloned().flatten(),
+                                display_name,
                                 rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
-                                slot: peer_slots.get(&(p.clone(), 0u16)).map(|&s| s as u32 + 1),
+                                slot: peers.slot_for(p, 0).map(|s| s as u32 + 1),
                                 status: status.to_string(),
                             }
                         })
                         .collect();
 
                     // Update snapshots for next tick
-                    peer_audio_recv_prev = peer_audio_recv_count.clone();
+                    peers.flush_audio_recv_prev();
                     audio_intervals_sent_prev = audio_intervals_sent;
-                    peer_prev_status.retain(|id, _| connected.contains(id));
 
                     let _ = app.emit("status:update", StatusUpdate {
                         bpm: state.bpm,
                         beat: state.beat,
                         phase: state.phase,
                         link_peers: state.num_peers,
-                        peers,
+                        peers: peer_infos,
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
                         audio_bytes_sent,
                         audio_bytes_recv,
                         audio_dc_open: dc_open,
-                        plugin_connected: !ipc_recv_writers.is_empty(),
+                        plugin_connected: !ipc_pool.is_empty(),
                         test_tone_enabled,
                         audio_send_gated: audio_gate.is_gated(),
                         recording: recorder.is_some(),
@@ -1138,7 +984,7 @@ async fn session_loop(
                         audio_dc_open: dc_open,
                         intervals_sent: audio_intervals_sent,
                         intervals_received: audio_intervals_received,
-                        plugin_connected: !ipc_recv_writers.is_empty(),
+                        plugin_connected: !ipc_pool.is_empty(),
                     };
                     mesh.broadcast(&status_msg).await;
                 }
@@ -1221,8 +1067,8 @@ async fn send_test_tone(
             };
             mesh.broadcast(&ready_msg).await;
 
-            let peers = mesh.connected_peers();
-            ui_info!(app, "[TEST TONE] Broadcast interval {idx} to peers: [{}]", peers.join(", "));
+            let connected_peers = mesh.connected_peers();
+            ui_info!(app, "[TEST TONE] Broadcast interval {idx} to peers: [{}]", connected_peers.join(", "));
         }
         Err(e) => {
             ui_warn!(app, "[TEST TONE] Encode failed: {e}");
@@ -1265,7 +1111,7 @@ impl AudioSendGate {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioSendGate, derive_peer_status};
+    use super::AudioSendGate;
 
     #[test]
     fn first_peer_not_gated() {
@@ -1304,48 +1150,5 @@ mod tests {
         assert!(gate.is_gated());
         gate.on_peer_list(0);
         assert!(!gate.is_gated());
-    }
-
-    #[test]
-    fn status_connecting_when_no_hello() {
-        assert_eq!(derive_peer_status(None, None, false, false), "connecting");
-        assert_eq!(derive_peer_status(None, Some(&None), false, false), "connecting");
-    }
-
-    #[test]
-    fn status_reconnecting_overrides_other_states() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(Some(&2), Some(&name), true, true), "reconnecting");
-        assert_eq!(derive_peer_status(Some(&1), None, false, false), "reconnecting");
-    }
-
-    #[test]
-    fn status_connected_when_hello_but_no_audio() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(None, Some(&name), false, false), "connected");
-    }
-
-    #[test]
-    fn status_receiving_only() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(None, Some(&name), true, false), "receiving");
-    }
-
-    #[test]
-    fn status_sending_only() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(None, Some(&name), false, true), "sending");
-    }
-
-    #[test]
-    fn status_full_duplex() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(None, Some(&name), true, true), "full-duplex");
-    }
-
-    #[test]
-    fn status_zero_reconnect_attempts_is_not_reconnecting() {
-        let name = Some("Alice".to_string());
-        assert_eq!(derive_peer_status(Some(&0), Some(&name), false, false), "connected");
     }
 }

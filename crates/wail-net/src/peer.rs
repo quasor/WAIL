@@ -601,3 +601,146 @@ impl PeerConnection {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use webrtc::data_channel::data_channel_message::DataChannelMessage;
+
+    fn make_dc_msg(data: Vec<u8>) -> DataChannelMessage {
+        DataChannelMessage {
+            is_string: false,
+            data: Bytes::from(data),
+        }
+    }
+
+    /// Build a WACH-framed chunk: [magic][total_len u32 LE][payload].
+    fn make_wach_chunk(total_len: usize, payload: &[u8]) -> Vec<u8> {
+        let mut chunk = Vec::with_capacity(CHUNK_HEADER_SIZE + payload.len());
+        chunk.extend_from_slice(CHUNK_MAGIC);
+        chunk.extend_from_slice(&(total_len as u32).to_le_bytes());
+        chunk.extend_from_slice(payload);
+        chunk
+    }
+
+    // §3.2 — A message without a WACH prefix passes through the handler unchanged.
+    #[tokio::test]
+    async fn non_chunked_message_passes_through_as_is() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (_reassembly, handler) = make_audio_handler(tx);
+
+        let data = vec![0xAB; 100];
+        handler(make_dc_msg(data.clone())).await;
+
+        let received = rx.try_recv().expect("Non-chunked message should arrive immediately");
+        assert_eq!(received, data);
+    }
+
+    // §3.2 — A message exactly CHUNK_MAX bytes without a WACH prefix passes through.
+    #[tokio::test]
+    async fn message_exactly_chunk_max_without_wach_passes_through() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (_reassembly, handler) = make_audio_handler(tx);
+
+        // 1200 bytes, first four bytes are NOT "WACH"
+        let data = vec![0xFF; CHUNK_MAX];
+        assert_ne!(&data[0..4], CHUNK_MAGIC);
+
+        handler(make_dc_msg(data.clone())).await;
+
+        let received = rx
+            .try_recv()
+            .expect("1200-byte message without WACH should pass through");
+        assert_eq!(received.len(), CHUNK_MAX);
+        assert_eq!(received, data);
+    }
+
+    // §3.2 — A single chunk (partial message) does not emit anything downstream.
+    #[tokio::test]
+    async fn partial_chunk_not_emitted_until_complete() {
+        // 1201 bytes → requires 2 WACH chunks
+        let total_data = vec![0xCD; CHUNK_MAX + 1];
+        let total_len = total_data.len();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (_reassembly, handler) = make_audio_handler(tx);
+
+        let chunk1 = make_wach_chunk(total_len, &total_data[..CHUNK_MAX_PAYLOAD]);
+        handler(make_dc_msg(chunk1)).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "First chunk alone must not emit a message"
+        );
+    }
+
+    // §3.2 — Two WACH chunks reassemble into the original message.
+    #[tokio::test]
+    async fn two_chunks_reassemble_to_complete_message() {
+        let total_data = vec![0xCD; CHUNK_MAX + 1];
+        let total_len = total_data.len();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (_reassembly, handler) = make_audio_handler(tx);
+
+        let chunk1 = make_wach_chunk(total_len, &total_data[..CHUNK_MAX_PAYLOAD]);
+        let chunk2 = make_wach_chunk(total_len, &total_data[CHUNK_MAX_PAYLOAD..]);
+        handler(make_dc_msg(chunk1)).await;
+        handler(make_dc_msg(chunk2)).await;
+
+        let received = rx
+            .try_recv()
+            .expect("Both chunks delivered → complete message should be emitted");
+        assert_eq!(received, total_data);
+    }
+
+    // §3.2 — Reassembly buffer is fully reset after a complete message; the next
+    // message is not corrupted by leftover state from the previous one.
+    #[tokio::test]
+    async fn reassembly_buffer_reset_between_messages() {
+        let msg1 = vec![0xAA; CHUNK_MAX + 1];
+        let msg2 = vec![0xBB; CHUNK_MAX + 1];
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (_reassembly, handler) = make_audio_handler(tx);
+
+        // Deliver msg1 in two chunks.
+        let len1 = msg1.len();
+        handler(make_dc_msg(make_wach_chunk(len1, &msg1[..CHUNK_MAX_PAYLOAD]))).await;
+        handler(make_dc_msg(make_wach_chunk(len1, &msg1[CHUNK_MAX_PAYLOAD..]))).await;
+        let recv1 = rx.try_recv().expect("msg1 should arrive after two chunks");
+        assert_eq!(recv1, msg1);
+
+        // Deliver msg2 in two chunks — must not be corrupted by msg1's buffer.
+        let len2 = msg2.len();
+        handler(make_dc_msg(make_wach_chunk(len2, &msg2[..CHUNK_MAX_PAYLOAD]))).await;
+        handler(make_dc_msg(make_wach_chunk(len2, &msg2[CHUNK_MAX_PAYLOAD..]))).await;
+        let recv2 = rx
+            .try_recv()
+            .expect("msg2 should arrive cleanly after two more chunks");
+        assert_eq!(
+            recv2, msg2,
+            "Second message must not be corrupted by first message's reassembly state"
+        );
+    }
+
+    // §3.1 — take_pending drains the queue in FIFO order and leaves it empty.
+    #[test]
+    fn pending_sync_drained_in_fifo_order() {
+        let queue = Mutex::new(Vec::new());
+        queue.lock().unwrap().push("first".to_string());
+        queue.lock().unwrap().push("second".to_string());
+        queue.lock().unwrap().push("third".to_string());
+
+        let drained = take_pending(&queue);
+        assert_eq!(
+            drained,
+            vec!["first", "second", "third"],
+            "Messages must be drained FIFO"
+        );
+
+        let empty = take_pending(&queue);
+        assert!(empty.is_empty(), "Queue must be empty after take_pending");
+    }
+}

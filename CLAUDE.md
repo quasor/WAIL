@@ -13,12 +13,12 @@ crates/
 ├── wail-core/           Core sync library (no networking)
 │   ├── link.rs           Ableton Link bridge via rusty_link
 │   ├── protocol.rs       SyncMessage + SignalMessage types
-│   ├── clock.rs          NTP-like peer clock offset estimation
+│   ├── clock.rs          NTP-like peer RTT estimation (Ping/Pong)
 │   └── interval.rs       NINJAM-style interval tracking
 ├── wail-audio/          Audio encoding and intervalic ring buffer
 │   ├── codec.rs          Opus encode/decode (audiopus)
 │   ├── ring.rs           NINJAM-style interval ring buffer (record + playback)
-│   ├── interval.rs       AudioInterval type, IntervalRecorder, IntervalPlayer
+│   ├── interval.rs       AudioInterval type, IntervalRecorder
 │   ├── wire.rs           Binary wire format for audio over DataChannels
 │   ├── bridge.rs         AudioBridge: wraps ring + Opus codec for send/recv
 │   ├── ipc.rs            IPC framing protocol (length-prefixed messages)
@@ -32,6 +32,7 @@ crates/
 │   ├── lib.rs            Tauri setup and plugin registration
 │   ├── commands.rs       Tauri IPC commands (join/leave room, etc.)
 │   ├── events.rs         Tauri event types for frontend
+│   ├── peers.rs          PeerRegistry + IpcWriterPool (consolidated peer state)
 │   ├── session.rs        Session state machine (Link + WebRTC + audio)
 │   └── recorder.rs       Local session recording
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)

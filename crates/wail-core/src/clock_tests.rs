@@ -35,65 +35,97 @@ mod tests {
     }
 
     #[test]
-    fn offset_none_for_unknown_peer() {
+    fn rtt_none_for_unknown_peer() {
         let clock = ClockSync::new();
-        assert!(clock.offset_us("unknown").is_none());
         assert!(clock.rtt_us("unknown").is_none());
     }
 
     #[test]
-    fn pong_establishes_offset_and_rtt() {
+    fn pong_establishes_rtt() {
         let mut clock = ClockSync::new();
         let local_send = clock.now_us();
-        // Simulate remote clock that is 1000us ahead
-        let remote_recv = local_send + 500 + 1000; // half RTT + offset
-        clock.handle_pong("peer1", local_send, remote_recv);
+        clock.handle_pong("peer1", local_send, 0);
 
-        assert!(clock.offset_us("peer1").is_some());
         assert!(clock.rtt_us("peer1").is_some());
         assert!(clock.rtt_us("peer1").unwrap() >= 0);
     }
 
     #[test]
-    fn multiple_pongs_converge() {
+    fn rtt_converges_with_multiple_pongs() {
         let mut clock = ClockSync::new();
-        let offset = 5000i64; // 5ms offset
+        let target_rtt = 5_000i64; // 5ms RTT
 
         for _ in 0..10 {
-            let t = clock.now_us();
-            // Simulate consistent RTT of ~1000us with the offset
-            let remote_time = t + 500 + offset;
-            clock.handle_pong("peer1", t, remote_time);
-            // Small sleep equivalent: the loop is fast enough
+            let t = clock.now_us() - target_rtt;
+            clock.handle_pong("peer1", t, 0);
         }
 
-        let estimated_offset = clock.offset_us("peer1").unwrap();
-        // Should be close to the real offset (within ~2ms tolerance due to timing)
+        let estimated_rtt = clock.rtt_us("peer1").unwrap();
+        // Should be close to the target RTT (within ~2ms tolerance due to timing)
         assert!(
-            (estimated_offset - offset).abs() < 2000,
-            "Offset {} too far from expected {}",
-            estimated_offset,
-            offset
+            (estimated_rtt - target_rtt).abs() < 2_000,
+            "RTT {estimated_rtt} too far from expected {target_rtt}"
         );
     }
 
+    // §10 — Sliding window: after 16 samples the window holds only the last 8,
+    // so old samples no longer influence the median.
     #[test]
-    fn remote_to_local_conversion() {
+    fn sliding_window_only_uses_last_8_samples() {
         let mut clock = ClockSync::new();
-        let t = clock.now_us();
-        // offset = remote - local = 1000
-        let remote_recv = t + 500 + 1000;
-        clock.handle_pong("peer1", t, remote_recv);
 
-        let offset = clock.offset_us("peer1").unwrap();
-        let remote_ts = 10000i64;
-        let local_ts = clock.remote_to_local("peer1", remote_ts).unwrap();
-        assert_eq!(local_ts, remote_ts - offset);
+        // First 8 samples: simulated RTT ≈ 1_000 µs.
+        for _ in 0..8 {
+            let t = clock.now_us() - 1_000;
+            clock.handle_pong("peer1", t, 0);
+        }
+        let rtt_after_8 = clock.rtt_us("peer1").unwrap();
+        assert!(
+            rtt_after_8 < 5_000,
+            "After 8 samples, RTT should be near 1000µs (got {rtt_after_8})"
+        );
+
+        // Next 8 samples: simulated RTT ≈ 50_000 µs (very different from the first batch).
+        for _ in 0..8 {
+            let t = clock.now_us() - 50_000;
+            clock.handle_pong("peer1", t, 0);
+        }
+        let rtt_after_16 = clock.rtt_us("peer1").unwrap();
+        // The window now contains only the last 8 (all ≈ 50_000µs).
+        // The median should have shifted well away from 1_000µs.
+        assert!(
+            rtt_after_16 > 40_000,
+            "After 16 samples, window should hold only last 8 (expected ~50000µs, got {rtt_after_16})"
+        );
+        assert!(
+            (rtt_after_16 - 1_000).abs() > 5_000,
+            "Old 1000µs samples should no longer influence the median"
+        );
     }
 
+    // §10 — Jitter: one extreme outlier RTT among seven normal samples does not
+    // dominate the median RTT estimate.
     #[test]
-    fn remote_to_local_none_for_unknown() {
-        let clock = ClockSync::new();
-        assert!(clock.remote_to_local("unknown", 100).is_none());
+    fn jitter_outlier_does_not_dominate_median_rtt() {
+        let mut clock = ClockSync::new();
+
+        // 7 normal samples: RTT ≈ 1000 µs.
+        for _ in 0..7 {
+            let t = clock.now_us() - 1_000;
+            clock.handle_pong("peer1", t, 0);
+        }
+
+        // 1 extreme outlier: pretend the ping was sent 200 ms ago (RTT ≈ 200_000 µs).
+        let old_sent = clock.now_us() - 200_000;
+        clock.handle_pong("peer1", old_sent, 0);
+
+        // Sorted RTTs in the window (8 samples):
+        //   [~1000, ~1000, ~1000, ~1000, ~1000, ~1000, ~1000, ~200000]
+        // Median index 4 = ~1000 µs — the outlier should not dominate.
+        let rtt = clock.rtt_us("peer1").unwrap();
+        assert!(
+            rtt < 10_000,
+            "Median RTT should not be dominated by outlier (got {rtt}µs, expected ~1000µs)"
+        );
     }
 }

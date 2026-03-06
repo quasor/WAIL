@@ -3,6 +3,7 @@ pub mod events;
 mod filelog;
 mod hb;
 mod identity;
+mod peers;
 mod recorder;
 mod session;
 

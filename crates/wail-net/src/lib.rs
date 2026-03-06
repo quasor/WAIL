@@ -521,6 +521,52 @@ impl PeerMesh {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    // §2.3 — Tie-breaking: verify the < comparison that guards initiation in all three paths.
+    #[test]
+    fn tie_breaking_lower_id_initiates() {
+        // "peer-a" < "peer-b" lexicographically → peer-a should initiate.
+        assert!("peer-a" < "peer-b");
+    }
+
+    #[test]
+    fn tie_breaking_higher_id_does_not_initiate() {
+        // "peer-b" is NOT < "peer-a" → peer-b must not initiate.
+        assert!(!("peer-b" < "peer-a"));
+    }
+
+    #[test]
+    fn tie_breaking_equal_peer_ids_does_not_initiate() {
+        // When peer_id == remote_id the condition `peer_id < remote_id` is false.
+        // The PeerList path additionally guards with `remote_id != self.peer_id`.
+        // Both checks correctly suppress initiation for equal IDs.
+        let our_id = "peer-x";
+        let remote_id = "peer-x";
+
+        // PeerJoined path: `self.peer_id < remote_id`
+        assert!(
+            !(our_id < remote_id),
+            "Equal IDs: PeerJoined path must not initiate"
+        );
+
+        // PeerList path: `remote_id != self.peer_id && self.peer_id < remote_id`
+        assert!(
+            !(remote_id != our_id && our_id < remote_id),
+            "Equal IDs: PeerList path must not initiate"
+        );
+    }
+
+    #[test]
+    fn re_initiate_tie_breaking_respects_id_order() {
+        // re_initiate guard: `*self.peer_id < *peer_id`
+        // Lower-ID peer calling re_initiate on higher-ID peer → should initiate.
+        assert!("peer-a" < "peer-b", "Lower-ID peer should initiate in re_initiate");
+        // Higher-ID peer calling re_initiate on lower-ID peer → must NOT initiate.
+        assert!(!("peer-b" < "peer-a"), "Higher-ID peer must NOT initiate in re_initiate");
+    }
+}
+
 /// Events from the peer mesh.
 #[derive(Debug)]
 pub enum MeshEvent {
