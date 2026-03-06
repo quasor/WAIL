@@ -86,7 +86,7 @@ function loadSettings() {
 }
 
 function saveSettings() {
-  if (!document.getElementById('remember').checked) {
+  if (!getRememberEnabled()) {
     localStorage.removeItem(STORAGE_KEY);
     return;
   }

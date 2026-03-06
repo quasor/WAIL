@@ -35,7 +35,7 @@ This builds the WAIL binary and DAW plugins from source. The CLAP and VST3 plugi
 
 4. **Load WAIL Recv** on a separate track to hear remote peers. It decodes incoming audio and provides a main mix output plus up to 31 per-slot auxiliary outputs (one per unique peer/stream combination).
 
-5. **Join a room** in the WAIL app. Enter a room name and your display name. Set a password to create a private room, or leave it blank for a public room. You can also browse existing public rooms from the "Public Rooms" tab.
+5. **Join a room** in the WAIL app. On first launch, you'll be prompted to enter a display name (you can change it later via the settings gear icon). Enter a room name and optionally set a password to create a private room, or leave it blank for a public room. You can also browse existing public rooms from the "Public Rooms" tab.
 
 6. **Play.** Audio is recorded for the duration of each interval (default: 4 bars), then transmitted to all connected peers. Playback runs one interval behind — this latency-by-design is how NINJAM-style sync works.
 
