@@ -8,6 +8,7 @@ use crate::identity::PeerIdentity;
 use crate::filelog::TelemetryHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
+use crate::PluginInstallErrors;
 
 pub type SessionState = Mutex<Option<SessionHandle>>;
 
@@ -167,4 +168,9 @@ pub async fn cleanup_recordings(directory: String, retention_days: u32) -> Resul
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_plugin_install_errors(state: State<'_, PluginInstallErrors>) -> Vec<String> {
+    state.0.lock().map(|e| e.clone()).unwrap_or_default()
 }

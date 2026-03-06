@@ -25,11 +25,13 @@ fn system_plugin_dirs() -> Option<PluginDirs> {
 }
 
 /// Install plugins from bundled resources if they are not already present in
-/// the system plugin directories.
-pub fn install_if_missing(resource_dir: &Path) {
+/// the system plugin directories. Returns a list of error messages for any
+/// plugins that failed to install (already-present plugins are not errors).
+pub fn install_if_missing(resource_dir: &Path) -> Vec<String> {
     let Some(dirs) = system_plugin_dirs() else {
-        warn!("plugin_install: could not determine system plugin directories");
-        return;
+        let msg = "Could not determine system plugin directories. Please install WAIL Send and WAIL Recv manually using cargo xtask install-plugin.".to_string();
+        warn!("plugin_install: {msg}");
+        return vec![msg];
     };
 
     let plugins: &[(&str, &Path)] = &[
@@ -39,6 +41,7 @@ pub fn install_if_missing(resource_dir: &Path) {
         ("wail-plugin-recv.vst3", &dirs.vst3),
     ];
 
+    let mut errors = Vec::new();
     for (name, dest_dir) in plugins {
         let src = resource_dir.join("plugins").join(name);
         let dest = dest_dir.join(name);
@@ -51,14 +54,21 @@ pub fn install_if_missing(resource_dir: &Path) {
             continue;
         }
         if let Err(e) = std::fs::create_dir_all(dest_dir) {
-            warn!("plugin_install: failed to create {}: {e}", dest_dir.display());
+            let msg = format!("Failed to create plugin directory {}: {e}", dest_dir.display());
+            warn!("plugin_install: {msg}");
+            errors.push(msg);
             continue;
         }
         match copy_path(&src, &dest) {
             Ok(()) => info!("plugin_install: installed {name} → {}", dest_dir.display()),
-            Err(e) => warn!("plugin_install: failed to install {name}: {e}"),
+            Err(e) => {
+                let msg = format!("Failed to install {name}: {e}");
+                warn!("plugin_install: {msg}");
+                errors.push(msg);
+            }
         }
     }
+    errors
 }
 
 /// Copy a file or directory recursively.

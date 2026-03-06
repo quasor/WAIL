@@ -199,6 +199,20 @@
     </details>
   </div>
 
+  <!-- Plugin Install Error Modal -->
+  <div id="plugin-error-modal" class="settings-overlay" style="display:none">
+    <div class="settings-card">
+      <div class="settings-header">
+        <h2>Plugin Installation Failed</h2>
+        <button type="button" id="plugin-error-close-btn" class="icon-btn" title="Close">×</button>
+      </div>
+      <p>WAIL could not automatically install the Send and Recv plugins:</p>
+      <ul id="plugin-error-list"></ul>
+      <p>You can install them manually by running <code>cargo xtask install-plugin</code> from the WAIL source directory.</p>
+      <button type="button" id="plugin-error-ok-btn">OK</button>
+    </div>
+  </div>
+
   <script src="main.js"></script>
 </body>
 </html>

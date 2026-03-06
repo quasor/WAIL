@@ -27,6 +27,22 @@ window.__TAURI__.app.getVersion().then(v => {
   document.getElementById('version-label').textContent = 'v' + v;
 });
 
+// Check for plugin install errors on load
+invoke('get_plugin_install_errors').then(errors => {
+  if (errors.length === 0) return;
+  const modal = document.getElementById('plugin-error-modal');
+  const list = document.getElementById('plugin-error-list');
+  list.innerHTML = errors.map(e => `<li>${escapeHtml(e)}</li>`).join('');
+  modal.style.display = 'flex';
+}).catch(() => {});
+
+document.getElementById('plugin-error-close-btn').addEventListener('click', () => {
+  document.getElementById('plugin-error-modal').style.display = 'none';
+});
+document.getElementById('plugin-error-ok-btn').addEventListener('click', () => {
+  document.getElementById('plugin-error-modal').style.display = 'none';
+});
+
 // State
 let unlisten = [];
 let testToneEnabled = false;
