@@ -90,6 +90,9 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
+      - name: Clean stale Tauri bundles
+        run: rm -rf target/release/bundle/
+
       - name: Build Tauri app
         run: cargo tauri build
 
@@ -171,6 +174,10 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
         run: cargo xtask build-plugin
 
+      - name: Clean stale Tauri bundles
+        run: Remove-Item -Recurse -Force target\release\bundle -ErrorAction SilentlyContinue
+        shell: pwsh
+
       - name: Build Tauri app
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
@@ -250,6 +257,9 @@ jobs:
 
       - name: Run plugin integration tests
         run: cargo test -p wail-plugin-test
+
+      - name: Clean stale Tauri bundles
+        run: rm -rf target/release/bundle/
 
       - name: Build Tauri app
         run: cargo tauri build
