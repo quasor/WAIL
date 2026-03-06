@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.0 (2026-03-06)
+
+### Features
+
+- add passthrough parameter to WAIL Send plugin (#98)
+- Add first-launch screen for display name prompt and settings gear icon. The display name is now only asked on first launch and can be changed later via the settings panel. Telemetry and remember-settings checkboxes are moved to the settings panel for a cleaner join screen.
+- Consolidate peer state into `PeerRegistry` and `IpcWriterPool`, removing dead code (`ClockSync` offset computation, `IntervalPlayer`) and extending signaling integration tests.
+- Add passthrough parameter to WAIL Send plugin. When enabled, input audio passes through to the plugin output instead of being silenced.
+
+### Fixes
+
+- homebrew install failing with ENOTDIR during plugin bundling (#96)
+- evict stale peer entries on reconnect to restore channel affinity (#99)
+
+#### Fix Homebrew install failing with "Not a directory (os error 20)" during plugin
+
+bundling. Pre-build plugin libraries with --locked before the xtask bundle
+assembly step to eliminate nested cargo calls in the Homebrew build sandbox.
+Also add --locked to xtask's internal cargo build calls and improve error
+context on all filesystem operations in bundle-plugin.
+
+#### Fix reconnecting peers being mapped to a different channel slot.
+
+When a peer crashed and reconnected with a new peer_id before the old connection was cleaned up, the old slot remained occupied, forcing the reconnecting peer onto a new slot. The session now evicts the stale peer_id when a Hello arrives with an identity that already belongs to a different tracked peer, freeing the slot for the reconnecting peer to reclaim via affinity.
+
 ## 1.2.0 (2026-03-06)
 
 ### Features
