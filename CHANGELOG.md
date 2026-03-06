@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 (2026-03-06)
+
+### Features
+
+- enforce strict conventional commit prefix rules (#88)
+- add per-peer status tracking and display (#91)
+
+### Fixes
+
+- add fade-in to prevent audio pops when peers join (#90)
+- Fix audio pops/clicks when peers join or reconnect by applying a 10ms fade-in to a peer's first audio interval.
+
 ## 1.0.0 (2026-03-05)
 
 ### Features
