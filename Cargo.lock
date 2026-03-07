@@ -6391,7 +6391,7 @@ dependencies = [
 
 [[package]]
 name = "wail-audio"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -6402,7 +6402,7 @@ dependencies = [
 
 [[package]]
 name = "wail-core"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "rusty_link",
@@ -6414,7 +6414,7 @@ dependencies = [
 
 [[package]]
 name = "wail-net"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -6435,7 +6435,7 @@ dependencies = [
 
 [[package]]
 name = "wail-plugin-recv"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "assert_no_alloc",
@@ -6447,7 +6447,7 @@ dependencies = [
 
 [[package]]
 name = "wail-plugin-send"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "assert_no_alloc",
@@ -6459,7 +6459,7 @@ dependencies = [
 
 [[package]]
 name = "wail-plugin-test"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "clack-host",
  "tokio 1.49.0",
@@ -6470,7 +6470,7 @@ dependencies = [
 
 [[package]]
 name = "wail-tauri"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "anyhow",
  "chrono",

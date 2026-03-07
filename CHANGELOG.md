@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.3 (2026-03-07)
+
+### Fixes
+
+- eliminate audio-thread buffer allocation via return channel (#114)
+
 ## 1.4.2 (2026-03-06)
 
 ### Fixes
