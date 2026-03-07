@@ -425,6 +425,14 @@ async fn session_loop(
             // --- Audio from plugin IPC → broadcast to WebRTC peers ---
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                    // Discard plugin backlog that accumulated before the first real interval
+                    // boundary. Interval 0 is a warmup period: stale buffered intervals from
+                    // the DAW's history flood in during this window. After the first boundary
+                    // (interval >= 1) we're live. NINJAM semantics: interval N audio is only
+                    // played back in interval N+1, so interval 0 is a throw-away anyway.
+                    if interval.current_index() <= Some(0) {
+                        continue;
+                    }
                     if let Some(ref rec) = recorder {
                         rec.record_own(wire_data.clone());
                     }
