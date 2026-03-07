@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.8.0 (2026-03-07)
+
+### Features
+
+#### Add WebRTC peer network visibility tab and fix signaling reconnect to preserve live connections.
+
+- **Network tab**: New "Network" tab in the session screen shows per-peer ICE state, sync/audio DataChannel states, RTT, and audio recv count, updated every 2 seconds.
+- **Signaling reconnect fix**: Reconnecting to the signaling server no longer tears down established WebRTC peer connections. `PeerMesh::reconnect_signaling()` replaces only the WebSocket while leaving `self.peers` intact — audio and sync DataChannels continue uninterrupted.
+- **Audio retry**: If broadcasting an audio interval to a peer fails transiently, up to 3 retries are attempted at 250ms intervals.
+
+### Fixes
+
+- Fix Windows reconnect error "Only one usage of each socket address" (os error 10048) by setting SO_REUSEADDR on the IPC TCP listener before binding.
+- Speed up Windows CI builds by caching the vcpkg opus installation, stripping PDB debug symbol files before saving the Cargo cache (reducing cache size by ~500MB–2GB), and switching to the rust-lld linker for faster linking on Windows.
+
 ## 1.7.2 (2026-03-07)
 
 ### Fixes
