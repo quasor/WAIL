@@ -399,7 +399,9 @@ fn ipc_thread_send(
 
                     // Return the buffer to the audio thread for reuse
                     samples.clear();
-                    let _ = buf_return_tx.try_send(samples);
+                    if let Err(e) = buf_return_tx.try_send(samples) {
+                        tracing::warn!("Buffer return failed: {e}");
+                    }
 
                     if write_failed {
                         break;
