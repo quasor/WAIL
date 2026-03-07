@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.2 (2026-03-07)
+
+### Fixes
+
+- resolve peers stuck "CONNECTING" when audio arrives before Hello (#130)
+- defer recv plugin slot name assignment until slots are active (#132)
+- Fix peers stuck in "CONNECTING" status when audio arrives before Hello (DataChannel ordering race).
+
 ## 1.7.1 (2026-03-07)
 
 ### Fixes
