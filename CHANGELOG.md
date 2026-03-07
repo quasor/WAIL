@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0 (2026-03-07)
+
+### Features
+
+- peer log streaming via signaling WebSocket (#120)
+- Dynamic DAW aux output port names via nih_plug fork. CLAP hosts now show peer display names (e.g. "Ringo") instead of static "Slot 1" labels when peers join a session. Adds PeerName IPC message to forward display names from the Tauri session to the recv plugin. VST3 hosts still show static names (no equivalent API).
+- Add peer log streaming. Clients can opt in via Settings to broadcast their structured tracing output (INFO and above) to other peers in the session via the signaling WebSocket. Peers with the toggle enabled see remote logs in the session log panel with a peer name prefix.
+
 ## 1.5.0 (2026-03-07)
 
 ### Features
