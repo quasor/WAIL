@@ -469,23 +469,25 @@ async function setupListeners() {
       document.getElementById('recording-size').textContent = `${mb} MB`;
     }
 
-    // Update peer list
-    const peerList = document.getElementById('peer-list');
-    if (s.peers.length === 0) {
-      peerList.innerHTML = '<span class="empty">No peers connected</span>';
+    // Update slot list (slot-centric view)
+    const slotList = document.getElementById('peer-list');
+    const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
+    if (slots.length === 0) {
+      slotList.innerHTML = '<span class="empty">No peers connected</span>';
     } else {
-      peerList.innerHTML = s.peers.map(p => {
-        const shortId = p.peer_id.slice(0, 6);
-        const name = p.display_name ? `${p.display_name} (${shortId})` : shortId;
-        const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '...';
-        const statusClass = `peer-status status-${p.status}`;
-        const slotLabel = p.slot != null ? `<span class="peer-slot">Peer ${p.slot}</span>` : '';
-        const upClass = `peer-arrow arrow-up${p.is_sending ? ' active' : ''}`;
-        const downClass = `peer-arrow arrow-down${p.is_receiving ? ' active' : ''}`;
+      slotList.innerHTML = slots.map(sl => {
+        const name = sl.display_name
+          ? `${escapeHtml(sl.display_name)} (${escapeHtml(sl.short_id)})`
+          : escapeHtml(sl.short_id);
+        const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
+        const status = sl.status || 'connecting';
+        const statusClass = `peer-status status-${status}`;
+        const upClass = `peer-arrow arrow-up${sl.is_sending ? ' active' : ''}`;
+        const downClass = `peer-arrow arrow-down${sl.is_receiving ? ' active' : ''}`;
         return `<div class="peer-item">
-          <span class="peer-name">${escapeHtml(name)}${slotLabel}</span>
+          <span class="peer-name"><span class="peer-slot">Slot ${sl.slot}</span>${name}</span>
           <span class="peer-arrows"><span class="${upClass}">↑</span><span class="${downClass}">↓</span></span>
-          <span class="${statusClass}">${escapeHtml(p.status)}</span>
+          <span class="${statusClass}">${escapeHtml(status)}</span>
           <span class="peer-rtt">${rtt}</span>
         </div>`;
       }).join('');

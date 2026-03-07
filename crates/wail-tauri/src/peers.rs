@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
-use wail_audio::MAX_REMOTE_PEERS;
+use wail_audio::{ClientChannelMapping, SlotTable};
 
 /// All state tracked per remote peer, consolidating 11 separate HashMaps.
 pub struct PeerState {
@@ -39,57 +39,17 @@ impl PeerState {
     }
 }
 
-/// Manages the slot bitmap and affinity map for audio ring buffer slot assignment.
-struct SlotAllocator {
-    occupied: [bool; MAX_REMOTE_PEERS],
-    /// (identity, stream_id) → slot reserved for a peer that has left
-    affinity: HashMap<(String, u16), usize>,
-}
-
-impl SlotAllocator {
-    fn new() -> Self {
-        Self {
-            occupied: [false; MAX_REMOTE_PEERS],
-            affinity: HashMap::new(),
-        }
-    }
-
-    /// Assign a slot for the given identity/stream_id, preferring affinity.
-    /// Returns None if all slots are occupied.
-    fn assign(&mut self, identity: Option<&str>, stream_id: u16) -> Option<usize> {
-        let affinity_slot = identity
-            .and_then(|id| self.affinity.remove(&(id.to_string(), stream_id)))
-            .filter(|&s| s < MAX_REMOTE_PEERS && !self.occupied[s]);
-
-        let slot = affinity_slot
-            .or_else(|| self.occupied.iter().position(|&occ| !occ))?;
-
-        self.occupied[slot] = true;
-        Some(slot)
-    }
-
-    /// Free a slot and optionally create an affinity reservation for next time.
-    fn free(&mut self, slot: usize, identity: Option<&str>, stream_id: u16) {
-        if slot < MAX_REMOTE_PEERS {
-            self.occupied[slot] = false;
-        }
-        if let Some(id) = identity {
-            self.affinity.insert((id.to_string(), stream_id), slot);
-        }
-    }
-}
-
 /// Consolidated registry of all connected peers.
 pub struct PeerRegistry {
     peers: HashMap<String, PeerState>,
-    slots: SlotAllocator,
+    slots: SlotTable,
 }
 
 impl PeerRegistry {
     pub fn new() -> Self {
         Self {
             peers: HashMap::new(),
-            slots: SlotAllocator::new(),
+            slots: SlotTable::new(),
         }
     }
 
@@ -121,10 +81,8 @@ impl PeerRegistry {
     /// the same peer can reclaim the same slot on rejoin.
     pub fn remove(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.remove(peer_id) {
-            let identity = peer.identity.as_deref();
-            for (stream_id, slot) in peer.slots {
-                self.slots.free(slot, identity, stream_id);
-            }
+            let client_id = peer.identity.as_deref().unwrap_or(peer_id);
+            self.slots.release_all_for_client(client_id);
         }
     }
 
@@ -137,7 +95,9 @@ impl PeerRegistry {
             return Some(existing);
         }
         let identity = peer.identity.clone();
-        let slot = self.slots.assign(identity.as_deref(), stream_id)?;
+        let client_id = identity.as_deref().unwrap_or(peer_id);
+        let mapping = ClientChannelMapping::new(client_id, stream_id);
+        let slot = self.slots.assign(&mapping)?;
         self.peers.get_mut(peer_id)?.slots.insert(stream_id, slot);
         Some(slot)
     }
@@ -196,18 +156,11 @@ impl PeerRegistry {
     }
 
     /// Full reset for signaling reconnection. Preserves slot affinity so
-    /// returning peers reclaim their slots. Frees all current slots, clears
-    /// all peer state, then seeds fresh peers from `new_names`.
+    /// returning peers reclaim their slots. Moves all active slots to
+    /// reserved, clears all peer state, then seeds fresh peers from `new_names`.
     pub fn reset_for_reconnect(&mut self, new_names: HashMap<String, Option<String>>) {
-        // Free all current slots and save affinity
-        for (_, peer) in self.peers.drain() {
-            let identity = peer.identity.as_deref();
-            for (stream_id, slot) in peer.slots {
-                self.slots.free(slot, identity, stream_id);
-            }
-        }
-        // Safety reset of occupied bitmap (all slots were freed above)
-        self.slots.occupied = [false; MAX_REMOTE_PEERS];
+        self.peers.clear();
+        self.slots.clear_active_to_reserved();
 
         // Seed new peers with last_seen = now
         let now = Instant::now();
@@ -216,6 +169,11 @@ impl PeerRegistry {
             state.last_seen = now;
             self.peers.insert(peer_id, state);
         }
+    }
+
+    /// Access the underlying slot table (for building StatusUpdate).
+    pub fn slot_table(&self) -> &SlotTable {
+        &self.slots
     }
 
     /// Update audio_recv_prev = audio_recv_count for all peers. Call once per
@@ -324,11 +282,24 @@ mod tests {
         reg.get_mut("peer1").unwrap().identity = Some("alice-id".to_string());
         let slot = reg.assign_slot("peer1", 0).unwrap();
         assert_eq!(slot, 0);
-        assert!(reg.slots.occupied[0]);
+        assert!(reg.slots.is_occupied(0));
 
         reg.remove("peer1");
-        assert!(!reg.slots.occupied[0]);
+        assert!(!reg.slots.is_occupied(0));
         assert!(reg.get("peer1").is_none());
+    }
+
+    #[test]
+    fn remove_peer_without_identity_frees_slot() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Anon".to_string()));
+        // No identity set — peer.identity remains None
+        let slot = reg.assign_slot("peer1", 0).unwrap();
+        assert_eq!(slot, 0);
+        assert!(reg.slots.is_occupied(0));
+
+        reg.remove("peer1");
+        assert!(!reg.slots.is_occupied(0), "Slot must be freed even without identity");
     }
 
     #[test]
@@ -343,7 +314,7 @@ mod tests {
 
         // Peer leaves — slot freed, affinity created
         reg.remove("peer1");
-        assert!(!reg.slots.occupied[0]);
+        assert!(!reg.slots.is_occupied(0));
 
         // Peer rejoins (new peer_id, same identity) — should reclaim slot 0 via affinity
         reg.add("peer2".to_string(), Some("Alice".to_string()));
@@ -380,12 +351,12 @@ mod tests {
         reg.reset_for_reconnect(new_names);
 
         assert!(reg.get("old-peer").is_none());
-        assert!(!reg.slots.occupied[0]);
-        // Affinity preserved for bob
-        assert_eq!(
-            reg.slots.affinity.get(&("bob-id".to_string(), 0)),
-            Some(&0)
-        );
+        assert!(!reg.slots.is_occupied(0));
+        // Affinity preserved — bob reclaims slot 0
+        reg.add("bob-new".to_string(), Some("Bob".to_string()));
+        reg.get_mut("bob-new").unwrap().identity = Some("bob-id".to_string());
+        assert_eq!(reg.assign_slot("bob-new", 0), Some(0), "Affinity reclaims slot 0");
+        reg.remove("bob-new");
         // New peer seeded
         assert_eq!(
             reg.get("new-peer").unwrap().display_name.as_deref(),

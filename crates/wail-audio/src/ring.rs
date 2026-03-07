@@ -1,5 +1,7 @@
+use crate::slot::{ClientChannelMapping, SlotTable, MAX_SLOTS};
+
 /// Maximum number of remote peer-stream slots with independent audio channels.
-pub const MAX_REMOTE_PEERS: usize = 31;
+pub const MAX_REMOTE_PEERS: usize = MAX_SLOTS;
 
 /// Per-peer-stream isolated playback slot.
 pub struct PeerSlot {
@@ -95,13 +97,12 @@ pub struct IntervalRing {
     quantum: f64,
     /// Per-peer-stream isolated playback slots (up to MAX_REMOTE_PEERS)
     peer_slots: Vec<PeerSlot>,
-    /// Maps (peer_id, stream_id) → index into peer_slots for stable assignment
-    peer_slot_map: Vec<((String, u16), usize)>,
-    /// Maps peer_id → persistent identity (for slot affinity across reconnects)
+    /// Stable slot assignment table (handles active + affinity reservations)
+    slot_table: SlotTable,
+    /// Maps peer_id → persistent identity (for slot affinity across reconnects).
+    /// Needed because audio arrives keyed by session-scoped peer_id, but SlotTable
+    /// uses persistent client_id.
     peer_identity_map: Vec<(String, String)>,
-    /// Affinity reservations: (identity, stream_id) → slot_index for peers that left.
-    /// When a peer with matching identity rejoins, they reclaim their old slot.
-    affinity_map: Vec<((String, u16), usize)>,
 }
 
 /// A completed local recording ready for encoding.
@@ -160,9 +161,8 @@ impl IntervalRing {
             bars,
             quantum,
             peer_slots,
-            peer_slot_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            slot_table: SlotTable::new(),
             peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
-            affinity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
         }
     }
 
@@ -298,9 +298,8 @@ impl IntervalRing {
         for slot in &mut self.peer_slots {
             slot.clear();
         }
-        self.peer_slot_map.clear();
+        self.slot_table.clear();
         self.peer_identity_map.clear();
-        self.affinity_map.clear();
     }
 
     /// Current interval index, if any.
@@ -371,137 +370,103 @@ impl IntervalRing {
             .collect()
     }
 
+    /// Access the underlying slot table (for diagnostics / UI).
+    pub fn slot_table(&self) -> &SlotTable {
+        &self.slot_table
+    }
+
     /// Register a peer's persistent identity for slot affinity.
     ///
     /// Call this when a Hello is received with an identity. If this identity
-    /// has affinity reservations from a previous session, the peer inherits
-    /// those slots on next `assign_peer_slot`.
+    /// has reserved slots from a previous connection, they are reclaimed
+    /// immediately so audio arriving for this peer lands in the same DAW slots.
     pub fn notify_peer_joined(&mut self, peer_id: &str, identity: &str) {
         // Remove any stale mapping for this peer_id
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
         self.peer_identity_map.push((peer_id.to_string(), identity.to_string()));
 
-        // Check if there are affinity reservations for this identity (any stream)
-        let reservations: Vec<(u16, usize)> = self.affinity_map.iter()
-            .filter(|((ident, _), _)| ident == identity)
-            .map(|((_, sid), slot)| (*sid, *slot))
-            .collect();
+        // Re-key any active slots assigned under the fallback peer_id key
+        // (happens when audio arrived before identity was known)
+        self.slot_table.rekey_client(peer_id, identity);
 
-        for (stream_id, slot_idx) in reservations {
-            if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
-                let key = (peer_id.to_string(), stream_id);
-                // Free any existing slot for this (peer, stream) before reclaiming
-                if let Some(old_pos) = self.peer_slot_map.iter().position(|(k, _)| *k == key) {
-                    let (_, old_idx) = self.peer_slot_map.remove(old_pos);
-                    if old_idx != slot_idx && old_idx < self.peer_slots.len() {
-                        self.peer_slots[old_idx].active = false;
-                        self.peer_slots[old_idx].samples.clear();
-                        self.peer_slots[old_idx].read_pos = 0;
-                    }
-                }
-                // Reclaim the reserved slot
-                self.peer_slot_map.push((key, slot_idx));
+        // Reclaim any reserved slots for this identity
+        let reclaimed = self.slot_table.reclaim_reserved_for_client(identity);
+        for (stream_id, slot_idx) in reclaimed {
+            if slot_idx < self.peer_slots.len() {
                 self.peer_slots[slot_idx].peer_id = peer_id.to_string();
                 self.peer_slots[slot_idx].stream_id = stream_id;
                 self.peer_slots[slot_idx].active = true;
                 self.peer_slots[slot_idx].needs_fade_in = true;
+                let mapping = ClientChannelMapping::new(identity, stream_id);
                 tracing::info!(
                     peer_id, identity, stream_id, slot = slot_idx,
-                    "Peer reclaimed affinity slot"
+                    "[{}] Peer reclaimed affinity slot", mapping.short_id()
                 );
             }
-            // Remove this reservation regardless (claimed or slot was taken)
-            self.affinity_map.retain(|((ident, sid), _)| !(ident == identity && *sid == stream_id));
         }
     }
 
     /// Remove a peer and free ALL their stream slots, creating affinity
     /// reservations so the same identity can reclaim slots on reconnect.
     pub fn remove_peer(&mut self, peer_id: &str) {
-        // Find ALL slot assignments for this peer (any stream)
-        let to_remove: Vec<((String, u16), usize)> = self.peer_slot_map
-            .iter()
-            .filter(|((pid, _), _)| pid == peer_id)
-            .cloned()
-            .collect();
-
-        // Look up identity for affinity
-        let identity = self.peer_identity_map.iter()
+        // Look up identity for affinity. If no identity, use peer_id as the
+        // client_id (matching the fallback in assign_peer_slot).
+        let client_id = self.peer_identity_map.iter()
             .find(|(pid, _)| pid == peer_id)
-            .map(|(_, ident)| ident.clone());
+            .map(|(_, ident)| ident.clone())
+            .unwrap_or_else(|| peer_id.to_string());
 
-        for ((_, stream_id), slot_idx) in &to_remove {
-            // Free the slot
-            if *slot_idx < self.peer_slots.len() {
-                self.peer_slots[*slot_idx].active = false;
-                self.peer_slots[*slot_idx].samples.clear();
-                self.peer_slots[*slot_idx].read_pos = 0;
-            }
+        // Release all slots for this client via SlotTable (creates reservations)
+        self.slot_table.release_all_for_client(&client_id);
 
-            // Create affinity reservation if we know this peer's identity
-            if let Some(ref ident) = identity {
-                let aff_key = (ident.clone(), *stream_id);
-                self.affinity_map.retain(|(k, _)| *k != aff_key);
-                self.affinity_map.push((aff_key, *slot_idx));
-                tracing::info!(
-                    peer_id, identity = %ident, stream_id, slot = slot_idx,
-                    "Peer left — slot reserved for affinity"
-                );
-            } else {
-                tracing::info!(
-                    peer_id, stream_id, slot = slot_idx,
-                    "Peer left — slot freed (no identity for affinity)"
-                );
+        if client_id != peer_id {
+            tracing::info!(
+                peer_id, identity = %client_id,
+                "Peer left — slots reserved for affinity"
+            );
+        }
+
+        // Clear the PeerSlot audio data for all slots that belonged to this peer
+        for slot in &mut self.peer_slots {
+            if slot.peer_id == peer_id {
+                slot.active = false;
+                slot.samples.clear();
+                slot.read_pos = 0;
             }
         }
 
-        // Clean up maps
-        self.peer_slot_map.retain(|((pid, _), _)| pid != peer_id);
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
     }
 
     /// Look up or assign a slot index for a (peer_id, stream_id) pair.
-    /// Returns None if all slots are full.
+    /// Returns None if all slots are full or the peer's identity is unknown.
     fn assign_peer_slot(&mut self, peer_id: &str, stream_id: u16) -> Option<usize> {
-        // Check existing assignment (no allocation — compare &str directly)
-        for ((pid, sid), idx) in &self.peer_slot_map {
-            if pid == peer_id && *sid == stream_id {
-                return Some(*idx);
+        // Resolve peer_id to persistent identity
+        let identity = self.peer_identity_map.iter()
+            .find(|(pid, _)| pid == peer_id)
+            .map(|(_, ident)| ident.clone());
+
+        let mapping = match identity {
+            Some(ref ident) => ClientChannelMapping::new(ident.as_str(), stream_id),
+            None => {
+                // No identity known — use peer_id as client_id fallback
+                ClientChannelMapping::new(peer_id, stream_id)
             }
-        }
+        };
 
-        // Only allocate the key String now that we know it's a new assignment
-        let key = (peer_id.to_string(), stream_id);
+        let slot_idx = self.slot_table.assign(&mapping)?;
 
-        // Check affinity via identity
-        if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
-            let identity = self.peer_identity_map[ident_pos].1.clone();
-            let aff_key = (identity, stream_id);
-            if let Some(aff_pos) = self.affinity_map.iter().position(|(k, _)| *k == aff_key) {
-                let (_, slot_idx) = self.affinity_map.remove(aff_pos);
-                if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
-                    self.peer_slots[slot_idx].peer_id = peer_id.to_string();
-                    self.peer_slots[slot_idx].stream_id = stream_id;
-                    self.peer_slots[slot_idx].active = true;
-                    self.peer_slots[slot_idx].needs_fade_in = true;
-                    self.peer_slot_map.push((key, slot_idx));
-                    return Some(slot_idx);
-                }
-            }
-        }
-
-        // Find first inactive slot
-        for (i, slot) in self.peer_slots.iter_mut().enumerate() {
-            if !slot.active {
+        if slot_idx < self.peer_slots.len() {
+            let slot = &mut self.peer_slots[slot_idx];
+            if !slot.active || slot.peer_id != peer_id || slot.stream_id != stream_id {
                 slot.peer_id = peer_id.to_string();
                 slot.stream_id = stream_id;
                 slot.active = true;
                 slot.needs_fade_in = true;
-                self.peer_slot_map.push((key, i));
-                return Some(i);
             }
         }
-        None // all slots full
+
+        Some(slot_idx)
     }
 
     /// Swap intervals: move record → completed, mix pending remote → playback.
@@ -576,9 +541,12 @@ impl IntervalRing {
                 }
                 None => {
                     // All slots full — merge into this peer's stream 0 slot
-                    if let Some(&(_, slot_idx)) = self.peer_slot_map.iter()
-                        .find(|((pid, sid), _)| pid == &remote.peer_id && *sid == 0)
-                    {
+                    let fallback_identity = self.peer_identity_map.iter()
+                        .find(|(pid, _)| pid == &remote.peer_id)
+                        .map(|(_, ident)| ident.clone())
+                        .unwrap_or_else(|| remote.peer_id.clone());
+                    let fallback_mapping = ClientChannelMapping::new(&fallback_identity, 0);
+                    if let Some(slot_idx) = self.slot_table.slot_for(&fallback_mapping) {
                         let slot = &mut self.peer_slots[slot_idx];
                         let merge_len = slot.samples.len().max(remote.samples.len());
                         slot.samples.resize(merge_len, 0.0);
@@ -1594,7 +1562,7 @@ mod tests {
     /// different slot.  The fix in session.rs detects this via identity matching
     /// and calls `remove_peer` (sending PeerLeft IPC) before `notify_peer_joined`.
     #[test]
-    fn reconnect_without_eviction_gets_different_slot() {
+    fn reconnect_without_eviction_inherits_same_slot() {
         let mut ring = make_ring();
         let input = vec![0.0f32; 128];
         let mut output = vec![0.0f32; 128];
@@ -1611,8 +1579,9 @@ mod tests {
             .unwrap()
             .0;
 
-        // Simulate the bug: peer-a-new arrives with the same identity but
-        // remove_peer("peer-a") was never called — the old slot is still active.
+        // peer-a-new arrives with the same identity — even without explicit
+        // remove_peer("peer-a"), the ClientChannelMapping is the same so it
+        // maps to the same slot. The new peer_id takes over the slot.
         ring.notify_peer_joined("peer-a-new", "identity-alice");
         ring.feed_remote("peer-a-new".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
@@ -1623,11 +1592,9 @@ mod tests {
             .unwrap()
             .0;
 
-        // Without eviction peer-a-new cannot reclaim peer-a's slot (still active)
-        assert_ne!(slot_new, slot_a,
-            "Without eviction the new peer_id gets a different slot");
-        // Both the stale and the new peer are tracked simultaneously
-        assert_eq!(active.len(), 2);
+        // Same ClientChannelMapping → same slot, new peer_id takes over
+        assert_eq!(slot_new, slot_a,
+            "Same identity maps to same slot via ClientChannelMapping");
     }
 
     /// With session-side eviction the sequence is: remove_peer(old) →
@@ -1713,5 +1680,43 @@ mod tests {
 
         assert_eq!(new_a, slot_a, "peer-a-new reclaims peer-a's original slot");
         assert_eq!(new_b, slot_b, "peer-b is unaffected by peer-a's reconnect");
+    }
+
+    /// Audio arriving before identity is known should not leak a slot when
+    /// notify_peer_joined later provides the real identity.
+    #[test]
+    fn audio_before_identity_rekeys_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Audio arrives before Hello — identity unknown, slot assigned under peer_id
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a".to_string(), 0, 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_before = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Hello arrives — identity becomes known
+        ring.notify_peer_joined("peer-a", "identity-alice");
+
+        // Next audio uses the real identity key
+        ring.feed_remote("peer-a".to_string(), 0, 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let slot_after = active.iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Same slot — no double-allocation
+        assert_eq!(slot_before, slot_after,
+            "Slot should be re-keyed, not duplicated");
+        assert_eq!(active.len(), 1, "Only one active slot should exist");
     }
 }

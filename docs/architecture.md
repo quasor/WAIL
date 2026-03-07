@@ -83,7 +83,7 @@ Traditional real-time audio requires <20ms round-trip latency. That's impossible
 
 ### The Double-Buffer
 
-`IntervalRing` implements the NINJAM double-buffer with up to 31 remote slots, keyed by `(peer_id, stream_id)` tuples:
+`IntervalRing` implements the NINJAM double-buffer with up to 31 remote slots, keyed by `ClientChannelMapping(client_id, channel_index)` — a persistent identity that survives reconnects:
 
 ```
 Interval N:   [RECORD local audio] ──→ on boundary ──→ encode + transmit
@@ -98,9 +98,9 @@ At each interval boundary:
 - Pending remote intervals are mixed (summed) into the playback slot
 - Record and playback positions reset to zero
 
-Each unique `(peer_id, stream_id)` pair is assigned its own playback slot and Recv plugin auxiliary output. If all 31 slots are exhausted, overflow audio is merged into the peer's stream 0 slot.
+Each unique `ClientChannelMapping` (persistent `client_id` + `channel_index`) is assigned its own playback slot and Recv plugin auxiliary output via a `SlotTable`. If all 31 slots are exhausted, overflow audio is merged into the peer's channel 0 slot.
 
-Slot assignment uses **peer affinity**: when a peer disconnects, their slot indices are reserved (not recycled). If the same peer reconnects, they reclaim their original slots, keeping DAW aux routing stable across reconnects.
+Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` entries move from active to reserved. When the same persistent identity reconnects (possibly with a new session-scoped `peer_id`), they reclaim their original slots, keeping DAW aux routing stable across reconnects.
 
 ## Audio Flow
 
@@ -130,7 +130,7 @@ DAW Track B hears Peer A's previous interval
 `AudioBridge` wraps the full encode/decode pipeline in a single struct:
 
 - `process(input, output, beat_position)` → drives IntervalRing, returns wire bytes for completed intervals
-- `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `(peer_id, stream_id)`)
+- `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `ClientChannelMapping`)
 - `update_config(bars, quantum, bpm)` → updates interval parameters from DAW transport
 
 ### Wire Format (AudioWire)
@@ -272,7 +272,7 @@ Two independent time domains exist in the system:
 
 9. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
 
-10. **Peer affinity slots**: When a peer disconnects, their slot indices are reserved so reconnecting peers get the same aux outputs. This prevents DAW routing from breaking during brief network interruptions.
+10. **Stable slot assignment via `ClientChannelMapping`**: Each remote audio channel is identified by `ClientChannelMapping(client_id, channel_index)` where `client_id` is a persistent UUID. A `SlotTable` manages assignment, affinity reservations, and reclamation. When a peer disconnects, their slot entries move to reserved; on reconnect with the same identity, they reclaim the same slots. This prevents DAW routing from breaking during brief network interruptions.
 
 11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.
 

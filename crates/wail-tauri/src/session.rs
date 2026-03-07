@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn, Instrument};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use wail_audio::{AudioDecoder, AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
+use wail_audio::{AudioDecoder, AudioEncoder, AudioInterval, AudioWire, ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -493,7 +493,10 @@ async fn session_loop(
                                 peer.reconnect_pending = true;
                             }
                             let backoff_ms = (PEER_RECONNECT_BASE_MS * 2u64.pow(attempt - 1)).min(PEER_RECONNECT_MAX_MS);
-                            ui_warn!(&app, "Peer {name} connection failed — reconnecting in {backoff_ms}ms (attempt {attempt}/{MAX_PEER_RECONNECT_ATTEMPTS})");
+                            let slot_tag = peers.slot_for(&pid, 0)
+                                .map(|s| format!("slot={} ", s + 1))
+                                .unwrap_or_default();
+                            ui_warn!(&app, "{slot_tag}{name} connection failed — reconnecting in {backoff_ms}ms (attempt {attempt}/{MAX_PEER_RECONNECT_ATTEMPTS})");
                             let _ = app.emit("peer:reconnecting", PeerReconnectingEvent {
                                 peer_id: pid.clone(),
                                 attempt,
@@ -665,7 +668,8 @@ async fn session_loop(
                             let already_had_slot = peers.slot_for(&pid, 0).is_some();
                             if let Some(slot) = peers.assign_slot(&pid, 0) {
                                 if !already_had_slot {
-                                    ui_info!(&app, "Peer {name_display} assigned to slot {} (Peer {})", slot, slot + 1);
+                                    let ccm = ClientChannelMapping::new(rid.as_str(), 0);
+                                    ui_info!(&app, "[{}] {name_display} assigned to slot {}", ccm.short_id(), slot + 1);
                                 }
                             }
 
@@ -797,7 +801,9 @@ async fn session_loop(
                         let already_had_slot = peers.slot_for(&from, audio_interval.stream_id).is_some();
                         if let Some(slot) = peers.assign_slot(&from, audio_interval.stream_id) {
                             if !already_had_slot {
-                                ui_info!(&app, "Peer {peer_name} stream {} assigned to slot {} (Peer {})", audio_interval.stream_id, slot, slot + 1);
+                                let identity = peers.get(&from).and_then(|p| p.identity.clone()).unwrap_or_else(|| from.clone());
+                                let ccm = ClientChannelMapping::new(&identity, audio_interval.stream_id);
+                                ui_info!(&app, "[{}] {peer_name} stream {} assigned to slot {}", ccm.short_id(), audio_interval.stream_id, slot + 1);
                             }
                         }
 
@@ -817,9 +823,12 @@ async fn session_loop(
                                 }
                             }
                         }
+                        let slot_label = peers.slot_for(&from, audio_interval.stream_id)
+                            .map(|s| format!("slot={}", s + 1))
+                            .unwrap_or_else(|| "slot=?".to_string());
                         ui_info!(
                             &app,
-                            "[AUDIO RECV] peer={peer_name}, interval={}, wire={} bytes, opus={} bytes, sr={}, ch={}, bpm={:.1}{rms_info}",
+                            "[AUDIO RECV] {slot_label} peer={peer_name}, interval={}, wire={} bytes, opus={} bytes, sr={}, ch={}, bpm={:.1}{rms_info}",
                             audio_interval.index,
                             data.len(),
                             audio_interval.opus_data.len(),
@@ -955,10 +964,13 @@ async fn session_loop(
                             // Log status transitions and update prev_status (requires mutable borrow)
                             if prev_status != status {
                                 let name = display_name.as_deref().unwrap_or(p);
+                                let slot_tag = peers.slot_for(p, 0)
+                                    .map(|s| format!("slot={} ", s + 1))
+                                    .unwrap_or_default();
                                 if prev_status.is_empty() {
-                                    ui_info!(&app, "Peer {name} status: {status}");
+                                    ui_info!(&app, "{slot_tag}{name} status: {status}");
                                 } else {
-                                    ui_info!(&app, "Peer {name} status: {prev_status} → {status}");
+                                    ui_info!(&app, "{slot_tag}{name} status: {prev_status} → {status}");
                                 }
                                 if let Some(peer) = peers.get_mut(p) {
                                     peer.prev_status = status.to_string();
@@ -977,6 +989,33 @@ async fn session_loop(
                         })
                         .collect();
 
+                    // Build slot-centric view from the SlotTable
+                    let slot_infos: Vec<SlotInfo> = peers.slot_table().active_mappings()
+                        .iter()
+                        .map(|(mapping, slot_idx)| {
+                            // Find the peer_id for this identity
+                            let peer_id = peers.find_by_identity(&mapping.client_id);
+                            let peer_state = peer_id.as_deref().and_then(|pid| peers.get(pid));
+                            let is_sending_to = peer_id.as_deref()
+                                .map(|pid| is_sending && mesh.is_peer_audio_dc_open(pid))
+                                .unwrap_or(false);
+                            let is_receiving_from = peer_state
+                                .map(|ps| ps.audio_recv_count > ps.audio_recv_prev)
+                                .unwrap_or(false);
+                            SlotInfo {
+                                slot: *slot_idx as u32 + 1,
+                                short_id: mapping.short_id(),
+                                client_id: mapping.client_id.clone(),
+                                channel_index: mapping.channel_index,
+                                display_name: peer_state.and_then(|ps| ps.display_name.clone()),
+                                status: peer_id.as_deref().map(|pid| peers.derive_status(pid).to_string()),
+                                rtt_ms: peer_id.as_deref().and_then(|pid| clock.rtt_us(pid).map(|rtt| rtt as f64 / 1000.0)),
+                                is_sending: is_sending_to,
+                                is_receiving: is_receiving_from,
+                            }
+                        })
+                        .collect();
+
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
                     audio_intervals_sent_prev = audio_intervals_sent;
@@ -988,6 +1027,7 @@ async fn session_loop(
                         phase: state.phase,
                         link_peers: state.num_peers,
                         peers: peer_infos,
+                        slots: slot_infos,
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,

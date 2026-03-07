@@ -50,6 +50,31 @@ pub struct PeerInfo {
     pub is_receiving: bool,
 }
 
+/// Slot-centric view: one entry per occupied DAW aux output slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotInfo {
+    /// 1-based slot number matching DAW aux output.
+    pub slot: u32,
+    /// Short display ID for logging/UI, e.g. "a1b2c3:0".
+    pub short_id: String,
+    /// Full persistent client identity (UUID).
+    pub client_id: String,
+    /// Channel index within the client.
+    pub channel_index: u16,
+    /// Display name of the peer (if known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Connection status: "connecting", "reconnecting", "connected".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    /// Audio was sent to this peer since the last status tick.
+    pub is_sending: bool,
+    /// Audio was received from this peer since the last status tick.
+    pub is_receiving: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusUpdate {
     pub bpm: f64,
@@ -57,6 +82,7 @@ pub struct StatusUpdate {
     pub phase: f64,
     pub link_peers: u64,
     pub peers: Vec<PeerInfo>,
+    pub slots: Vec<SlotInfo>,
     pub interval_bars: u32,
     pub audio_sent: u64,
     pub audio_recv: u64,
