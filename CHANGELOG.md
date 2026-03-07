@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 (2026-03-07)
+
+### Fixes
+
+- discard stale plugin-buffered intervals during session warmup (#126)
+- Fix interval-0 audio flood on session start/rejoin: stale plugin-buffered intervals no longer sent to peers.
+
 ## 1.7.0 (2026-03-07)
 
 ### Features
