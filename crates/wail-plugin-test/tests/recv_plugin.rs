@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::time::Duration;
 
 use clack_host::prelude::*;
-use wail_audio::{AudioDecoder, AudioWire, IpcRecvBuffer, IpcMessage, IPC_ROLE_RECV};
+use wail_audio::{AudioDecoder, AudioEncoder, IPC_ROLE_RECV};
 use wail_plugin_test::*;
 
 fn init_tracing() {
@@ -135,26 +135,22 @@ fn recv_plugin_e2e() {
         // The IPC thread will Opus-decode it and push to the audio thread's channel.
         let frame = make_test_interval_frame("test-peer", 0);
 
-        // Self-test: verify the frame is decodable
+        // Self-test: verify the Opus encode→decode pipeline produces non-silent audio.
+        // make_test_interval_frame sends WAIF streaming frames; we verify the underlying
+        // codec independently here.
         {
-            let mut recv_buf = IpcRecvBuffer::new();
-            recv_buf.push(&frame);
-            let payload = recv_buf.next_frame().expect("Frame should be complete");
-            let (peer_id, wire_data) =
-                IpcMessage::decode_audio(&payload).expect("IpcMessage decode failed");
-            assert_eq!(peer_id, "test-peer");
-            let interval = AudioWire::decode(&wire_data).expect("AudioWire decode failed");
-            assert_eq!(interval.sample_rate, 48000);
-            assert_eq!(interval.channels, 2);
-            let mut decoder = AudioDecoder::new(48000, 2).unwrap();
-            let samples = decoder
-                .decode_interval(&interval.opus_data)
-                .expect("Opus decode failed");
-            let decoded_rms = rms(&samples);
+            let sr = 48000u32;
+            let channels = 2u16;
+            let samples_per_channel = (4usize * 4 * 60 * sr as usize) / 120;
+            let test_samples = sine_wave(440.0, samples_per_channel, channels, sr);
+            let mut enc = AudioEncoder::new(sr, channels, 128).unwrap();
+            let mut dec = AudioDecoder::new(sr, channels).unwrap();
+            let opus = enc.encode_interval(&test_samples).unwrap();
+            let decoded = dec.decode_interval(&opus).unwrap();
+            let decoded_rms = rms(&decoded);
             eprintln!(
-                "Self-test: decoded {} samples, RMS={decoded_rms}, index={}",
-                samples.len(),
-                interval.index
+                "Self-test: decoded {} samples, RMS={decoded_rms}, index=0",
+                decoded.len()
             );
             assert!(decoded_rms > 0.001, "Decoded audio should be non-silent");
         }

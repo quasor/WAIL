@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use wail_audio::{AudioDecoder, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND};
+use wail_audio::{AudioDecoder, AudioFrame, AudioFrameWire, AudioWire, FrameAssembler, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND};
 use wail_net::PeerMesh;
 
 use common::*;
@@ -49,7 +49,7 @@ async fn mini_app_session(
         .await
         .expect("Mini app failed to bind IPC port");
 
-    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(1024);
     let mut ipc_writer: Option<tokio::net::tcp::OwnedWriteHalf> = None;
 
     loop {
@@ -71,7 +71,9 @@ async fn mini_app_session(
                                 Ok(n) => {
                                     recv_buf.push(&buf[..n]);
                                     while let Some(frame) = recv_buf.next_frame() {
-                                        let _ = tx.try_send(frame);
+                                        if tx.send(frame).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                                 Err(_) => break,
@@ -81,9 +83,9 @@ async fn mini_app_session(
                 }
             }
 
-            // IPC from plugin → broadcast to WebRTC peers
+            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to WebRTC peers
             Some(frame) = ipc_from_plugin_rx.recv() => {
-                if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                 }
             }
@@ -91,7 +93,7 @@ async fn mini_app_session(
             // Signaling (drives WebRTC negotiation)
             _event = mesh.poll_signaling() => {}
 
-            // WebRTC audio from peers → forward to plugin via IPC
+            // WebRTC audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {
                 if let Some(ref mut writer) = ipc_writer {
                     let msg = IpcMessage::encode_audio(&from, &data);
@@ -110,9 +112,9 @@ async fn mini_app_session(
 // ---------------------------------------------------------------------------
 
 /// Simulate plugin's IPC thread outbound: produce a sine wave interval,
-/// Opus-encode, wrap in AudioWire + IpcMessage + IpcFramer, send via TCP.
+/// encode as WAIF streaming frames (tag 0x05), send via TCP.
 ///
-/// Mirrors the encode path in wail-plugin/src/lib.rs lines 376-399.
+/// Mirrors the encode path in wail-plugin-send/src/lib.rs.
 async fn simulated_plugin_send(ipc_port: u16, freq_hz: f32) {
     // Retry connection until mini_app is listening
     let stream = loop {
@@ -123,28 +125,27 @@ async fn simulated_plugin_send(ipc_port: u16, freq_hz: f32) {
     };
     let mut writer = stream;
 
-    // Produce wire-encoded interval (AudioBridge + Opus encode + AudioWire encode)
-    let wire_data =
-        tokio::task::spawn_blocking(move || produce_interval(freq_hz))
+    // Produce WAIF IPC frames (tag 0x05), one per 20ms Opus packet
+    let ipc_frames =
+        tokio::task::spawn_blocking(move || produce_interval_waif_ipc(freq_hz))
             .await
-            .expect("produce_interval panicked");
+            .expect("produce_interval_waif_ipc panicked");
 
-    // Wrap in IPC framing: empty peer_id for outgoing from plugin
-    let msg = IpcMessage::encode_audio("", &wire_data);
-    let frame = IpcFramer::encode_frame(&msg);
-    writer
-        .write_all(&frame)
-        .await
-        .expect("Plugin A: failed to write IPC frame");
+    for frame in ipc_frames {
+        writer
+            .write_all(&frame)
+            .await
+            .expect("Plugin A: failed to write IPC frame");
+    }
 
     // Keep connection alive so app can read
     tokio::time::sleep(Duration::from_secs(5)).await;
 }
 
 /// Simulate plugin's IPC thread inbound: connect to mini_app via TCP,
-/// receive IPC frames, decode AudioWire + Opus, return decoded audio.
+/// receive WAIF frames (tag 0x01 + WAIF inner payload), assemble, decode Opus.
 ///
-/// Mirrors the decode path in wail-plugin/src/lib.rs lines 412-450.
+/// Mirrors the decode path in wail-plugin-recv/src/lib.rs.
 async fn simulated_plugin_receive(
     ipc_port: u16,
     timeout: Duration,
@@ -160,6 +161,7 @@ async fn simulated_plugin_receive(
 
     let mut recv_buf = IpcRecvBuffer::new();
     let mut read_buf = [0u8; 65536];
+    let mut assembler = FrameAssembler::new();
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -169,19 +171,24 @@ async fn simulated_plugin_receive(
                     Ok(0) => panic!("Plugin B: IPC connection closed before receiving audio"),
                     Ok(n) => {
                         recv_buf.push(&read_buf[..n]);
-                        if let Some(payload) = recv_buf.next_frame() {
+                        while let Some(payload) = recv_buf.next_frame() {
                             if let Some((peer_id, wire_data)) = IpcMessage::decode_audio(&payload) {
-                                let interval = AudioWire::decode(&wire_data)
-                                    .expect("Plugin B: failed to decode AudioWire");
-                                let mut decoder = AudioDecoder::new(
-                                    interval.sample_rate,
-                                    interval.channels,
-                                )
-                                .expect("Plugin B: failed to create Opus decoder");
-                                let samples = decoder
-                                    .decode_interval(&interval.opus_data)
-                                    .expect("Plugin B: failed to decode Opus audio");
-                                return (peer_id, samples);
+                                if let Ok(frame) = AudioFrameWire::decode(&wire_data) {
+                                    if frame.is_final {
+                                        assembler.evict_stale(frame.interval_index);
+                                    }
+                                    if let Some(assembled) = assembler.insert(&peer_id, &frame) {
+                                        let mut decoder = AudioDecoder::new(
+                                            assembled.sample_rate,
+                                            assembled.channels,
+                                        )
+                                        .expect("Plugin B: failed to create Opus decoder");
+                                        let samples = decoder
+                                            .decode_interval(&assembled.opus_data)
+                                            .expect("Plugin B: failed to decode Opus audio");
+                                        return (assembled.peer_id, samples);
+                                    }
+                                }
                             }
                         }
                     }
@@ -195,7 +202,44 @@ async fn simulated_plugin_receive(
     }
 }
 
-/// Send multiple full-size intervals via IPC.
+/// Convert an AudioWire (WAIL) blob to a list of WAIF IPC frames (tag 0x05).
+fn wail_to_waif_ipc(wail_bytes: &[u8]) -> Vec<Vec<u8>> {
+    let interval = AudioWire::decode(wail_bytes).expect("wail_to_waif_ipc: AudioWire decode");
+    let data = &interval.opus_data;
+    let frame_count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(frame_count);
+    let mut offset = 4;
+    while packets.len() < frame_count && offset + 2 <= data.len() {
+        let pkt_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        packets.push(data[offset..offset + pkt_len].to_vec());
+        offset += pkt_len;
+    }
+    let total = packets.len();
+    let mut output = Vec::with_capacity(total);
+    for (fn_, packet) in packets.into_iter().enumerate() {
+        let is_final = fn_ + 1 == total;
+        let frame = AudioFrame {
+            interval_index: interval.index,
+            stream_id: interval.stream_id,
+            frame_number: fn_ as u32,
+            channels: interval.channels,
+            opus_data: packet,
+            is_final,
+            sample_rate: if is_final { interval.sample_rate } else { 0 },
+            total_frames: if is_final { total as u32 } else { 0 },
+            bpm: if is_final { interval.bpm } else { 0.0 },
+            quantum: if is_final { interval.quantum } else { 0.0 },
+            bars: if is_final { interval.bars } else { 0 },
+        };
+        let wire_bytes = AudioFrameWire::encode(&frame);
+        let ipc_msg = IpcMessage::encode_audio_frame(&wire_bytes);
+        output.push(IpcFramer::encode_frame(&ipc_msg));
+    }
+    output
+}
+
+/// Send multiple full-size intervals via IPC as WAIF streaming frames (tag 0x05).
 async fn simulated_plugin_send_full(ipc_port: u16, count: usize) {
     let stream = loop {
         match tokio::net::TcpStream::connect(("127.0.0.1", ipc_port)).await {
@@ -207,24 +251,28 @@ async fn simulated_plugin_send_full(ipc_port: u16, count: usize) {
 
     for i in 0..count {
         let freq = 440.0 + i as f32 * 110.0; // different freq per interval
-        let (wire_data, _expected) =
-            tokio::task::spawn_blocking(move || produce_full_interval(freq))
-                .await
-                .expect("produce_full_interval panicked");
-
-        let msg = IpcMessage::encode_audio("", &wire_data);
-        let frame = IpcFramer::encode_frame(&msg);
-        writer
-            .write_all(&frame)
+        let ipc_frames =
+            tokio::task::spawn_blocking(move || {
+                // produce_full_interval returns a WAIL blob; convert to WAIF IPC frames
+                let (wail_bytes, _) = produce_full_interval(freq);
+                wail_to_waif_ipc(&wail_bytes)
+            })
             .await
-            .expect("Plugin A: failed to write IPC frame");
+            .expect("produce_full_interval panicked");
+
+        for frame in ipc_frames {
+            writer
+                .write_all(&frame)
+                .await
+                .expect("Plugin A: failed to write IPC frame");
+        }
     }
 
     // Keep connection alive
     tokio::time::sleep(Duration::from_secs(10)).await;
 }
 
-/// Receive multiple intervals via IPC, return all decoded results.
+/// Receive multiple intervals via IPC, assemble WAIF frames, decode Opus.
 async fn simulated_plugin_receive_multi(
     ipc_port: u16,
     expected_count: usize,
@@ -240,6 +288,7 @@ async fn simulated_plugin_receive_multi(
 
     let mut recv_buf = IpcRecvBuffer::new();
     let mut read_buf = [0u8; 65536];
+    let mut assembler = FrameAssembler::new();
     let mut results = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
 
@@ -255,16 +304,21 @@ async fn simulated_plugin_receive_multi(
                         recv_buf.push(&read_buf[..n]);
                         while let Some(payload) = recv_buf.next_frame() {
                             if let Some((peer_id, wire_data)) = IpcMessage::decode_audio(&payload) {
-                                let interval = AudioWire::decode(&wire_data)
-                                    .expect("Failed to decode AudioWire");
-                                let mut decoder = AudioDecoder::new(
-                                    interval.sample_rate,
-                                    interval.channels,
-                                ).expect("Failed to create Opus decoder");
-                                let samples = decoder
-                                    .decode_interval(&interval.opus_data)
-                                    .expect("Failed to decode Opus audio");
-                                results.push((peer_id, samples));
+                                if let Ok(frame) = AudioFrameWire::decode(&wire_data) {
+                                    if frame.is_final {
+                                        assembler.evict_stale(frame.interval_index);
+                                    }
+                                    if let Some(assembled) = assembler.insert(&peer_id, &frame) {
+                                        let mut decoder = AudioDecoder::new(
+                                            assembled.sample_rate,
+                                            assembled.channels,
+                                        ).expect("Failed to create Opus decoder");
+                                        let samples = decoder
+                                            .decode_interval(&assembled.opus_data)
+                                            .expect("Failed to decode Opus audio");
+                                        results.push((assembled.peer_id, samples));
+                                    }
+                                }
                             }
                         }
                     }
@@ -476,7 +530,7 @@ async fn mini_app_session_v2(
         .await
         .expect("Mini app V2 failed to bind IPC port");
 
-    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(1024);
     let mut ipc_recv_writers: Vec<tokio::net::tcp::OwnedWriteHalf> = Vec::new();
 
     loop {
@@ -506,7 +560,9 @@ async fn mini_app_session_v2(
                                 Ok(n) => {
                                     recv_buf.push(&buf[..n]);
                                     while let Some(frame) = recv_buf.next_frame() {
-                                        let _ = tx.try_send(frame);
+                                        if tx.send(frame).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                                 Err(_) => break,
@@ -516,14 +572,16 @@ async fn mini_app_session_v2(
                 }
             }
 
+            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to WebRTC peers
             Some(frame) = ipc_from_plugin_rx.recv() => {
-                if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                 }
             }
 
             _event = mesh.poll_signaling() => {}
 
+            // WebRTC audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {
                 let msg = IpcMessage::encode_audio(&from, &data);
                 let frame = IpcFramer::encode_frame(&msg);

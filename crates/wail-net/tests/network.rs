@@ -250,7 +250,6 @@ fn start_coturn(turnserver_bin: &str) -> CoturnGuard {
 // ---------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // Requires coturn installed: cargo test -p wail-net -- --ignored
 async fn two_peers_exchange_audio_via_turn() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -355,7 +354,6 @@ async fn two_peers_exchange_audio_via_turn() {
 // ---------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // Requires internet: cargo test -p wail-net -- --ignored fetch_metered_ice_servers_live
 async fn fetch_metered_ice_servers_live() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -391,7 +389,6 @@ async fn fetch_metered_ice_servers_live() {
 // ---------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // Requires internet: cargo test -p wail-net -- --ignored metered_turn_relay_live
 async fn metered_turn_relay_live() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")

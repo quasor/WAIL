@@ -181,7 +181,7 @@ impl PeerMesh {
             server_url, room, peer_id, password, stream_count, display_name,
         ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
-        let (audio_tx, audio_rx) = mpsc::channel(64);
+        let (audio_tx, audio_rx) = mpsc::channel(1024);
         let (failure_tx, failure_rx) = mpsc::unbounded_channel();
 
         let mesh = Self {
@@ -445,12 +445,8 @@ impl PeerMesh {
         tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
                 debug!(peer = %rid, bytes = data.len(), "[AUDIO READER] forwarding to mesh");
-                match audio_tx.try_send((rid.clone(), data)) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        debug!(peer = %rid, "Mesh audio channel full — dropping frame");
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                if audio_tx.send((rid.clone(), data)).await.is_err() {
+                    break;
                 }
             }
             warn!(peer = %rid, "Audio reader exited");

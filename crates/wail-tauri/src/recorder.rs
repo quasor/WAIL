@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use wail_audio::{AudioDecoder, AudioWire};
+use wail_audio::{AudioDecoder, AudioFrameWire, FrameAssembler};
 
 /// Configuration for local session recording.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +106,10 @@ struct RecorderWriter {
     started_at: chrono::DateTime<chrono::Utc>,
     /// Per-source WAV writers keyed by source id ("self" or peer_id)
     writers: HashMap<String, StemWriter>,
-    /// Per-source Opus decoders
-    decoders: HashMap<String, AudioDecoder>,
+    /// Per-source Opus decoders keyed by (peer_id, stream_id)
+    decoders: HashMap<(String, u16), AudioDecoder>,
+    /// Assembles incoming WAIF streaming frames into complete intervals
+    assembler: FrameAssembler,
     /// Peer metadata for session.json
     peers: HashMap<String, Option<String>>,
     /// For mixed mode: buffer decoded PCM per interval index, keyed by index
@@ -169,6 +171,7 @@ impl RecorderWriter {
             started_at: chrono::Utc::now(),
             writers: HashMap::new(),
             decoders: HashMap::new(),
+            assembler: FrameAssembler::new(),
             peers: HashMap::new(),
             mix_buffer: HashMap::new(),
             max_interval: None,
@@ -185,7 +188,7 @@ impl RecorderWriter {
             match rx.blocking_recv() {
                 Some(RecordCommand::PeerInterval { peer_id, display_name, wire_data }) => {
                     self.peers.entry(peer_id.clone()).or_insert(display_name.clone());
-                    self.handle_interval(&peer_id, display_name.as_deref(), &wire_data);
+                    self.handle_waif_frame(&peer_id, display_name.as_deref(), &wire_data);
                 }
                 Some(RecordCommand::Finalize) => {
                     self.finalize();
@@ -200,26 +203,35 @@ impl RecorderWriter {
         }
     }
 
-    fn handle_interval(&mut self, source_id: &str, display_name: Option<&str>, wire_data: &[u8]) {
-        let interval = match AudioWire::decode(wire_data) {
-            Ok(i) => i,
+    fn handle_waif_frame(&mut self, source_id: &str, display_name: Option<&str>, wire_data: &[u8]) {
+        let frame = match AudioFrameWire::decode(wire_data) {
+            Ok(f) => f,
             Err(e) => {
-                warn!(source = source_id, "Recording: failed to decode wire data: {e}");
+                warn!(source = source_id, "Recording: failed to decode WAIF frame: {e}");
                 return;
             }
         };
 
-        // Detect format from first interval
-        if self.sample_rate.is_none() {
-            self.sample_rate = Some(interval.sample_rate);
-            self.channels = Some(interval.channels);
+        if frame.is_final {
+            self.assembler.evict_stale(frame.interval_index);
         }
 
-        let sr = interval.sample_rate;
-        let ch = interval.channels;
+        let assembled = match self.assembler.insert(source_id, &frame) {
+            Some(a) => a,
+            None => return, // interval not yet complete
+        };
 
-        // Get or create decoder for this source
-        if !self.decoders.contains_key(source_id) {
+        let sr = assembled.sample_rate;
+        let ch = assembled.channels;
+
+        // Detect format from first completed interval
+        if self.sample_rate.is_none() {
+            self.sample_rate = Some(sr);
+            self.channels = Some(ch);
+        }
+
+        let dec_key = (source_id.to_string(), assembled.stream_id);
+        if !self.decoders.contains_key(&dec_key) {
             let decoder = match AudioDecoder::new(sr, ch) {
                 Ok(d) => d,
                 Err(e) => {
@@ -233,11 +245,11 @@ impl RecorderWriter {
                     }
                 }
             };
-            self.decoders.insert(source_id.to_string(), decoder);
+            self.decoders.insert(dec_key.clone(), decoder);
         }
-        let decoder = self.decoders.get_mut(source_id).unwrap();
+        let decoder = self.decoders.get_mut(&dec_key).unwrap();
 
-        let pcm = match decoder.decode_interval(&interval.opus_data) {
+        let pcm = match decoder.decode_interval(&assembled.opus_data) {
             Ok(pcm) => pcm,
             Err(e) => {
                 warn!(source = source_id, "Recording: failed to decode opus: {e}");
@@ -248,7 +260,7 @@ impl RecorderWriter {
         if self.config.stems {
             self.write_stems(source_id, display_name, sr, ch, &pcm);
         } else {
-            self.write_mixed(source_id, display_name, sr, ch, interval.index, &pcm);
+            self.write_mixed(source_id, display_name, sr, ch, assembled.interval_index, &pcm);
         }
 
         self.update_bytes_written();

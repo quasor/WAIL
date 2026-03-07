@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use clack_host::prelude::*;
-use wail_audio::{AudioWire, IpcMessage, IPC_ROLE_SEND};
+use wail_audio::{AudioFrameWire, IpcMessage, IPC_ROLE_SEND};
 use wail_plugin_test::*;
 
 const SEND_CLAP_ID: &str = "com.wail.send";
@@ -191,25 +191,36 @@ fn send_plugin_e2e() {
             );
         }
 
-        // The IPC thread should have Opus-encoded the completed interval
-        // and written it as a framed IPC message to our TCP stream.
-        let payload = read_ipc_frame(&mut stream, Duration::from_secs(15));
-
-        // Decode and verify
-        let (peer_id, wire_data) = IpcMessage::decode_audio(&payload)
-            .expect("Failed to decode IPC audio message");
-        assert_eq!(peer_id, "", "Send plugin should use empty peer_id");
-
-        let interval = AudioWire::decode(&wire_data).expect("Failed to decode AudioWire");
-        assert_eq!(interval.sample_rate, 48000);
-        assert_eq!(interval.channels, 2);
+        // The IPC thread streams the completed interval as WAIF frames
+        // (IPC_TAG_AUDIO_FRAME, tag 0x05). Read until we receive the final frame.
+        let mut recv_buf = wail_audio::IpcRecvBuffer::new();
+        let mut final_frame = None;
+        let mut received_frames: u32 = 0;
+        while final_frame.is_none() {
+            let payload = read_ipc_frame(&mut stream, &mut recv_buf, Duration::from_secs(15));
+            if let Some(wire_data) = IpcMessage::decode_audio_frame(&payload) {
+                let frame =
+                    AudioFrameWire::decode(&wire_data).expect("Failed to decode AudioFrameWire");
+                received_frames += 1;
+                if frame.is_final {
+                    final_frame = Some(frame);
+                }
+            }
+        }
+        let final_frame = final_frame.unwrap();
+        assert_eq!(final_frame.sample_rate, 48000, "sample_rate mismatch");
+        assert_eq!(final_frame.channels, 2, "channels mismatch");
         assert!(
-            !interval.opus_data.is_empty(),
-            "Opus data should not be empty"
+            final_frame.total_frames > 0,
+            "Interval should have recorded frames"
         );
         assert!(
-            interval.num_frames > 0,
-            "Interval should have recorded frames"
+            !final_frame.opus_data.is_empty(),
+            "Final frame Opus data should not be empty"
+        );
+        assert_eq!(
+            received_frames, final_frame.total_frames,
+            "Received frame count should match total_frames in final frame"
         );
 
         let stopped = processor.stop_processing();

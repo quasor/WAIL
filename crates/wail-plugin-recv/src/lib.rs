@@ -13,9 +13,9 @@ mod params;
 
 use params::WailRecvParams;
 use wail_audio::{
-    nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire, IpcMessage,
-    IpcRecvBuffer, IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB, IPC_TAG_PEER_JOINED_PUB,
-    IPC_TAG_PEER_LEFT_PUB, IPC_TAG_PEER_NAME_PUB,
+    nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire, FrameAssembler,
+    IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB,
+    IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB, IPC_TAG_PEER_NAME_PUB,
 };
 
 /// Peer lifecycle events sent from IPC thread to audio thread.
@@ -422,113 +422,6 @@ impl Plugin for WailRecvPlugin {
 
 /// Assembles streaming audio frames into complete intervals for decoding.
 ///
-/// Keyed by (interval_index, stream_id, peer_id). Collects Opus frames by
-/// frame_number, and when the final frame arrives, assembles them into the
-/// length-prefixed format that `AudioDecoder::decode_interval` expects.
-struct FrameAssembler {
-    /// (interval_index, stream_id, peer_id) → collected frames
-    pending: HashMap<(i64, u16, String), FrameCollection>,
-}
-
-struct FrameCollection {
-    frames: Vec<Option<Vec<u8>>>,
-    channels: u16,
-    sample_rate: u32,
-    bpm: f64,
-    quantum: f64,
-    bars: u32,
-}
-
-impl FrameAssembler {
-    fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
-
-    /// Insert a frame. If it's the final frame, returns assembled opus_data blob
-    /// along with metadata needed to create an AudioInterval.
-    fn insert(
-        &mut self,
-        peer_id: &str,
-        frame: &wail_audio::AudioFrame,
-    ) -> Option<(String, u16, i64, u16, u32, f64, f64, u32, Vec<u8>)> {
-        let key = (frame.interval_index, frame.stream_id, peer_id.to_string());
-
-        let collection = self.pending.entry(key.clone()).or_insert_with(|| FrameCollection {
-            frames: Vec::new(),
-            channels: frame.channels,
-            sample_rate: 0,
-            bpm: 0.0,
-            quantum: 0.0,
-            bars: 0,
-        });
-
-        // Ensure vec is large enough (cap to prevent OOM from malicious peers)
-        let idx = frame.frame_number as usize;
-        const MAX_FRAMES_PER_INTERVAL: usize = 10_000;
-        if idx >= MAX_FRAMES_PER_INTERVAL {
-            tracing::warn!(
-                frame_number = idx,
-                "FrameAssembler: frame_number exceeds maximum, dropping"
-            );
-            return None;
-        }
-        if collection.frames.len() <= idx {
-            collection.frames.resize(idx + 1, None);
-        }
-        collection.frames[idx] = Some(frame.opus_data.clone());
-
-        if frame.is_final {
-            collection.sample_rate = frame.sample_rate;
-            collection.bpm = frame.bpm;
-            collection.quantum = frame.quantum;
-            collection.bars = frame.bars;
-
-            let total = frame.total_frames as usize;
-            let Some(coll) = self.pending.remove(&key) else {
-                tracing::warn!("FrameAssembler: missing collection for key after insert");
-                return None;
-            };
-
-            // Assemble into encode_interval format:
-            // [u32 LE frame_count][u16 LE len][opus bytes]...
-            let mut opus_data = Vec::new();
-            opus_data.extend_from_slice(&(total as u32).to_le_bytes());
-            for i in 0..total {
-                if let Some(Some(data)) = coll.frames.get(i) {
-                    opus_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
-                    opus_data.extend_from_slice(data);
-                } else {
-                    // Missing frame — insert silence marker (zero-length Opus packet
-                    // would fail decoding, so skip with a 0-length entry)
-                    // The decoder will handle this as a gap.
-                    opus_data.extend_from_slice(&0u16.to_le_bytes());
-                }
-            }
-
-            return Some((
-                peer_id.to_string(),
-                frame.stream_id,
-                frame.interval_index,
-                coll.channels,
-                coll.sample_rate,
-                coll.bpm,
-                coll.quantum,
-                coll.bars,
-                opus_data,
-            ));
-        }
-
-        None
-    }
-
-    /// Evict stale entries for intervals older than `current - 2`.
-    fn evict_stale(&mut self, current_interval: i64) {
-        self.pending
-            .retain(|&(idx, _, _), _| idx >= current_interval - 2);
-    }
-}
 
 /// Receive-only IPC thread: reads from TCP, Opus-decodes, sends PCM to audio thread.
 fn ipc_thread_recv(
@@ -603,13 +496,11 @@ fn ipc_thread_recv(
                                                 if frame.is_final {
                                                     assembler.evict_stale(frame.interval_index);
                                                 }
-                                                if let Some((pid, stream_id, interval_idx, ch, sr, _bpm, _q, _bars, opus_data)) =
-                                                    assembler.insert(&peer_id, &frame)
-                                                {
-                                                    let dec_key = (pid.clone(), stream_id);
+                                                if let Some(assembled) = assembler.insert(&peer_id, &frame) {
+                                                    let dec_key = (assembled.peer_id.clone(), assembled.stream_id);
                                                     let dec = decoders.entry(dec_key).or_insert_with(|| {
-                                                        let rate = nearest_opus_rate(sr);
-                                                        match AudioDecoder::new(rate, ch) {
+                                                        let rate = nearest_opus_rate(assembled.sample_rate);
+                                                        match AudioDecoder::new(rate, assembled.channels) {
                                                             Ok(d) => d,
                                                             Err(e) => {
                                                                 tracing::warn!(error = %e, "IPC recv: failed to create decoder, using fallback");
@@ -617,12 +508,12 @@ fn ipc_thread_recv(
                                                             }
                                                         }
                                                     });
-                                                    match dec.decode_interval(&opus_data) {
+                                                    match dec.decode_interval(&assembled.opus_data) {
                                                         Ok(samples) => {
                                                             let _ = incoming_tx.try_send((
-                                                                pid,
-                                                                stream_id,
-                                                                interval_idx,
+                                                                assembled.peer_id,
+                                                                assembled.stream_id,
+                                                                assembled.interval_index,
                                                                 samples,
                                                             ));
                                                         }

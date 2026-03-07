@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clack_host::prelude::*;
 use wail_audio::{
-    AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_SEND,
+    AudioEncoder, AudioFrame, AudioFrameWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_SEND,
 };
 
 // ---------------------------------------------------------------------------
@@ -241,20 +241,27 @@ pub fn accept_ipc_connection(listener: &TcpListener, timeout: Duration) -> (TcpS
 
 /// Read one complete IPC frame from a stream with a timeout.
 ///
-/// Uses `IpcRecvBuffer` to handle partial TCP reads, just like the plugins do.
-pub fn read_ipc_frame(stream: &mut TcpStream, timeout: Duration) -> Vec<u8> {
+/// `recv_buf` must be kept alive across calls so that bytes read in one call
+/// but belonging to a later frame are not discarded.  A single TCP `read()`
+/// may return data for multiple IPC frames; without a persistent buffer the
+/// extra bytes would be silently lost and the next call would block forever.
+pub fn read_ipc_frame(
+    stream: &mut TcpStream,
+    recv_buf: &mut IpcRecvBuffer,
+    timeout: Duration,
+) -> Vec<u8> {
     stream.set_read_timeout(Some(timeout)).unwrap();
-    let mut recv_buf = IpcRecvBuffer::new();
     let mut read_buf = [0u8; 65536];
 
     loop {
+        // Return any frame already buffered from a previous read.
+        if let Some(payload) = recv_buf.next_frame() {
+            return payload;
+        }
         match stream.read(&mut read_buf) {
             Ok(0) => panic!("IPC connection closed before a complete frame was received"),
             Ok(n) => {
                 recv_buf.push(&read_buf[..n]);
-                if let Some(payload) = recv_buf.next_frame() {
-                    return payload;
-                }
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::TimedOut
@@ -267,10 +274,11 @@ pub fn read_ipc_frame(stream: &mut TcpStream, timeout: Duration) -> Vec<u8> {
     }
 }
 
-/// Build a complete IPC frame containing a test audio interval.
+/// Build a complete IPC byte stream containing a test audio interval, encoded as
+/// WAIF streaming frames (the format the recv plugin's FrameAssembler handles).
 ///
-/// Generates a sine wave, Opus-encodes it, wraps in AudioWire + IpcMessage + IpcFramer
-/// framing — ready to write directly to a TCP stream for a recv plugin to consume.
+/// Returns a buffer with all WAIF IPC frames concatenated — ready to write
+/// directly to a TCP stream for a recv plugin to consume.
 pub fn make_test_interval_frame(peer_id: &str, interval_index: i64) -> Vec<u8> {
     let sr = 48000u32;
     let channels = 2u16;
@@ -288,19 +296,41 @@ pub fn make_test_interval_frame(peer_id: &str, interval_index: i64) -> Vec<u8> {
         .encode_interval(&samples)
         .expect("Failed to encode interval");
 
-    let interval = AudioInterval {
-        index: interval_index,
-        stream_id: 0,
-        opus_data,
-        sample_rate: sr,
-        channels,
-        num_frames: samples_per_channel as u32,
-        bpm,
-        quantum,
-        bars,
-    };
+    // Parse the interval blob into individual Opus packets.
+    // Format: [u32 frame_count][u16 len][opus bytes]...
+    let num_frames = u32::from_le_bytes(opus_data[0..4].try_into().unwrap()) as usize;
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    let mut offset = 4;
+    while packets.len() < num_frames && offset + 2 <= opus_data.len() {
+        let pkt_len =
+            u16::from_le_bytes(opus_data[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        packets.push(opus_data[offset..offset + pkt_len].to_vec());
+        offset += pkt_len;
+    }
 
-    let wire_data = AudioWire::encode(&interval);
-    let ipc_msg = IpcMessage::encode_audio(peer_id, &wire_data);
-    IpcFramer::encode_frame(&ipc_msg)
+    // Encode each Opus packet as a WAIF streaming frame.
+    // The plugin's FrameAssembler reassembles these into a complete interval.
+    let total_frames = packets.len();
+    let mut output = Vec::new();
+    for (frame_number, packet) in packets.into_iter().enumerate() {
+        let is_final = frame_number + 1 == total_frames;
+        let frame = AudioFrame {
+            interval_index,
+            stream_id: 0,
+            frame_number: frame_number as u32,
+            channels,
+            opus_data: packet,
+            is_final,
+            sample_rate: if is_final { sr } else { 0 },
+            total_frames: if is_final { total_frames as u32 } else { 0 },
+            bpm: if is_final { bpm } else { 0.0 },
+            quantum: if is_final { quantum } else { 0.0 },
+            bars: if is_final { bars } else { 0 },
+        };
+        let wire_data = AudioFrameWire::encode(&frame);
+        let ipc_msg = IpcMessage::encode_audio(peer_id, &wire_data);
+        output.extend(IpcFramer::encode_frame(&ipc_msg));
+    }
+    output
 }

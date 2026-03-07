@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use wail_audio::AudioBridge;
+use wail_audio::{AudioBridge, AudioFrame, AudioFrameWire, AudioWire, IpcFramer, IpcMessage};
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------------------
@@ -478,6 +478,50 @@ pub fn produce_interval(freq_hz: f32) -> Vec<u8> {
     let wire_msgs = bridge.process(&signal, &mut out, 16.0);
     assert_eq!(wire_msgs.len(), 1, "Should produce exactly 1 interval");
     wire_msgs.into_iter().next().unwrap()
+}
+
+/// Encode an interval as WAIF IPC frames (tag 0x05), matching the real send plugin output.
+///
+/// Returns a list of complete IPC frames ready to write to a TCP stream.
+/// This mirrors how `wail-plugin-send` streams 20ms Opus packets to wail-app.
+pub fn produce_interval_waif_ipc(freq_hz: f32) -> Vec<Vec<u8>> {
+    let wail_bytes = produce_interval(freq_hz);
+    let interval = AudioWire::decode(&wail_bytes).expect("produce_interval_waif_ipc: AudioWire decode");
+
+    // Parse the length-prefixed opus blob: [u32 count][u16 len][bytes]...
+    let data = &interval.opus_data;
+    let frame_count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(frame_count);
+    let mut offset = 4;
+    while packets.len() < frame_count && offset + 2 <= data.len() {
+        let pkt_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        packets.push(data[offset..offset + pkt_len].to_vec());
+        offset += pkt_len;
+    }
+
+    let total = packets.len();
+    let mut output = Vec::with_capacity(total);
+    for (fn_, packet) in packets.into_iter().enumerate() {
+        let is_final = fn_ + 1 == total;
+        let frame = AudioFrame {
+            interval_index: interval.index,
+            stream_id: interval.stream_id,
+            frame_number: fn_ as u32,
+            channels: interval.channels,
+            opus_data: packet,
+            is_final,
+            sample_rate: if is_final { interval.sample_rate } else { 0 },
+            total_frames: if is_final { total as u32 } else { 0 },
+            bpm: if is_final { interval.bpm } else { 0.0 },
+            quantum: if is_final { interval.quantum } else { 0.0 },
+            bars: if is_final { interval.bars } else { 0 },
+        };
+        let wire_bytes = AudioFrameWire::encode(&frame);
+        let ipc_msg = IpcMessage::encode_audio_frame(&wire_bytes);
+        output.push(IpcFramer::encode_frame(&ipc_msg));
+    }
+    output
 }
 
 /// Pump signaling for both meshes until they see each other, then wait for DataChannels.
