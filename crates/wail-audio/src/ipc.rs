@@ -496,6 +496,37 @@ mod tests {
         assert_eq!(IpcMessage::tag(&[IPC_TAG_AUDIO, 0x00]), Some(IPC_TAG_AUDIO));
         assert_eq!(IpcMessage::tag(&[IPC_TAG_PEER_JOINED, 0x05]), Some(IPC_TAG_PEER_JOINED));
         assert_eq!(IpcMessage::tag(&[IPC_TAG_PEER_LEFT, 0x03]), Some(IPC_TAG_PEER_LEFT));
+        assert_eq!(IpcMessage::tag(&[IPC_TAG_PEER_NAME, 0x02]), Some(IPC_TAG_PEER_NAME));
         assert_eq!(IpcMessage::tag(&[]), None);
+    }
+
+    // --- PeerName messages ---
+
+    #[test]
+    fn peer_name_roundtrip() {
+        let encoded = IpcMessage::encode_peer_name("peer-abc", "Ringo");
+        let (peer_id, name) = IpcMessage::decode_peer_name(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert_eq!(name, "Ringo");
+    }
+
+    #[test]
+    fn peer_name_empty_display_name() {
+        let encoded = IpcMessage::encode_peer_name("peer-abc", "");
+        let (peer_id, name) = IpcMessage::decode_peer_name(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert_eq!(name, "");
+    }
+
+    #[test]
+    fn peer_name_rejects_wrong_tag() {
+        let encoded = IpcMessage::encode_audio("peer-1", &[0xAA]);
+        assert!(IpcMessage::decode_peer_name(&encoded).is_none());
+    }
+
+    #[test]
+    fn peer_name_rejects_truncated() {
+        assert!(IpcMessage::decode_peer_name(&[]).is_none());
+        assert!(IpcMessage::decode_peer_name(&[IPC_TAG_PEER_NAME]).is_none());
     }
 }

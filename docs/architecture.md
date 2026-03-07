@@ -167,15 +167,20 @@ After the handshake, length-prefixed binary framing:
 
 ```
 [4 bytes]  payload_length: u32 LE
-[N bytes]  payload:
-  [1 byte]   tag (0x01 = AudioInterval)
-  [1 byte]   peer_id_len
-  [M bytes]  peer_id (UTF-8, empty for plugin→app outgoing)
-  [K bytes]  AudioWire data (includes stream_id in wire header)
+[N bytes]  payload (tagged message, see below)
 ```
 
-Plugin→App: local interval encoded as AudioWire, peer_id empty.
-App→Plugin: remote peer's interval, peer_id identifies the sender.
+Message tags:
+
+| Tag | Name | Payload layout |
+|-----|------|----------------|
+| `0x01` | AudioInterval | `peer_id_len (1B) + peer_id (UTF-8) + AudioWire data` |
+| `0x02` | PeerJoined | `peer_id_len (1B) + peer_id + identity_len (1B) + identity` |
+| `0x03` | PeerLeft | `peer_id_len (1B) + peer_id` |
+| `0x04` | PeerName | `peer_id_len (1B) + peer_id + name_len (1B) + display_name` |
+
+Plugin→App: AudioInterval with empty peer_id (local capture).
+App→Plugin: AudioInterval with peer_id identifying the remote sender; PeerJoined/PeerLeft/PeerName for peer lifecycle and display name updates.
 
 ## Tempo Sync Flow
 

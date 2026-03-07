@@ -454,13 +454,15 @@ impl PeerMesh {
 
     /// Send a structured log entry to the signaling server for broadcast to room peers.
     pub fn send_log(&self, level: &str, target: &str, message: &str, timestamp_us: u64) {
-        let _ = self.signaling.outgoing_tx.send(SignalMessage::LogBroadcast {
+        if let Err(e) = self.signaling.outgoing_tx.send(SignalMessage::LogBroadcast {
             from: String::new(), // server sets `from` on broadcast
             level: level.to_string(),
             target: target.to_string(),
             message: message.to_string(),
             timestamp_us,
-        });
+        }) {
+            tracing::warn!("failed to send log broadcast: {e}");
+        }
     }
 
     pub fn connected_peers(&self) -> Vec<String> {
