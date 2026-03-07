@@ -586,6 +586,27 @@ impl PeerConnection {
             .map_or(false, |dc| dc.ready_state() == RTCDataChannelState::Open)
     }
 
+    /// Current ICE connection state as a display string (e.g. "connected", "checking", "failed").
+    pub fn ice_connection_state_str(&self) -> String {
+        format!("{}", self.pc.ice_connection_state())
+    }
+
+    /// Current sync DataChannel ready state as a display string (e.g. "open", "closed").
+    pub fn dc_sync_state_str(&self) -> String {
+        self.dc_sync
+            .get()
+            .map(|dc| format!("{}", dc.ready_state()))
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    /// Current audio DataChannel ready state as a display string (e.g. "open", "closed").
+    pub fn dc_audio_state_str(&self) -> String {
+        self.dc_audio
+            .get()
+            .map(|dc| format!("{}", dc.ready_state()))
+            .unwrap_or_else(|| "none".to_string())
+    }
+
     /// Take the sync message receiver for forwarding to a unified channel.
     /// Can only be called once — returns None on subsequent calls.
     pub fn take_sync_rx(&mut self) -> Option<mpsc::UnboundedReceiver<SyncMessage>> {

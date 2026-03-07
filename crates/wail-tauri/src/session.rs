@@ -288,6 +288,10 @@ async fn session_loop(
     let ws_log_handle = app.state::<WsLogHandle>().inner().clone();
     let mut log_rx = ws_log_handle.subscribe();
 
+    // Pending audio retry: (deadline, failed_peer_ids, wire_data, retries_remaining)
+    // Up to 3 retries at 250ms intervals for transiently-failed peers.
+    let mut audio_retry: Option<(tokio::time::Instant, Vec<String>, Vec<u8>, u32)> = None;
+
     ui_info!(&app, "Waiting for peers...");
 
     loop {
@@ -444,9 +448,19 @@ async fn session_loop(
                     if audio_gate.is_gated() || link_peers == 0 {
                         continue;
                     }
-                    mesh.broadcast_audio(&wire_data).await;
+                    // Clear any stale retry from the previous interval.
+                    audio_retry = None;
+                    let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
                     audio_bytes_sent += wire_data.len() as u64;
+                    if !failed_peers.is_empty() {
+                        audio_retry = Some((
+                            tokio::time::Instant::now() + Duration::from_millis(250),
+                            failed_peers,
+                            wire_data.clone(),
+                            3,
+                        ));
+                    }
                     let connected_peers = mesh.connected_peers();
                     ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), connected_peers.join(", "), audio_intervals_sent);
                 }
@@ -625,22 +639,17 @@ async fn session_loop(
                     Err(_) => wail_net::metered_stun_fallback(),
                 };
 
-                match wail_net::PeerMesh::connect_full(
-                    &server, &room, &peer_id, password.as_deref(), ice,
-                    false, stream_count, Some(&display_name),
+                match mesh.reconnect_signaling(
+                    &server, &room, password.as_deref(), Some(&display_name), ice,
                 ).await {
-                    Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
-                        mesh = new_mesh;
-                        sync_rx = new_sync_rx;
-                        audio_rx = new_audio_rx;
-                        // Reset peer state, preserve slot affinity so peers reclaim their slots
-                        peers.reset_for_reconnect(mesh.take_initial_peer_names());
-                        audio_intervals_sent_prev = audio_intervals_sent;
-                        clock = ClockSync::new();
-                        beat_synced = false;
+                    Ok(new_peer_names) => {
+                        // Seed any genuinely new peers from the fresh join_ok.
+                        // Existing peers remain connected — their WebRTC DataChannels
+                        // are unaffected by the signaling reconnect.
+                        peers.seed_names(new_peer_names);
                         audio_gate.on_reconnect();
                         signaling_reconnect = None;
-                        ui_info!(&app, "Signaling reconnected (attempt {attempt})");
+                        ui_info!(&app, "Signaling reconnected (attempt {attempt}) — existing WebRTC connections preserved");
                         let _ = app.emit("session:reconnected", ());
                     }
                     Err(e) => {
@@ -652,6 +661,35 @@ async fn session_loop(
                         sr.attempt = next_attempt;
                         sr.next_try = tokio::time::Instant::now()
                             + Duration::from_millis(backoff_ms);
+                    }
+                }
+            }
+
+            // --- Audio retry (up to 3 attempts, 250ms apart) for transiently-failed peers ---
+            _ = async {
+                if let Some((deadline, _, _, _)) = &audio_retry {
+                    tokio::time::sleep_until(*deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if audio_retry.is_some() => {
+                if let Some((_, failed_peers, wire_data, retries_remaining)) = audio_retry.take() {
+                    let mut still_failed = Vec::new();
+                    for pid in &failed_peers {
+                        if let Err(e) = mesh.send_audio_to(pid, &wire_data).await {
+                            warn!(peer = %pid, error = %e, retries_remaining, "Audio retry failed");
+                            still_failed.push(pid.clone());
+                        } else {
+                            debug!(peer = %pid, "Audio retry succeeded");
+                        }
+                    }
+                    if !still_failed.is_empty() && retries_remaining > 1 {
+                        audio_retry = Some((
+                            tokio::time::Instant::now() + Duration::from_millis(250),
+                            still_failed,
+                            wire_data,
+                            retries_remaining - 1,
+                        ));
                     }
                 }
             }
@@ -1058,6 +1096,26 @@ async fn session_loop(
                         })
                         .collect();
 
+                    // Build per-peer WebRTC network state for the Network tab
+                    let network_infos: Vec<PeerNetworkInfo> = connected
+                        .iter()
+                        .filter_map(|p| {
+                            let (ice, dc_sync, dc_audio) = mesh.peer_network_state(p)?;
+                            let ps = peers.get(p);
+                            Some(PeerNetworkInfo {
+                                peer_id: p.clone(),
+                                display_name: ps.and_then(|s| s.display_name.clone()),
+                                slot: peers.slot_for(p, 0).map(|s| s as u32 + 1),
+                                ice_state: ice,
+                                dc_sync_state: dc_sync,
+                                dc_audio_state: dc_audio,
+                                rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
+                                audio_recv: ps.map_or(0, |s| s.audio_recv_count),
+                            })
+                        })
+                        .collect();
+                    let _ = app.emit("peers:network", PeersNetwork { peers: network_infos });
+
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
                     audio_intervals_sent_prev = audio_intervals_sent;
@@ -1161,7 +1219,7 @@ async fn send_test_tone(
                 wire_data.len()
             );
 
-            mesh.broadcast_audio(&wire_data).await;
+            let _ = mesh.broadcast_audio(&wire_data).await;
             *audio_intervals_sent += 1;
             *audio_bytes_sent += wire_data.len() as u64;
 

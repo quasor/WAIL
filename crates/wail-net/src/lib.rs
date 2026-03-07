@@ -120,6 +120,7 @@ pub struct PeerMesh {
     audio_tx: mpsc::Sender<(String, Vec<u8>)>,
     ice_servers: Vec<RTCIceServer>,
     relay_only: bool,
+    stream_count: u16,
     /// Sender for peer failure notifications (cloned into each PeerConnection).
     failure_tx: mpsc::UnboundedSender<String>,
     /// Receiver for peer failure notifications (polled in poll_signaling).
@@ -191,6 +192,7 @@ impl PeerMesh {
             audio_tx,
             ice_servers,
             relay_only,
+            stream_count,
             failure_tx,
             failure_rx,
             initial_peer_names,
@@ -217,12 +219,16 @@ impl PeerMesh {
     }
 
     /// Broadcast binary audio data to all connected peers.
-    pub async fn broadcast_audio(&self, data: &[u8]) {
+    /// Returns peer IDs for which the send failed (for optional retry).
+    pub async fn broadcast_audio(&self, data: &[u8]) -> Vec<String> {
+        let mut failed = Vec::new();
         for (pid, pc) in &self.peers {
             if let Err(e) = pc.send_audio(data).await {
                 warn!(peer = %pid, error = %e, "Failed to send audio to peer");
+                failed.push(pid.clone());
             }
         }
+        failed
     }
 
     /// Send binary audio data to a specific peer.
@@ -514,6 +520,65 @@ impl PeerMesh {
             self.initiate_connection(peer_id).await?;
         }
         Ok(())
+    }
+
+    /// Returns (ice_state, dc_sync_state, dc_audio_state) strings for a peer,
+    /// or None if the peer is not in the mesh.
+    pub fn peer_network_state(&self, peer_id: &str) -> Option<(String, String, String)> {
+        self.peers.get(peer_id).map(|pc| (
+            pc.ice_connection_state_str(),
+            pc.dc_sync_state_str(),
+            pc.dc_audio_state_str(),
+        ))
+    }
+
+    /// Reconnect only the signaling WebSocket, leaving all established WebRTC peer
+    /// connections untouched. Existing DataChannels continue to operate normally.
+    ///
+    /// After reconnect, the server sends a fresh peer list. Peers already in
+    /// `self.peers` are skipped; only genuinely new peers trigger new WebRTC offers.
+    ///
+    /// Returns the initial peer display names from the new `join_ok` response.
+    pub async fn reconnect_signaling(
+        &mut self,
+        server_url: &str,
+        room: &str,
+        password: Option<&str>,
+        display_name: Option<&str>,
+        new_ice_servers: Vec<RTCIceServer>,
+    ) -> Result<HashMap<String, Option<String>>> {
+        let (new_signaling, initial_peer_names) = SignalingClient::connect_with_options(
+            server_url, room, &self.peer_id, password, self.stream_count, display_name,
+        ).await?;
+
+        // Replace signaling BEFORE processing the PeerList so that
+        // initiate_connection() sends SDP offers via the new WebSocket.
+        self.ice_servers = new_ice_servers;
+        self.signaling = new_signaling;
+        self.initial_peer_names = initial_peer_names.clone();
+
+        // The SignalingClient pushed a PeerList as its first message.
+        // Consume it here: only initiate connections for peers we don't already have.
+        match self.signaling.incoming_rx.recv().await {
+            Some(SignalMessage::PeerList { peers }) => {
+                for remote_id in peers {
+                    if remote_id != self.peer_id
+                        && self.peer_id < remote_id
+                        && !self.peers.contains_key(&remote_id)
+                    {
+                        self.initiate_connection(&remote_id).await?;
+                    }
+                }
+            }
+            other => {
+                warn!(
+                    "reconnect_signaling: expected PeerList as first message, got {:?}",
+                    other.as_ref().map(std::mem::discriminant)
+                );
+            }
+        }
+
+        Ok(initial_peer_names)
     }
 }
 

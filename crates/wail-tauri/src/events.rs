@@ -109,6 +109,30 @@ pub struct SessionStale {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerNetworkInfo {
+    pub peer_id: String,
+    pub display_name: Option<String>,
+    /// 1-based slot number, if assigned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u32>,
+    /// ICE connection state string (e.g. "connected", "checking", "failed").
+    pub ice_state: String,
+    /// Sync DataChannel state string (e.g. "open", "closed").
+    pub dc_sync_state: String,
+    /// Audio DataChannel state string (e.g. "open", "closed").
+    pub dc_audio_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    /// Total audio intervals received from this peer.
+    pub audio_recv: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeersNetwork {
+    pub peers: Vec<PeerNetworkInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,
     pub message: String,

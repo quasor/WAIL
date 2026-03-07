@@ -155,22 +155,6 @@ impl PeerRegistry {
         }
     }
 
-    /// Full reset for signaling reconnection. Preserves slot affinity so
-    /// returning peers reclaim their slots. Moves all active slots to
-    /// reserved, clears all peer state, then seeds fresh peers from `new_names`.
-    pub fn reset_for_reconnect(&mut self, new_names: HashMap<String, Option<String>>) {
-        self.peers.clear();
-        self.slots.clear_active_to_reserved();
-
-        // Seed new peers with last_seen = now
-        let now = Instant::now();
-        for (peer_id, display_name) in new_names {
-            let mut state = PeerState::new(display_name);
-            state.last_seen = now;
-            self.peers.insert(peer_id, state);
-        }
-    }
-
     /// Access the underlying slot table (for building StatusUpdate).
     pub fn slot_table(&self) -> &SlotTable {
         &self.slots
@@ -343,32 +327,6 @@ mod tests {
         let timed_out = reg.timed_out_peers(Duration::from_secs(30));
         assert!(timed_out.contains(&"peer1".to_string()));
         assert!(!timed_out.contains(&"peer2".to_string()));
-    }
-
-    #[test]
-    fn reset_for_reconnect_clears_peers_preserves_affinity() {
-        let mut reg = PeerRegistry::new();
-
-        reg.add("old-peer".to_string(), Some("Bob".to_string()));
-        reg.get_mut("old-peer").unwrap().identity = Some("bob-id".to_string());
-        reg.assign_slot("old-peer", 0).unwrap();
-
-        let mut new_names = HashMap::new();
-        new_names.insert("new-peer".to_string(), Some("Carol".to_string()));
-        reg.reset_for_reconnect(new_names);
-
-        assert!(reg.get("old-peer").is_none());
-        assert!(!reg.slots.is_occupied(0));
-        // Affinity preserved — bob reclaims slot 0
-        reg.add("bob-new".to_string(), Some("Bob".to_string()));
-        reg.get_mut("bob-new").unwrap().identity = Some("bob-id".to_string());
-        assert_eq!(reg.assign_slot("bob-new", 0), Some(0), "Affinity reclaims slot 0");
-        reg.remove("bob-new");
-        // New peer seeded
-        assert_eq!(
-            reg.get("new-peer").unwrap().display_name.as_deref(),
-            Some("Carol")
-        );
     }
 
     #[test]

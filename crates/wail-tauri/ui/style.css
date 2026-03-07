@@ -363,6 +363,43 @@ summary {
   padding: 8px 16px;
 }
 
+/* Network table */
+.network-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.network-table th {
+  text-align: left;
+  padding: 4px 6px;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.network-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.network-table .empty {
+  color: var(--fg-dim);
+  text-align: center;
+  padding: 12px;
+}
+
+.net-state { font-family: monospace; }
+.net-connected, .net-completed { color: #4caf50; }
+.net-checking, .net-connecting { color: #ff9800; }
+.net-failed, .net-closed { color: #f44336; }
+.net-disconnected { color: #ff5722; }
+.net-open { color: #4caf50; }
+.net-closing { color: #ff9800; }
+.net-none { color: var(--fg-dim); }
+
 /* Peer list */
 .peer-list {
   display: flex;

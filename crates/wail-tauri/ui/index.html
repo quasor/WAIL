@@ -138,60 +138,88 @@
       <span id="session-room" class="room-badge"></span>
     </div>
 
-    <div class="stat-group">
-      <label>BPM</label>
-      <div class="bpm-row">
-        <input type="number" id="session-bpm" min="20" max="999" step="0.1">
-        <button type="button" id="set-bpm-btn">Set</button>
+    <div class="tab-bar">
+      <button type="button" class="tab active" id="session-tab-session">Session</button>
+      <button type="button" class="tab" id="session-tab-network">Network</button>
+    </div>
+
+    <!-- Session tab -->
+    <div id="session-tab-session-content">
+      <div class="stat-group">
+        <label>BPM</label>
+        <div class="bpm-row">
+          <input type="number" id="session-bpm" min="20" max="999" step="0.1">
+          <button type="button" id="set-bpm-btn">Set</button>
+        </div>
+      </div>
+
+      <div class="stat-group">
+        <label>Link Peers (LAN)</label>
+        <span id="session-link-peers">0</span>
+      </div>
+
+      <div id="link-no-peers-warning" class="warning" style="display:none">
+        Start Ableton Link in your DAW — audio is not being transmitted
+      </div>
+
+      <div class="stat-group">
+        <label>Slots</label>
+        <div id="peer-list" class="peer-list">
+          <span class="empty">No peers connected</span>
+        </div>
+      </div>
+
+      <div class="stat-group">
+        <label>Audio</label>
+        <span id="session-audio">0 sent / 0 recv</span>
+        <span id="session-audio-bytes" class="audio-bytes">0 B sent / 0 B recv</span>
+      </div>
+
+      <div class="stat-group">
+        <label>Interval</label>
+        <span id="session-interval">-</span>
+      </div>
+
+      <div class="stat-group">
+        <label>Plugin</label>
+        <span id="session-plugin">disconnected</span>
+      </div>
+
+      <div class="stat-group">
+        <label>Test Tone</label>
+        <div class="test-tone-row">
+          <span id="session-test-tone">OFF</span>
+          <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
+        </div>
+      </div>
+
+      <div class="stat-group" id="recording-stat" style="display:none">
+        <label>Recording</label>
+        <div class="recording-row">
+          <span id="session-recording" class="rec-badge">REC</span>
+          <span id="recording-size">0 MB</span>
+        </div>
       </div>
     </div>
 
-    <div class="stat-group">
-      <label>Link Peers (LAN)</label>
-      <span id="session-link-peers">0</span>
-    </div>
-
-    <div id="link-no-peers-warning" class="warning" style="display:none">
-      Start Ableton Link in your DAW — audio is not being transmitted
-    </div>
-
-    <div class="stat-group">
-      <label>Slots</label>
-      <div id="peer-list" class="peer-list">
-        <span class="empty">No peers connected</span>
-      </div>
-    </div>
-
-    <div class="stat-group">
-      <label>Audio</label>
-      <span id="session-audio">0 sent / 0 recv</span>
-      <span id="session-audio-bytes" class="audio-bytes">0 B sent / 0 B recv</span>
-    </div>
-
-    <div class="stat-group">
-      <label>Interval</label>
-      <span id="session-interval">-</span>
-    </div>
-
-    <div class="stat-group">
-      <label>Plugin</label>
-      <span id="session-plugin">disconnected</span>
-    </div>
-
-    <div class="stat-group">
-      <label>Test Tone</label>
-      <div class="test-tone-row">
-        <span id="session-test-tone">OFF</span>
-        <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
-      </div>
-    </div>
-
-    <div class="stat-group" id="recording-stat" style="display:none">
-      <label>Recording</label>
-      <div class="recording-row">
-        <span id="session-recording" class="rec-badge">REC</span>
-        <span id="recording-size">0 MB</span>
-      </div>
+    <!-- Network tab -->
+    <div id="session-tab-network-content" style="display:none">
+      <table class="network-table">
+        <thead>
+          <tr>
+            <th>Peer</th>
+            <th>Slot</th>
+            <th>ICE</th>
+            <th>Sync DC</th>
+            <th>Audio DC</th>
+            <th>RTT</th>
+            <th>Recv</th>
+          </tr>
+        </thead>
+        <tbody id="network-table-body">
+          <tr><td colspan="7" class="empty">No peers connected</td></tr>
+        </tbody>
+      </table>
     </div>
 
     <button type="button" id="disconnect-btn">Disconnect</button>

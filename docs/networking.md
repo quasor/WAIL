@@ -512,12 +512,12 @@ emit session:reconnecting
           └── on success: replace mesh/sync_rx/audio_rx, clear peer state, re-gate audio
 ```
 
-On success:
-- `mesh`, `sync_rx`, `audio_rx` are replaced with the new session's values.
-- All peer tracking state is cleared via `PeerRegistry::reset_for_reconnect(new_names)` — frees all slots, clears all peer state, seeds fresh peers with `last_seen = now`.
-- Slot affinity is **preserved** inside `SlotAllocator` — peers can recover their slot assignments after reconnection.
-- `beat_synced` is reset to `false`.
-- `audio_gate.on_reconnect()` re-gates audio until beat sync is re-established.
+On success (`PeerMesh::reconnect_signaling()`):
+- Only the `SignalingClient` (WebSocket) is replaced — `self.peers` (all WebRTC `PeerConnection` objects) are **untouched**.
+- Established P2P DataChannels remain open; audio/sync flow continues without interruption.
+- Any genuinely new peers from the fresh `join_ok` PeerList get new WebRTC offers initiated.
+- `audio_gate.on_reconnect()` re-gates audio briefly until beat sync is re-established.
+- `peers.seed_names(new_peer_names)` adds any new peer names without clearing existing state.
 
 See §13.E for the fixed-non-blocking implementation.
 

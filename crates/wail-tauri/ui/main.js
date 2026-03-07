@@ -167,7 +167,7 @@ firstLaunchForm.addEventListener('submit', async (e) => {
   }
 });
 
-// --- Tab switching ---
+// --- Join screen tab switching ---
 const tabJoinBtn = document.getElementById('tab-join');
 const tabPublicBtn = document.getElementById('tab-public');
 const tabJoinContent = document.getElementById('tab-join-content');
@@ -333,6 +333,26 @@ settingsForm.addEventListener('submit', (e) => {
   settingsPanel.style.display = 'none';
 });
 
+// --- Session screen tab switching ---
+const sessionTabSessionBtn = document.getElementById('session-tab-session');
+const sessionTabNetworkBtn = document.getElementById('session-tab-network');
+const sessionTabSessionContent = document.getElementById('session-tab-session-content');
+const sessionTabNetworkContent = document.getElementById('session-tab-network-content');
+
+sessionTabSessionBtn.addEventListener('click', () => {
+  sessionTabSessionBtn.classList.add('active');
+  sessionTabNetworkBtn.classList.remove('active');
+  sessionTabSessionContent.style.display = '';
+  sessionTabNetworkContent.style.display = 'none';
+});
+
+sessionTabNetworkBtn.addEventListener('click', () => {
+  sessionTabNetworkBtn.classList.add('active');
+  sessionTabSessionBtn.classList.remove('active');
+  sessionTabSessionContent.style.display = 'none';
+  sessionTabNetworkContent.style.display = '';
+});
+
 function showJoin() {
   firstLaunchScreen.style.display = 'none';
   joinScreen.style.display = '';
@@ -340,6 +360,11 @@ function showJoin() {
   joinError.style.display = 'none';
   joinBtn.disabled = false;
   joinBtn.textContent = 'Join Room';
+  // Reset session tabs to Session on leave
+  sessionTabSessionBtn.classList.add('active');
+  sessionTabNetworkBtn.classList.remove('active');
+  sessionTabSessionContent.style.display = '';
+  sessionTabNetworkContent.style.display = 'none';
   cleanup();
 }
 
@@ -536,6 +561,31 @@ async function setupListeners() {
   unlisten.push(await listen('log:entry', (event) => {
     const p = event.payload;
     addLogEntry(p.level, p.message, p.peer_name || p.peer_id || null);
+  }));
+
+  unlisten.push(await listen('peers:network', (event) => {
+    const peers = event.payload.peers;
+    const tbody = document.getElementById('network-table-body');
+    if (peers.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No peers connected</td></tr>';
+      return;
+    }
+    tbody.innerHTML = peers.map(p => {
+      const name = p.display_name
+        ? escapeHtml(p.display_name)
+        : escapeHtml(p.peer_id.slice(0, 8));
+      const slot = p.slot != null ? `Slot ${p.slot}` : '-';
+      const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '-';
+      return `<tr>
+        <td>${name}</td>
+        <td>${slot}</td>
+        <td class="net-state net-${escapeHtml(p.ice_state)}">${escapeHtml(p.ice_state)}</td>
+        <td class="net-state net-${escapeHtml(p.dc_sync_state)}">${escapeHtml(p.dc_sync_state)}</td>
+        <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
+        <td>${rtt}</td>
+        <td>${p.audio_recv}</td>
+      </tr>`;
+    }).join('');
   }));
 }
 
