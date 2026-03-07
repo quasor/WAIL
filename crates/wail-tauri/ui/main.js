@@ -524,11 +524,8 @@ async function setupListeners() {
         const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
         const status = sl.status || 'connecting';
         const statusClass = `peer-status status-${status}`;
-        const upClass = `peer-arrow arrow-up${sl.is_sending ? ' active' : ''}`;
-        const downClass = `peer-arrow arrow-down${sl.is_receiving ? ' active' : ''}`;
         return `<div class="peer-item">
           <span class="peer-name"><span class="peer-slot">Slot ${sl.slot}</span>${name}</span>
-          <span class="peer-arrows"><span class="${upClass}">↑</span><span class="${downClass}">↓</span></span>
           <span class="${statusClass}">${escapeHtml(status)}</span>
           <span class="peer-rtt">${rtt}</span>
         </div>`;
