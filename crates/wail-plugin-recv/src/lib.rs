@@ -306,7 +306,7 @@ impl Plugin for WailRecvPlugin {
 
                     if let Some(ref rx) = self.ipc_incoming_rx {
                         while let Ok((peer_id, stream_id, interval_index, samples)) = rx.try_recv() {
-                            bridge.feed_decoded(&peer_id, stream_id, interval_index, samples);
+                            bridge.feed_decoded(peer_id, stream_id, interval_index, samples);
                         }
                     }
                     // Use a zero-length slice as silent input — IntervalRing
