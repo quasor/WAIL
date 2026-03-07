@@ -69,8 +69,14 @@ pub struct IntervalRing {
     /// Read position in the playback slot (in interleaved samples)
     playback_pos: usize,
     /// Pre-allocated capacity for record/playback slots
-    #[allow(dead_code)]
     slot_capacity: usize,
+    /// Spare pre-allocated record buffer — swapped in at interval boundaries
+    /// so we can move the filled record_slot to CompletedInterval without copying.
+    spare_record: Vec<f32>,
+    /// Optional channel for receiving returned buffers from the encoding thread.
+    /// After the IPC thread finishes Opus-encoding a CompletedInterval, it sends
+    /// the now-empty Vec<f32> back so we can reuse it as the spare — zero alloc.
+    buffer_return_rx: Option<crossbeam_channel::Receiver<Vec<f32>>>,
     /// Current interval index
     current_interval: Option<i64>,
     /// Completed intervals ready for encoding and transmission
@@ -117,8 +123,8 @@ impl IntervalRing {
     /// Create a new interval ring buffer.
     ///
     /// All buffers are pre-allocated so that `process()` never allocates on the
-    /// audio thread (except for one `to_vec()` at each interval boundary, which
-    /// should be wrapped in `permit_alloc` by the caller).
+    /// audio thread during normal operation. At interval boundaries, a spare
+    /// buffer is swapped in (zero-copy). The spare is replenished lazily.
     pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64) -> Self {
         let bars = bars.max(1);
         let quantum = quantum.max(f64::EPSILON);
@@ -143,6 +149,8 @@ impl IntervalRing {
             record_pos: 0,
             playback_pos: 0,
             slot_capacity,
+            spare_record: Vec::with_capacity(slot_capacity),
+            buffer_return_rx: None,
             current_interval: None,
             completed: Vec::with_capacity(2),
             pending_remote: Vec::with_capacity(MAX_REMOTE_PEERS),
@@ -173,6 +181,21 @@ impl IntervalRing {
         output: &mut [f32],
         beat_position: f64,
     ) -> Option<i64> {
+        // Replenish spare record buffer between boundaries so that
+        // swap_intervals() can do a zero-copy move instead of to_vec().
+        // Prefer reclaiming a buffer from the encoding thread (zero alloc)
+        // over a fresh allocation (only needed during warmup).
+        if self.spare_record.capacity() == 0 {
+            if let Some(ref rx) = self.buffer_return_rx {
+                if let Ok(buf) = rx.try_recv() {
+                    self.spare_record = buf;
+                }
+            }
+            if self.spare_record.capacity() == 0 {
+                self.spare_record = Vec::with_capacity(self.slot_capacity);
+            }
+        }
+
         let interval_index = self.beat_to_interval(beat_position);
         let mut boundary_crossed = None;
 
@@ -225,10 +248,10 @@ impl IntervalRing {
     /// This will be mixed into the playback slot at the next interval boundary.
     /// Multiple peers' audio is summed together. Each unique `(peer_id, stream_id)`
     /// pair gets its own isolated slot for per-stream DAW routing.
-    pub fn feed_remote(&mut self, peer_id: &str, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
+    pub fn feed_remote(&mut self, peer_id: String, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
         self.pending_remote.push(RemoteInterval {
             index: interval_index,
-            peer_id: peer_id.to_string(),
+            peer_id,
             stream_id,
             samples,
         });
@@ -245,9 +268,27 @@ impl IntervalRing {
         self.quantum = quantum.max(f64::EPSILON);
     }
 
+    /// Set the buffer return channel for zero-allocation spare replenishment.
+    ///
+    /// After the encoding thread finishes with a CompletedInterval's sample buffer,
+    /// it sends the empty Vec back through this channel. `process()` reclaims it
+    /// via `try_recv()` — after warmup (2-3 intervals), no allocations occur on
+    /// the audio thread.
+    pub fn set_buffer_return_rx(&mut self, rx: crossbeam_channel::Receiver<Vec<f32>>) {
+        self.buffer_return_rx = Some(rx);
+    }
+
     /// Reset all state (preserves pre-allocated capacity).
     pub fn reset(&mut self) {
         self.record_slot.clear();
+        self.spare_record.clear();
+        // Ensure record_slot has capacity (spare may have been swapped in empty)
+        if self.record_slot.capacity() == 0 {
+            self.record_slot = Vec::with_capacity(self.slot_capacity);
+        }
+        if self.spare_record.capacity() == 0 {
+            self.spare_record = Vec::with_capacity(self.slot_capacity);
+        }
         self.record_pos = 0;
         self.playback_pos = 0;
         self.playback_len = 0;
@@ -422,14 +463,15 @@ impl IntervalRing {
     /// Look up or assign a slot index for a (peer_id, stream_id) pair.
     /// Returns None if all slots are full.
     fn assign_peer_slot(&mut self, peer_id: &str, stream_id: u16) -> Option<usize> {
-        let key = (peer_id.to_string(), stream_id);
-
-        // Check existing assignment
-        for (k, idx) in &self.peer_slot_map {
-            if *k == key {
+        // Check existing assignment (no allocation — compare &str directly)
+        for ((pid, sid), idx) in &self.peer_slot_map {
+            if pid == peer_id && *sid == stream_id {
                 return Some(*idx);
             }
         }
+
+        // Only allocate the key String now that we know it's a new assignment
+        let key = (peer_id.to_string(), stream_id);
 
         // Check affinity via identity
         if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
@@ -464,20 +506,23 @@ impl IntervalRing {
 
     /// Swap intervals: move record → completed, mix pending remote → playback.
     ///
-    /// NOTE: The `to_vec()` call below is the ONE allocation in the audio-thread
-    /// path. It copies recorded samples so they can be owned by `CompletedInterval`
-    /// and sent to the IPC thread. The caller should wrap this in `permit_alloc`.
+    /// Zero-copy: the filled record_slot is moved into CompletedInterval and the
+    /// pre-allocated spare_record becomes the new record_slot.  The spare is
+    /// replenished lazily in `process()` before the next boundary.
     fn swap_intervals(&mut self, completed_index: i64) {
-        // Copy recorded audio to completed queue, then clear record slot
-        // (clear preserves the pre-allocated capacity — no future alloc)
         if self.record_pos > 0 {
-            let samples = self.record_slot[..self.record_pos].to_vec();
+            // Move the record buffer into completed (zero-copy — no alloc, no memcpy)
+            let mut samples = std::mem::take(&mut self.record_slot);
+            samples.truncate(self.record_pos);
             self.completed.push(CompletedInterval {
                 index: completed_index,
                 samples,
             });
+            // Swap in the spare as the new record slot
+            self.record_slot = std::mem::take(&mut self.spare_record);
+        } else {
+            self.record_slot.clear();
         }
-        self.record_slot.clear();
         self.record_pos = 0;
 
         // Clear per-peer slots (but keep assignments)
@@ -490,8 +535,9 @@ impl IntervalRing {
         self.playback_pos = 0;
         self.playback_len = 0;
 
-        let pending = std::mem::take(&mut self.pending_remote);
-        for mut remote in pending {
+        // Take pending_remote, drain it (preserving capacity), then put it back.
+        let mut pending = std::mem::take(&mut self.pending_remote);
+        for mut remote in pending.drain(..) {
             // Assign slot FIRST so we can check needs_fade_in before summing
             let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
 
@@ -530,9 +576,8 @@ impl IntervalRing {
                 }
                 None => {
                     // All slots full — merge into this peer's stream 0 slot
-                    let fallback_key = (remote.peer_id.clone(), 0u16);
                     if let Some(&(_, slot_idx)) = self.peer_slot_map.iter()
-                        .find(|(k, _)| *k == fallback_key)
+                        .find(|((pid, sid), _)| pid == &remote.peer_id && *sid == 0)
                     {
                         let slot = &mut self.peer_slots[slot_idx];
                         let merge_len = slot.samples.len().max(remote.samples.len());
@@ -558,6 +603,8 @@ impl IntervalRing {
                 }
             }
         }
+        // Put the drained (empty but with capacity) Vec back
+        self.pending_remote = pending;
     }
 }
 
@@ -667,7 +714,7 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed remote audio for next playback
-        ring.feed_remote("peer-a", 0, 0, vec![0.7f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.7f32; buf]);
 
         // Cross into interval 1 — remote audio should become playback
         ring.process(&input, &mut output, 16.0);
@@ -690,8 +737,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two peers
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.5f32; buf]);
 
         // Cross boundary — both should be mixed (summed)
         ring.process(&input, &mut output, 16.0);
@@ -713,7 +760,7 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed remote audio spanning multiple buffers
-        ring.feed_remote("peer-a", 0, 0, vec![0.4f32; remote_len]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.4f32; remote_len]);
 
         // Cross into interval 1 — first buffer is in the fade region
         ring.process(&input, &mut output, 16.0);
@@ -736,7 +783,7 @@ mod tests {
         let mut output = vec![0.0f32; 64];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.5f32; 32]); // only 32 samples
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; 32]); // only 32 samples
 
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
@@ -767,7 +814,7 @@ mod tests {
         ring.process(&ones, &mut output, 8.0);
 
         // Feed remote for playback in interval 1
-        ring.feed_remote("peer-a", 0, 0, vec![0.9f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.9f32; buf]);
 
         // Interval 1: record twos, play remote (first interval = faded)
         ring.process(&twos, &mut output, 16.0);
@@ -778,7 +825,7 @@ mod tests {
         assert!((output[FADE_LEN] - 0.9).abs() < f32::EPSILON);
 
         // Feed new remote for interval 2
-        ring.feed_remote("peer-a", 0, 1, vec![0.6f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.6f32; buf]);
 
         // Interval 2: record ones, play new remote
         ring.process(&ones, &mut output, 32.0);
@@ -822,7 +869,7 @@ mod tests {
         let mut output = vec![0.0f32; 128];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 64]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 64]);
 
         ring.reset();
 
@@ -907,8 +954,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two distinct peers
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.7f32; buf]);
 
         // Cross boundary to activate playback
         ring.process(&input, &mut output, 16.0);
@@ -948,8 +995,8 @@ mod tests {
 
         ring.process(&input, &mut output, 0.0);
 
-        ring.feed_remote("peer-x", 0, 0, vec![0.2f32; buf]);
-        ring.feed_remote("peer-y", 0, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-x".into(), 0, 0, vec![0.2f32; buf]);
+        ring.feed_remote("peer-y".into(), 0, 0, vec![0.5f32; buf]);
 
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
@@ -1059,7 +1106,7 @@ mod tests {
         let mut output = vec![0.0f32; 128];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         assert_eq!(ring.active_peer_slots().len(), 1);
@@ -1069,7 +1116,7 @@ mod tests {
         assert_eq!(ring.active_peer_slots().len(), 0);
 
         // The freed slot should be reusable by a new peer
-        ring.feed_remote("peer-b", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1089,8 +1136,8 @@ mod tests {
         ring.notify_peer_joined("peer-b", "identity-bob");
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.7f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let active = ring.active_peer_slots();
@@ -1106,7 +1153,7 @@ mod tests {
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
         // Feed audio from the new peer_id
-        ring.feed_remote("peer-a-new", 0, 2, vec![0.9f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 2, vec![0.9f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         // peer-a-new should have reclaimed peer-a's original slot
@@ -1128,7 +1175,7 @@ mod tests {
         // Set up: peer-a at slot 0
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
         let slot_a = ring.active_peer_slots()[0].0;
 
@@ -1136,14 +1183,14 @@ mod tests {
         ring.remove_peer("peer-a");
 
         // A different peer takes slot 0
-        ring.feed_remote("peer-c", 0, 1, vec![0.1f32; 128]);
+        ring.feed_remote("peer-c".into(), 0, 1, vec![0.1f32; 128]);
         ring.process(&input, &mut output, 32.0);
         let slot_c = ring.active_peer_slots().iter().find(|(_, pid, _)| pid == "peer-c").unwrap().0;
         assert_eq!(slot_c, slot_a, "peer-c should take the freed slot");
 
         // Now peer-a reconnects — their affinity slot is taken
         ring.notify_peer_joined("peer-a-new", "identity-alice");
-        ring.feed_remote("peer-a-new", 0, 3, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 3, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 48.0);
 
         // Should get a different slot (first-fit fallback)
@@ -1160,7 +1207,7 @@ mod tests {
 
         // peer-a joins WITHOUT identity (old client)
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         assert_eq!(ring.active_peer_slots().len(), 1);
@@ -1168,7 +1215,7 @@ mod tests {
         assert_eq!(ring.active_peer_slots().len(), 0);
 
         // Slot is freed with no affinity reservation (no identity)
-        ring.feed_remote("peer-b", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
         assert_eq!(ring.active_peer_slots().len(), 1);
     }
@@ -1181,7 +1228,7 @@ mod tests {
 
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
         ring.remove_peer("peer-a");
 
@@ -1191,7 +1238,7 @@ mod tests {
         // Reconnect — should get first-fit (slot 0), not necessarily from affinity
         ring.notify_peer_joined("peer-a-new", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a-new", 0, 0, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 0, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let active = ring.active_peer_slots();
@@ -1211,8 +1258,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Same peer, two different streams
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
-        ring.feed_remote("peer-a", 1, 0, vec![0.7f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-a".into(), 1, 0, vec![0.7f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
@@ -1249,14 +1296,14 @@ mod tests {
 
         // Fill all 31 slots with distinct peer-streams
         // Peer-a stream 0 is at slot 0 (this is the merge target)
-        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.1f32; buf]);
         for i in 1..MAX_REMOTE_PEERS {
             let peer = format!("peer-fill-{i}");
-            ring.feed_remote(&peer, 0, 0, vec![0.01f32; buf]);
+            ring.feed_remote(peer, 0, 0, vec![0.01f32; buf]);
         }
 
         // 32nd stream should overflow — merge into peer-a's stream 0
-        ring.feed_remote("peer-a", 5, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-a".into(), 5, 0, vec![0.5f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
@@ -1286,9 +1333,9 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Peer-a sends 3 streams
-        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 128]);
-        ring.feed_remote("peer-a", 1, 0, vec![0.2f32; 128]);
-        ring.feed_remote("peer-a", 2, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.1f32; 128]);
+        ring.feed_remote("peer-a".into(), 1, 0, vec![0.2f32; 128]);
+        ring.feed_remote("peer-a".into(), 2, 0, vec![0.3f32; 128]);
 
         ring.process(&input, &mut output, 16.0);
         assert_eq!(ring.active_peer_slots().len(), 3);
@@ -1308,8 +1355,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Peer-a sends 2 streams
-        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 128]);
-        ring.feed_remote("peer-a", 1, 0, vec![0.2f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.1f32; 128]);
+        ring.feed_remote("peer-a".into(), 1, 0, vec![0.2f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let active = ring.active_peer_slots();
@@ -1321,8 +1368,8 @@ mod tests {
 
         // Reconnect with new peer_id, same identity
         ring.notify_peer_joined("peer-a-new", "identity-alice");
-        ring.feed_remote("peer-a-new", 0, 1, vec![0.3f32; 128]);
-        ring.feed_remote("peer-a-new", 1, 1, vec![0.4f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 1, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 1, 1, vec![0.4f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1345,7 +1392,7 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed constant-amplitude audio from a new peer
-        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 16.0);
 
         // First sample should be 0.0 (faded from silence)
@@ -1384,12 +1431,12 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // First interval from peer — will be faded
-        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 16.0);
         assert!(output[0].abs() < f32::EPSILON, "First interval should be faded");
 
         // Feed second interval from same peer
-        ring.feed_remote("peer-a", 0, 1, vec![0.8f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.8f32; buf]);
         ring.process(&input, &mut output, 32.0);
 
         // Second interval should NOT be faded — first sample at full amplitude
@@ -1408,11 +1455,11 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // First interval — faded
-        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 16.0);
 
         // Second interval — not faded (steady state)
-        ring.feed_remote("peer-a", 0, 1, vec![1.0f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 32.0);
         assert!((output[0] - 1.0).abs() < f32::EPSILON, "Steady state should not be faded");
 
@@ -1423,7 +1470,7 @@ mod tests {
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
         // First interval after reconnect — should be faded again
-        ring.feed_remote("peer-a-new", 0, 2, vec![1.0f32; buf]);
+        ring.feed_remote("peer-a-new".into(), 0, 2, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 48.0);
 
         assert!(output[0].abs() < f32::EPSILON,
@@ -1442,8 +1489,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Two new peers, both should be faded
-        ring.feed_remote("peer-a", 0, 0, vec![0.5f32; buf]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.5f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
@@ -1481,7 +1528,7 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed only 32 samples (much shorter than FADE_LEN=960)
-        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; 32]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; 32]);
         ring.process(&input, &mut output, 16.0);
 
         // Should not panic; first sample should be 0
@@ -1509,7 +1556,7 @@ mod tests {
         // Initial connection: peer-a joins and is assigned slot 0
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let slot_a = ring.active_peer_slots()
@@ -1523,7 +1570,7 @@ mod tests {
         ring.notify_peer_joined("peer-a", "identity-alice");
 
         // Audio resumes from the same peer_id
-        ring.feed_remote("peer-a", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1555,7 +1602,7 @@ mod tests {
         // peer-a joins and is assigned slot 0 via audio
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let slot_a = ring.active_peer_slots()
@@ -1567,7 +1614,7 @@ mod tests {
         // Simulate the bug: peer-a-new arrives with the same identity but
         // remove_peer("peer-a") was never called — the old slot is still active.
         ring.notify_peer_joined("peer-a-new", "identity-alice");
-        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1597,7 +1644,7 @@ mod tests {
         // peer-a joins and is assigned slot 0
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let slot_a = ring.active_peer_slots()
@@ -1610,7 +1657,7 @@ mod tests {
         ring.remove_peer("peer-a");
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
-        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1636,8 +1683,8 @@ mod tests {
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.notify_peer_joined("peer-b", "identity-bob");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.7f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let slot_a = ring.active_peer_slots()
@@ -1656,8 +1703,8 @@ mod tests {
         ring.remove_peer("peer-a");
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
-        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
-        ring.feed_remote("peer-b", 0, 1, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b".into(), 0, 1, vec![0.7f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();

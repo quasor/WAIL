@@ -73,7 +73,7 @@ impl AudioBridge {
     ///
     /// Use this from the real-time audio callback after decoding Opus on a
     /// background thread.
-    pub fn feed_decoded(&mut self, peer_id: &str, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
+    pub fn feed_decoded(&mut self, peer_id: String, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
         self.ring.feed_remote(peer_id, stream_id, interval_index, samples);
     }
 
@@ -138,13 +138,19 @@ impl AudioBridge {
         if let Some(ref mut decoder) = self.decoder {
             match decoder.decode_interval(&interval.opus_data) {
                 Ok(samples) => {
-                    self.ring.feed_remote(peer_id, interval.stream_id, interval.index, samples);
+                    self.ring.feed_remote(peer_id.to_string(), interval.stream_id, interval.index, samples);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to decode Opus audio");
                 }
             }
         }
+    }
+
+    /// Set the buffer return channel for zero-allocation spare replenishment.
+    /// See [`IntervalRing::set_buffer_return_rx`] for details.
+    pub fn set_buffer_return_rx(&mut self, rx: crossbeam_channel::Receiver<Vec<f32>>) {
+        self.ring.set_buffer_return_rx(rx);
     }
 
     /// Update tempo/config from DAW transport.

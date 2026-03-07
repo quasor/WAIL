@@ -158,7 +158,7 @@ impl Plugin for WailSendPlugin {
             .main_input_channels
             .map(|c| c.get() as u16)
             .unwrap_or(2);
-        let bridge = AudioBridge::new(
+        let mut bridge = AudioBridge::new(
             buffer_config.sample_rate as u32,
             channels,
             DEFAULT_BARS,
@@ -169,6 +169,11 @@ impl Plugin for WailSendPlugin {
         let max_buf = buffer_config.max_buffer_size as usize * channels as usize;
         self.interleave_buf = vec![0.0f32; max_buf];
         self.playback_buf = vec![0.0f32; max_buf];
+
+        // Buffer return channel: IPC thread sends back empty Vec<f32> after encoding
+        // so the audio thread can reuse it as spare_record (zero alloc after warmup).
+        let (buf_return_tx, buf_return_rx) = crossbeam_channel::bounded::<Vec<f32>>(4);
+        bridge.set_buffer_return_rx(buf_return_rx);
 
         match self.bridge.lock() {
             Ok(mut guard) => *guard = Some(bridge),
@@ -192,7 +197,7 @@ impl Plugin for WailSendPlugin {
         std::thread::Builder::new()
             .name("wail-ipc-send".into())
             .spawn(move || {
-                ipc_thread_send(out_rx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate, ipc_params)
+                ipc_thread_send(out_rx, buf_return_tx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate, ipc_params)
             })
             .ok();
 
@@ -301,8 +306,12 @@ impl Plugin for WailSendPlugin {
 }
 
 /// Send-only IPC thread: Opus-encodes completed intervals and writes to TCP.
+///
+/// After encoding, sends the now-empty sample buffer back through
+/// `buf_return_tx` so the audio thread can reuse it (zero-allocation).
 fn ipc_thread_send(
     outgoing_rx: crossbeam_channel::Receiver<RawInterval>,
+    buf_return_tx: Sender<Vec<f32>>,
     addr: String,
     sample_rate: u32,
     channels: u16,
@@ -353,10 +362,14 @@ fn ipc_thread_send(
             // Block waiting for the next interval (with timeout so we detect disconnects)
             match outgoing_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(raw) => {
+                    let mut samples = raw.completed.samples;
+                    let sample_count = samples.len();
+                    let mut write_failed = false;
+
                     if let Some(ref mut enc) = encoder {
-                        match enc.encode_interval(&raw.completed.samples) {
+                        match enc.encode_interval(&samples) {
                             Ok(opus_data) => {
-                                let num_frames = (raw.completed.samples.len()
+                                let num_frames = (sample_count
                                     / raw.channels as usize)
                                     as u32;
                                 let interval = AudioInterval {
@@ -375,13 +388,21 @@ fn ipc_thread_send(
                                 let frame = IpcFramer::encode_frame(&msg);
                                 if stream.write_all(&frame).is_err() {
                                     tracing::warn!("WAIL Send IPC write error — reconnecting");
-                                    break;
+                                    write_failed = true;
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "IPC send: failed to encode interval");
                             }
                         }
+                    }
+
+                    // Return the buffer to the audio thread for reuse
+                    samples.clear();
+                    let _ = buf_return_tx.try_send(samples);
+
+                    if write_failed {
+                        break;
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {

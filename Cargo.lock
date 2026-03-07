@@ -6395,6 +6395,7 @@ version = "1.4.2"
 dependencies = [
  "anyhow",
  "audiopus",
+ "crossbeam-channel",
  "serde",
  "tracing",
 ]
