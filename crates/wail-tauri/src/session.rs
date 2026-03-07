@@ -237,8 +237,13 @@ async fn session_loop(
         ui_info!(&app, "Test tone ENABLED — will generate sine tones at interval boundaries");
     }
 
-    // IPC: listen for plugin connections
-    let ipc_listener = tokio::net::TcpListener::bind(("127.0.0.1", ipc_port)).await?;
+    // IPC: listen for plugin connections.
+    // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
+    // quickly after a disconnect doesn't fail with WSAEADDRINUSE (os error 10048) on Windows.
+    let tcp_socket = tokio::net::TcpSocket::new_v4()?;
+    tcp_socket.set_reuseaddr(true)?;
+    tcp_socket.bind(std::net::SocketAddr::from(([127, 0, 0, 1], ipc_port)))?;
+    let ipc_listener = tcp_socket.listen(128)?;
     ui_info!(&app, "IPC listening on port {ipc_port}");
 
     let mut ipc_pool = IpcWriterPool::new();
