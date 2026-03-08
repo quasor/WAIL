@@ -168,6 +168,16 @@ pub async fn cleanup_recordings(directory: String, retention_days: u32) -> Resul
 }
 
 #[tauri::command]
+pub fn get_active_session(state: State<'_, SessionState>) -> Option<JoinResult> {
+    let session = state.lock().ok()?;
+    session.as_ref().map(|h| JoinResult {
+        peer_id: h.peer_id.clone(),
+        room: h.room.clone(),
+        bpm: 120.0,
+    })
+}
+
+#[tauri::command]
 pub fn get_plugin_install_errors(state: State<'_, PluginInstallErrors>) -> Vec<String> {
     state.0.lock().map(|e| e.clone()).unwrap_or_default()
 }

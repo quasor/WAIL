@@ -147,6 +147,7 @@ pub fn run(test_args: Option<TestModeArgs>) {
             commands::list_public_rooms,
             commands::get_default_recording_dir,
             commands::cleanup_recordings,
+            commands::get_active_session,
             commands::get_plugin_install_errors,
         ])
         .run(tauri::generate_context!())

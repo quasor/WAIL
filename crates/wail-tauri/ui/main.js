@@ -633,3 +633,10 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Check if a session was auto-started (e.g. via --test-room CLI flag)
+invoke('get_active_session').then(result => {
+  if (result) {
+    showSession(result.room);
+    setupListeners();
+  }
+}).catch(() => {});
