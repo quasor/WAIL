@@ -81,19 +81,26 @@ pub fn run(test_args: Option<TestModeArgs>) {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity.clone()));
-            let resource_dir = app.path().resource_dir().ok();
-            let install_errors = match plugin_install::find_plugin_dir(resource_dir.as_deref()) {
-                Some(plugin_dir) => plugin_install::install_if_missing(&plugin_dir),
-                None => {
-                    if cfg!(debug_assertions) {
-                        tracing::debug!("plugin_install: dev mode, skipping auto-install");
-                        vec![]
-                    } else {
-                        tracing::warn!("plugin_install: no bundled plugins found");
-                        vec!["Could not locate bundled plugins. Run wail-install-plugins to install manually.".to_string()]
+            // On Windows, plugin installation is handled by the NSIS setup.exe installer
+            // (which runs elevated), so we skip runtime auto-install to avoid permission errors.
+            #[cfg(not(target_os = "windows"))]
+            let install_errors = {
+                let resource_dir = app.path().resource_dir().ok();
+                match plugin_install::find_plugin_dir(resource_dir.as_deref()) {
+                    Some(plugin_dir) => plugin_install::install_if_missing(&plugin_dir),
+                    None => {
+                        if cfg!(debug_assertions) {
+                            tracing::debug!("plugin_install: dev mode, skipping auto-install");
+                            vec![]
+                        } else {
+                            tracing::warn!("plugin_install: no bundled plugins found");
+                            vec!["Could not locate bundled plugins. Run wail-install-plugins to install manually.".to_string()]
+                        }
                     }
                 }
             };
+            #[cfg(target_os = "windows")]
+            let install_errors: Vec<String> = vec![];
             if !install_errors.is_empty() {
                 if let Ok(mut state) = app.state::<PluginInstallErrors>().0.lock() {
                     *state = install_errors;
