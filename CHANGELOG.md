@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.13.0 (2026-03-08)
+
+### Features
+
+- add auto-generate button for music-themed room names (#165)
+- add plugin installation page to Windows NSIS setup.exe (#167)
+- Add "Generate" button to auto-create fun music-themed room names from three word dictionaries (synthesis modifiers, sound elements, jam venues).
+- On Windows, plugin (VST3 and CLAP) installation is now handled by the setup.exe installer instead of a runtime auto-install step that required admin privileges. The installer shows a plugin options page with checkboxes to choose which plugins to install and directory inputs to customize install paths (defaulting to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling WAIL via Windows Settings > Add & Remove Programs also removes the installed plugins.
+
+### Fixes
+
+- suppress repeated peer status logs in UI (#166)
+- prevent crash and log spam on plugin reset and disconnect (#168)
+- Suppress repeated peer audio status logs in the UI. Previously, each peer's `AudioStatus` message was logged to the UI every 2 seconds even when nothing changed. Now the UI only shows a new line when `dc_open` or `plugin_connected` actually changes. Debug-level logging continues on every tick for file/console output.
+
+#### Fix crash when Bitwig (or other hosts) calls start_processing: plugin reset() was
+
+dropping heap-allocated data (Strings, encoder/decoder objects) inside assert_no_alloc's
+no-alloc zone. Wrapped reset() bodies in permit_alloc, matching the existing pattern
+used in process().
+
 ## 1.12.2 (2026-03-08)
 
 ### Fixes
