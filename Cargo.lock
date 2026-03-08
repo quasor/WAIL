@@ -6499,11 +6499,15 @@ dependencies = [
 name = "wail-plugin-test"
 version = "1.9.2"
 dependencies = [
+ "axum",
  "clack-host",
+ "futures-util",
+ "serde_json",
  "tokio 1.49.0",
  "tracing",
  "tracing-subscriber",
  "wail-audio",
+ "wail-net",
 ]
 
 [[package]]
