@@ -18,6 +18,13 @@ use tracing_subscriber::prelude::*;
 
 pub struct PluginInstallErrors(pub Mutex<Vec<String>>);
 
+/// CLI arguments for test mode auto-join.
+pub struct TestModeArgs {
+    pub room: String,
+    pub bpm: f64,
+    pub display_name: Option<String>,
+}
+
 /// Emit a warning log to the frontend.
 pub fn emit_log(app: &tauri::AppHandle, level: &str, message: String) {
     let _ = app.emit("log:entry", LogEntry {
@@ -43,7 +50,7 @@ pub fn emit_peer_log(
     });
 }
 
-pub fn run() {
+pub fn run(test_args: Option<TestModeArgs>) {
     hb::init();
     hb::set_panic_hook();
 
@@ -73,7 +80,7 @@ pub fn run() {
                 eprintln!("[filelog] failed to open log file: {e}");
             }
             let peer_identity = identity::get_or_create(&data_dir);
-            app.manage(identity::PeerIdentity(peer_identity));
+            app.manage(identity::PeerIdentity(peer_identity.clone()));
             let resource_dir = app.path().resource_dir().ok();
             let install_errors = match plugin_install::find_plugin_dir(resource_dir.as_deref()) {
                 Some(plugin_dir) => plugin_install::install_if_missing(&plugin_dir),
@@ -92,6 +99,43 @@ pub fn run() {
                     *state = install_errors;
                 }
             }
+
+            // Auto-join test room if CLI args provided
+            if let Some(ref test) = test_args {
+                let random_suffix = &uuid::Uuid::new_v4().to_string()[..6];
+                let display_name = test.display_name.clone()
+                    .unwrap_or_else(|| format!("test-{random_suffix}"));
+                let bpm = test.bpm;
+                let room = test.room.clone();
+
+                tracing::info!(
+                    room = %room,
+                    bpm = bpm,
+                    display_name = %display_name,
+                    "Auto-joining test room from CLI args"
+                );
+
+                let config = session::SessionConfig {
+                    server: "wss://wail-signal.fly.dev".to_string(),
+                    room: room.clone(),
+                    password: None,
+                    display_name,
+                    identity: peer_identity,
+                    bpm,
+                    bars: 4,
+                    quantum: 4.0,
+                    ipc_port: 9191,
+                    recording: None,
+                    stream_count: 1,
+                    test_mode: true,
+                };
+
+                let handle = session::spawn_session(app.handle().clone(), config)
+                    .expect("failed to spawn test session");
+                let state = app.state::<SessionState>();
+                let _ = state.lock().map(|mut s| *s = Some(handle));
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

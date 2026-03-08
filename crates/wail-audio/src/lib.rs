@@ -7,6 +7,8 @@ pub mod ring;
 pub mod slot;
 pub mod wire;
 
+pub mod test_tone;
+
 #[cfg(test)]
 mod pipeline;
 

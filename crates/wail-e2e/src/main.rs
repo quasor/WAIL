@@ -7,9 +7,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use wail_audio::codec::{AudioDecoder, AudioEncoder};
-use wail_audio::wire::AudioWire;
-use wail_audio::AudioInterval;
+use wail_audio::test_tone::{encode_test_interval, validate_audio};
 use wail_core::protocol::SyncMessage;
 use wail_net::{fetch_metered_ice_servers, metered_stun_fallback, MeshEvent, PeerMesh};
 
@@ -57,10 +55,6 @@ fn print_result(r: &TestResult) {
     let tag = if r.passed { "PASS" } else { "FAIL" };
     println!("[{tag}] {}: {} ({:.1?})", r.phase, r.message, r.duration);
 }
-
-const SAMPLE_RATE: u32 = 48000;
-const CHANNELS: u16 = 2;
-const OPUS_BITRATE: u32 = 128;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -366,12 +360,12 @@ async fn run_single_audio_exchange(
     mesh: &mut PeerMesh,
     audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
 ) -> Result<String> {
-    let wire_bytes = encode_test_interval(0, 440.0)?;
+    let wire_bytes = encode_test_interval(0, 440.0, 120.0, 4, 4.0)?;
     info!(bytes = wire_bytes.len(), "Sending test audio interval");
     mesh.broadcast_audio(&wire_bytes).await;
 
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
-    validate_audio(&data)
+    validate_audio_str(&data)
 }
 
 /// Phase 7: Send N intervals back-to-back, receive N, measure throughput and gaps.
@@ -388,7 +382,7 @@ async fn run_sustained_audio(
 
     for i in 0..num_intervals {
         let freq = if i % 2 == 0 { 440.0 } else { 880.0 };
-        let wire_bytes = encode_test_interval(i as i64, freq)?;
+        let wire_bytes = encode_test_interval(i as i64, freq, 120.0, 4, 4.0)?;
         total_bytes_sent += wire_bytes.len();
         mesh.broadcast_audio(&wire_bytes).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -533,10 +527,10 @@ async fn run_reconnect_as_initiator(
 
     // Verify audio
     println!("Verifying audio after reconnect...");
-    let wire_bytes = encode_test_interval(99, 440.0)?;
+    let wire_bytes = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
     mesh.broadcast_audio(&wire_bytes).await;
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
-    let audio_detail = validate_audio(&data)?;
+    let audio_detail = validate_audio_str(&data)?;
     info!(detail = %audio_detail, "Post-reconnect audio OK");
 
     Ok(format!(
@@ -637,10 +631,10 @@ async fn run_reconnect_as_waiter(
 
     // Verify audio
     println!("Verifying audio after reconnect...");
-    let wire_bytes = encode_test_interval(99, 440.0)?;
+    let wire_bytes = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
     mesh.broadcast_audio(&wire_bytes).await;
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
-    let audio_detail = validate_audio(&data)?;
+    let audio_detail = validate_audio_str(&data)?;
     info!(detail = %audio_detail, "Post-reconnect audio OK");
 
     Ok(format!(
@@ -658,33 +652,6 @@ fn now_us() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_micros() as i64
-}
-
-fn encode_test_interval(index: i64, freq: f32) -> Result<Vec<u8>> {
-    let num_frames = 960u32; // 20ms at 48kHz
-    let num_samples = num_frames as usize * CHANNELS as usize;
-    let mut samples = vec![0.0f32; num_samples];
-    for i in 0..num_frames as usize {
-        let val = (2.0 * std::f32::consts::PI * freq * i as f32 / SAMPLE_RATE as f32).sin() * 0.5;
-        samples[i * 2] = val;
-        samples[i * 2 + 1] = val;
-    }
-
-    let mut encoder = AudioEncoder::new(SAMPLE_RATE, CHANNELS, OPUS_BITRATE)?;
-    let opus_data = encoder.encode_interval(&samples)?;
-
-    let interval = AudioInterval {
-        index,
-        stream_id: 0,
-        opus_data,
-        sample_rate: SAMPLE_RATE,
-        channels: CHANNELS,
-        num_frames,
-        bpm: 120.0,
-        quantum: 4.0,
-        bars: 4,
-    };
-    Ok(AudioWire::encode(&interval))
 }
 
 async fn receive_audio(
@@ -712,51 +679,13 @@ async fn receive_audio(
     }
 }
 
-fn validate_audio(data: &[u8]) -> Result<String> {
-    if data.len() >= 4 && &data[0..4] == b"WAIL" {
-        let decoded = AudioWire::decode(data)?;
-        if decoded.opus_data.is_empty() {
-            bail!("opus_data is empty");
-        }
-
-        let mut decoder = AudioDecoder::new(decoded.sample_rate, decoded.channels)?;
-        let pcm = decoder.decode_interval(&decoded.opus_data)?;
-        let rms = rms(&pcm);
-
-        if rms < 0.001 {
-            bail!("decoded audio is silent (RMS={rms:.6})");
-        }
-
-        Ok(format!(
-            "WAIL interval: {} bytes, {}/{} frames, RMS={rms:.4}, idx={}",
-            data.len(),
-            decoded.num_frames,
-            decoded.channels,
-            decoded.index,
-        ))
-    } else if data.len() >= 4 && &data[0..4] == b"WAIF" {
-        let frame = wail_audio::AudioFrameWire::decode(data)?;
-        Ok(format!(
-            "WAIF frame: {} bytes, frame #{}, interval {}, final={}",
-            data.len(),
-            frame.frame_number,
-            frame.interval_index,
-            frame.is_final,
-        ))
-    } else {
-        bail!(
-            "unknown wire format: magic={:?}",
-            &data[..data.len().min(4)]
-        );
+/// Validate audio and return a detail string, failing on silence.
+fn validate_audio_str(data: &[u8]) -> Result<String> {
+    let v = validate_audio(data)?;
+    if v.rms < 0.001 && v.format == "WAIL" {
+        bail!("decoded audio is silent (RMS={:.6})", v.rms);
     }
-}
-
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    (sum / samples.len() as f64).sqrt() as f32
+    Ok(v.detail)
 }
 
 async fn handle_sync_passthrough(mesh: &PeerMesh, from: &str, msg: &SyncMessage) {
