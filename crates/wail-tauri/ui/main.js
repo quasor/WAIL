@@ -525,7 +525,7 @@ async function setupListeners() {
         const status = sl.status || 'connecting';
         const statusClass = `peer-status status-${status}`;
         return `<div class="peer-item">
-          <span class="peer-name"><span class="peer-slot">Slot ${sl.slot}</span>${name}</span>
+          <span class="peer-slot">Slot ${sl.slot}</span><span class="peer-name">${name}</span>
           <span class="${statusClass}">${escapeHtml(status)}</span>
           <span class="peer-rtt">${rtt}</span>
         </div>`;

@@ -426,7 +426,6 @@ summary {
 }
 
 .peer-slot {
-  margin-left: 6px;
   font-size: 10px;
   color: var(--fg-dim);
   font-weight: 400;
