@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.2 (2026-03-08)
+
+### Fixes
+
+- remove link_peers audio guard, fix peer timeout spam, track intervals_sent (#148)
+- Fix audio frames silently dropped when Ableton Link has no LAN peers, fix timed-out peers reappearing in logs every 30 seconds, and fix `intervals_sent` always showing 0 in status logs.
+
 ## 1.9.1 (2026-03-07)
 
 ### Fixes
