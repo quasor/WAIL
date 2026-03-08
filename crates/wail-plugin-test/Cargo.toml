@@ -8,6 +8,10 @@ publish = false
 [dependencies]
 clack-host = { git = "https://github.com/prokopyl/clack.git" }
 wail-audio = { path = "../wail-audio" }
+wail-net = { path = "../wail-net" }
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -19,3 +23,7 @@ path = "tests/send_plugin.rs"
 [[test]]
 name = "recv_plugin"
 path = "tests/recv_plugin.rs"
+
+[[test]]
+name = "send_recv_webrtc_e2e"
+path = "tests/send_recv_webrtc_e2e.rs"
