@@ -202,6 +202,9 @@ async fn session_loop(
     let mut logged_first_frame_sent = false;
     let mut logged_first_frame_recv: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Track last-logged AudioStatus per peer to avoid flooding the UI
+    let mut peer_audio_status: std::collections::HashMap<String, (bool, bool)> = std::collections::HashMap::new();
+
     // Test mode: track interval boundary timing
     let mut last_boundary_time: Option<Instant> = None;
 
@@ -480,6 +483,7 @@ async fn session_loop(
                     Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
                         ui_info!(&app, "Peer {name} left");
+                        peer_audio_status.remove(pid.as_str());
                         remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
@@ -502,6 +506,7 @@ async fn session_loop(
 
                         if attempt > MAX_PEER_RECONNECT_ATTEMPTS {
                             ui_error!(&app, "Peer {name} reconnection failed after {MAX_PEER_RECONNECT_ATTEMPTS} attempts — giving up");
+                            peer_audio_status.remove(pid.as_str());
                             remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
@@ -697,6 +702,7 @@ async fn session_loop(
 
                             if let Some(ref old) = old_pid {
                                 ui_info!(&app, "Peer {name_display} reconnected with new peer_id (old={old}, new={pid}) — evicting stale entry");
+                                peer_audio_status.remove(old);
                                 remove_peer_fully(&mut peers, &mut ipc_pool, old).await;
                                 mesh.remove_peer(old).await;
                                 let _ = app.emit("peer:left", PeerLeftEvent { peer_id: old.clone() });
@@ -831,7 +837,12 @@ async fn session_loop(
 
                     SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected } => {
                         let name = peers.get(&from).and_then(|p| p.display_name.as_deref()).unwrap_or(&from);
-                        ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                        debug!("[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                        let cur = (audio_dc_open, plugin_connected);
+                        if peer_audio_status.get(from.as_str()).copied() != Some(cur) {
+                            peer_audio_status.insert(from.clone(), cur);
+                            ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                        }
                     }
                 }
             }
@@ -1004,6 +1015,7 @@ async fn session_loop(
                 for dead_id in dead_peers {
                     let name = peers.get(&dead_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&dead_id).to_string();
                     ui_warn!(&app, "Peer {name} timed out (no messages for {PEER_LIVENESS_TIMEOUT:?})");
+                    peer_audio_status.remove(dead_id.as_str());
                     remove_peer_fully(&mut peers, &mut ipc_pool, &dead_id).await;
                     mesh.remove_peer(&dead_id).await;
                     let _ = app.emit("peer:left", PeerLeftEvent { peer_id: dead_id });
