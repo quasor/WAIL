@@ -580,11 +580,11 @@ Function .onInit
     !insertmacro MULTIUSER_INIT
   !endif
 
-  ; Initialize WAIL plugin installation defaults (both checked, dirs resolved lazily in page)
+  ; Initialize WAIL plugin installation defaults (both checked, default system dirs)
   StrCpy $InstallVST3 ${BST_CHECKED}
   StrCpy $InstallCLAP ${BST_CHECKED}
-  StrCpy $VST3Dir ""
-  StrCpy $CLAPDir ""
+  StrCpy $VST3Dir "$COMMONPROGRAMFILES\VST3"
+  StrCpy $CLAPDir "$COMMONPROGRAMFILES\CLAP"
 FunctionEnd
 
 
@@ -979,8 +979,8 @@ Section Uninstall
   ReadRegDWORD $0 HKLM "Software\WAIL\PluginPaths" "InstalledCLAP"
   ${If} $0 = 1
     ReadRegStr $1 HKLM "Software\WAIL\PluginPaths" "CLAPDir"
-    RMDir /r "$1\wail-plugin-send.clap"
-    RMDir /r "$1\wail-plugin-recv.clap"
+    Delete "$1\wail-plugin-send.clap"
+    Delete "$1\wail-plugin-recv.clap"
   ${EndIf}
 
   ; Clean up plugin registry keys
