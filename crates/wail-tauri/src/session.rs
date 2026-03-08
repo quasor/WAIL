@@ -428,6 +428,15 @@ async fn session_loop(
                         let config_msg = SyncMessage::IntervalConfig { bars, quantum };
                         mesh.broadcast(&config_msg).await;
 
+                        // Immediately sync the new peer to our current interval so their
+                        // audio-send guard clears without waiting up to one full interval
+                        // (~8s at 120 BPM, 4 bars). Without this, the joining peer's
+                        // interval tracker starts at Some(0) and all outbound audio is
+                        // dropped until the next natural boundary fires.
+                        if let Some(idx) = interval.current_index() {
+                            mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
+                        }
+
                         let caps = SyncMessage::AudioCapabilities {
                             sample_rates: vec![48000],
                             channel_counts: vec![1, 2],
@@ -637,6 +646,7 @@ async fn session_loop(
             Some((from, msg)) = sync_rx.recv() => {
                 if let Some(peer) = peers.get_mut(&from) {
                     peer.last_seen = Instant::now();
+                    peer.ever_received_message = true;
                 }
                 match msg {
                     SyncMessage::Hello { peer_id: pid, display_name: name, identity: remote_identity } => {
@@ -806,6 +816,7 @@ async fn session_loop(
             Some((from, data)) = audio_rx.recv() => {
                 if let Some(peer) = peers.get_mut(&from) {
                     peer.last_seen = Instant::now();
+                    peer.ever_received_message = true;
                     peer.audio_recv_count += 1;
                 }
                 audio_intervals_received += 1;
@@ -876,6 +887,7 @@ async fn session_loop(
 
             // --- Peer liveness watchdog ---
             _ = liveness_interval.tick() => {
+                // Previously-connected peers that went silent.
                 let dead_peers = peers.timed_out_peers(PEER_LIVENESS_TIMEOUT);
                 for dead_id in dead_peers {
                     let name = peers.get(&dead_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&dead_id).to_string();
@@ -883,6 +895,18 @@ async fn session_loop(
                     remove_peer_fully(&mut peers, &mut ipc_pool, &dead_id).await;
                     mesh.remove_peer(&dead_id).await;
                     let _ = app.emit("peer:left", PeerLeftEvent { peer_id: dead_id });
+                }
+                // Safety net: peers whose ICE never connected and are stuck beyond 2× the normal
+                // timeout. The PeerFailed path handles the common case (~30s ICE timeout); this
+                // catches the rare case where WebRTC never fires a Failed state at all.
+                const PRE_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+                let stale_peers = peers.stale_preconnect_peers(PRE_CONNECT_TIMEOUT);
+                for stale_id in stale_peers {
+                    let name = peers.get(&stale_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&stale_id).to_string();
+                    ui_warn!(&app, "Peer {name} never connected — removing after {PRE_CONNECT_TIMEOUT:?}");
+                    remove_peer_fully(&mut peers, &mut ipc_pool, &stale_id).await;
+                    mesh.remove_peer(&stale_id).await;
+                    let _ = app.emit("peer:left", PeerLeftEvent { peer_id: stale_id });
                 }
             }
 

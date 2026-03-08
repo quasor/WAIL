@@ -13,6 +13,10 @@ pub struct PeerState {
     pub slots: HashMap<u16, usize>,
     pub hello_sent: bool,
     pub last_seen: Instant,
+    /// True once any sync or audio message has been received from this peer.
+    /// The liveness watchdog only fires for peers where this is true — pre-connect
+    /// peers (ICE still negotiating) are handled by the PeerFailed reconnection path.
+    pub ever_received_message: bool,
     pub reconnect_attempts: u32,
     /// True while a reconnect timer is scheduled — prevents duplicate PeerFailed events
     /// from spawning multiple concurrent timers and inflating the attempt counter.
@@ -30,6 +34,7 @@ impl PeerState {
             slots: HashMap::new(),
             hello_sent: false,
             last_seen: Instant::now(),
+            ever_received_message: false,
             reconnect_attempts: 0,
             reconnect_pending: false,
             audio_recv_count: 0,
@@ -126,12 +131,25 @@ impl PeerRegistry {
         }
     }
 
-    /// Return peer IDs whose last_seen is older than `timeout`.
+    /// Return peer IDs that have previously communicated and whose last_seen is older than `timeout`.
+    /// Peers that have never sent a message (ICE still negotiating) are excluded — they are
+    /// handled by the PeerFailed reconnection path or by `stale_preconnect_peers`.
     pub fn timed_out_peers(&self, timeout: Duration) -> Vec<String> {
         let now = Instant::now();
         self.peers
             .iter()
-            .filter(|(_, p)| now.duration_since(p.last_seen) > timeout)
+            .filter(|(_, p)| p.ever_received_message && now.duration_since(p.last_seen) > timeout)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Return peer IDs that have never sent any message and whose last_seen is older than `timeout`.
+    /// Safety net for peers whose ICE hangs indefinitely without firing a Failed state.
+    pub fn stale_preconnect_peers(&self, timeout: Duration) -> Vec<String> {
+        let now = Instant::now();
+        self.peers
+            .iter()
+            .filter(|(_, p)| !p.ever_received_message && now.duration_since(p.last_seen) > timeout)
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -321,12 +339,43 @@ mod tests {
         // Backdate last_seen to 60 seconds ago
         reg.get_mut("peer1").unwrap().last_seen =
             Instant::now() - Duration::from_secs(60);
+        reg.get_mut("peer1").unwrap().ever_received_message = true;
 
         reg.add("peer2".to_string(), None); // fresh
 
         let timed_out = reg.timed_out_peers(Duration::from_secs(30));
         assert!(timed_out.contains(&"peer1".to_string()));
         assert!(!timed_out.contains(&"peer2".to_string()));
+    }
+
+    #[test]
+    fn timed_out_skips_never_connected_peers() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), None);
+        // Simulate 31s of ICE "checking" with no messages received
+        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(31);
+        // ever_received_message is false (default) — watchdog must not fire
+        assert!(reg.timed_out_peers(Duration::from_secs(30)).is_empty());
+    }
+
+    #[test]
+    fn stale_preconnect_detects_stuck_peers() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), None);
+        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(61);
+        // Must appear in stale_preconnect_peers (never connected, 61s old)
+        assert!(reg.stale_preconnect_peers(Duration::from_secs(60)).contains(&"peer1".to_string()));
+        // Must NOT appear in timed_out_peers (has never received a message)
+        assert!(reg.timed_out_peers(Duration::from_secs(30)).is_empty());
+    }
+
+    #[test]
+    fn timed_out_fires_for_connected_then_silent_peer() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), None);
+        reg.get_mut("peer1").unwrap().ever_received_message = true;
+        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(31);
+        assert!(reg.timed_out_peers(Duration::from_secs(30)).contains(&"peer1".to_string()));
     }
 
     #[test]

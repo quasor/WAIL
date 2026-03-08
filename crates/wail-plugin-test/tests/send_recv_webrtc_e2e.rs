@@ -446,3 +446,219 @@ fn send_and_recv_plugin_webrtc_e2e() {
     send_host.leak();
     recv_host.leak();
 }
+
+// ---------------------------------------------------------------------------
+// Late-join bidirectional test
+// ---------------------------------------------------------------------------
+
+/// Verify that a late-joining peer can exchange audio bidirectionally.
+///
+/// Timeline:
+///   t=0      — peer-a joins, send-a + recv-a plugins active
+///   t≈0..15s — peer-a sends ~200 callbacks of audio (≥2 full intervals)
+///   t≈15s    — peer-b joins the room, WebRTC establishes (~8s)
+///   t≈23s    — send-b + recv-b plugins active, both sides driving audio
+///   t≈23..83s — 750 callbacks driven; both recv plugins must produce non-silent output
+///
+/// This specifically guards against the interval-guard regression where a joining
+/// peer's audio-send was silently blocked for up to one full interval (~8s) until
+/// the next natural IntervalBoundary fired.  The fix broadcasts the current
+/// interval index to the new peer on PeerJoined so the guard clears immediately.
+#[test]
+fn late_join_bidirectional_e2e() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    // 1. Load four .clap binaries (send-a, recv-a, send-b, recv-b)
+    let mut send_a_host = load_send();
+    let mut recv_a_host = load_recv();
+    let mut send_b_host = load_send();
+    let mut recv_b_host = load_recv();
+
+    // Each peer's mini_app gets its own IPC port; both send and recv plugins
+    // for that peer connect to the same port.
+    let port_a = common::random_port();
+    let port_b = common::random_port();
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    // 2. Start signaling server and peer-a's mini_app.  peer-b joins later.
+    let signaling_url = rt.block_on(async {
+        let url = common::start_test_signaling_server().await;
+        tokio::spawn(common::mini_app_session(
+            port_a,
+            url.clone(),
+            "late-join-room".into(),
+            "peer-a".into(),
+            "test".into(),
+        ));
+        // Give peer-a time to connect to the signaling server before we start driving audio.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        url
+    });
+
+    // 3. Activate peer-a's send + recv plugins (both connect to port_a).
+    let buf_size: u32 = 4096;
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{port_a}")) };
+    let send_a_stopped = send_a_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate send-a");
+    let mut send_a_proc = send_a_stopped
+        .start_processing()
+        .expect("Failed to start send-a processing");
+    std::thread::sleep(Duration::from_millis(200));
+
+    let recv_a_stopped = recv_a_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate recv-a");
+    let mut recv_a_proc = recv_a_stopped
+        .start_processing()
+        .expect("Failed to start recv-a processing");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 4. Drive peer-a alone for ~200 callbacks (≈17s of audio, ≥2 full intervals at 120 BPM).
+    //    This simulates peer-a jamming alone for ~15s before peer-b arrives.
+    //    recv-a produces silence here — no remote peer has connected yet.
+    //
+    //    samples_per_interval = 4 bars × 4 quantum × 60 / 120 BPM × 48000 = 384,000
+    //    callbacks_per_interval ≈ 384,000 / 4096 ≈ 94
+    //    200 callbacks ≈ 2.1 intervals → peer-a will be at interval index 2 when peer-b joins
+    let a_only_callbacks: u64 = 200;
+    for i in 0..a_only_callbacks {
+        let steady_time = i * buf_size as u64;
+        drive_send(&mut send_a_proc, buf_size, steady_time, FREQ_EVEN);
+        drive_recv(&mut recv_a_proc, buf_size, steady_time); // silent — no remote peer yet
+    }
+
+    // 5. peer-b joins the room; wait ~8s for WebRTC DataChannels to establish.
+    rt.block_on(async {
+        tokio::spawn(common::mini_app_session(
+            port_b,
+            signaling_url,
+            "late-join-room".into(),
+            "peer-b".into(),
+            "test".into(),
+        ));
+        tokio::time::sleep(Duration::from_secs(8)).await;
+    });
+
+    // 6. Activate peer-b's send + recv plugins (both connect to port_b).
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{port_b}")) };
+    let send_b_stopped = send_b_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate send-b");
+    let mut send_b_proc = send_b_stopped
+        .start_processing()
+        .expect("Failed to start send-b processing");
+    std::thread::sleep(Duration::from_millis(200));
+
+    let recv_b_stopped = recv_b_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate recv-b");
+    let mut recv_b_proc = recv_b_stopped
+        .start_processing()
+        .expect("Failed to start recv-b processing");
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 7. Drive both peers for 750 callbacks (≈63s of audio) and measure bidirectional receipt.
+    //
+    //    steady_time for peer-a continues from where phase 4 left off (sample-accurate transport).
+    //    steady_time for peer-b starts at 0 (fresh plugin activation).
+    //
+    //    Tag each send interval with alternating frequencies so we can confirm
+    //    the correct audio is flowing in each direction.
+    let both_callbacks: u64 = 750;
+    let mut recv_a_non_silent: u32 = 0; // peer-a receiving audio FROM peer-b
+    let mut recv_b_non_silent: u32 = 0; // peer-b receiving audio FROM peer-a
+    let mut recv_a_first_audio: Option<u64> = None;
+    let mut recv_b_first_audio: Option<u64> = None;
+
+    for i in 0..both_callbacks {
+        let steady_a = (a_only_callbacks + i) * buf_size as u64;
+        let steady_b = i * buf_size as u64;
+
+        let interval_a = steady_a / 384_000;
+        let interval_b = steady_b / 384_000;
+
+        drive_send(&mut send_a_proc, buf_size, steady_a, interval_freq(interval_a));
+        drive_send(&mut send_b_proc, buf_size, steady_b, interval_freq(interval_b));
+
+        let out_a = drive_recv(&mut recv_a_proc, buf_size, steady_a);
+        let out_b = drive_recv(&mut recv_b_proc, buf_size, steady_b);
+
+        if rms(&out_a) > 0.001 {
+            recv_a_non_silent += 1;
+            recv_a_first_audio.get_or_insert(i);
+        }
+        if rms(&out_b) > 0.001 {
+            recv_b_non_silent += 1;
+            recv_b_first_audio.get_or_insert(i);
+        }
+    }
+
+    eprintln!(
+        "[test] late-join: recv_a={recv_a_non_silent}/{both_callbacks} (first at cb {:?}), \
+         recv_b={recv_b_non_silent}/{both_callbacks} (first at cb {:?})",
+        recv_a_first_audio, recv_b_first_audio,
+    );
+
+    // 8. Both sides must have received substantial audio.
+    //    Pipeline warmup ≈ 2 intervals = 188 callbacks; from 750 callbacks: ≥ 560 expected.
+    //    Use 400 as conservative threshold.
+    assert!(
+        recv_a_non_silent >= 400,
+        "peer-a (early joiner) should receive audio from peer-b (late joiner): \
+         got {recv_a_non_silent}/{both_callbacks} non-silent buffers"
+    );
+    assert!(
+        recv_b_non_silent >= 400,
+        "peer-b (late joiner) should receive audio from peer-a (early joiner): \
+         got {recv_b_non_silent}/{both_callbacks} non-silent buffers"
+    );
+
+    // Audio must begin flowing within 3 intervals (≈ 282 callbacks) of the
+    // bidirectional phase starting.  This guards against the interval-guard
+    // regression where audio was silently dropped for up to ~8s after joining.
+    const MAX_WARMUP_CALLBACKS: u64 = 282;
+    if let Some(first) = recv_a_first_audio {
+        assert!(
+            first <= MAX_WARMUP_CALLBACKS,
+            "peer-a waited too long to receive from peer-b: \
+             first audio at callback {first}, expected within {MAX_WARMUP_CALLBACKS}"
+        );
+    } else {
+        panic!("peer-a never received any audio from peer-b");
+    }
+    if let Some(first) = recv_b_first_audio {
+        assert!(
+            first <= MAX_WARMUP_CALLBACKS,
+            "peer-b waited too long to receive from peer-a: \
+             first audio at callback {first}, expected within {MAX_WARMUP_CALLBACKS}"
+        );
+    } else {
+        panic!("peer-b never received any audio from peer-a");
+    }
+
+    eprintln!(
+        "[test] PASSED — late-join bidirectional: recv_a={recv_a_non_silent}, \
+         recv_b={recv_b_non_silent}, both within {MAX_WARMUP_CALLBACKS}-callback warmup window."
+    );
+
+    // 9. Stop and deactivate (stop_processing must precede deactivate)
+    let send_a_stopped = send_a_proc.stop_processing();
+    send_a_host.deactivate(send_a_stopped);
+    let recv_a_stopped = recv_a_proc.stop_processing();
+    recv_a_host.deactivate(recv_a_stopped);
+    let send_b_stopped = send_b_proc.stop_processing();
+    send_b_host.deactivate(send_b_stopped);
+    let recv_b_stopped = recv_b_proc.stop_processing();
+    recv_b_host.deactivate(recv_b_stopped);
+
+    // 10. Leak all hosts to prevent dylib unload while IPC threads are still running.
+    send_a_host.leak();
+    recv_a_host.leak();
+    send_b_host.leak();
+    recv_b_host.leak();
+}
