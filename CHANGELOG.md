@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.14.5 (2026-03-09)
+
+### Fixes
+
+- add libx11-xcb-dev to Linux CI system dependencies (#186)
+- remove incompatible --delete-branch flag from merge queue workflow (#187)
+- Windows VST3 plugin discovery and installer setup failures (#183)
+- Fix Windows plugin installation: NSIS installer now correctly bundles and copies both VST3 and CLAP plugins, and opus.dll is placed alongside plugin binaries so DAW hosts can load them.
+
 ## 1.14.4 (2026-03-09)
 
 ### Fixes
