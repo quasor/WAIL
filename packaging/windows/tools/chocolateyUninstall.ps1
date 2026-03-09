@@ -30,7 +30,7 @@ Remove-Item "$startMenu\WAIL.lnk" -Force -ErrorAction SilentlyContinue
 
 # --- Remove application directory ---
 if (Test-Path $installDir) {
-    Remove-Item $installDir -Recurse -Force
+    Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Remove Add/Remove Programs registry entry ---
