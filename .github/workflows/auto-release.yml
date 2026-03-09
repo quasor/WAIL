@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,3 +90,42 @@ jobs:
               --title "chore: prepare release v${VERSION}" \
               --body "$BODY"
           fi
+
+      - name: Merge release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR=$(gh pr list --head release --base main --json number --jq '.[0].number')
+          if [ -z "$PR" ]; then
+            echo "::error::No release PR found"
+            exit 1
+          fi
+          sleep 5
+          gh pr merge "$PR" --merge --delete-branch
+
+      # GITHUB_TOKEN merges don't trigger other workflows, so we run the
+      # release steps inline instead of relying on release-on-merge.yml.
+      - name: Checkout merged main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: knope release
+
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          TAG="v${VERSION}"
+          echo "Triggering release build for ${TAG}"
+          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
+
+      - name: Delete release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/${{ github.repository }}/git/refs/heads/release -X DELETE || true
