@@ -24,6 +24,13 @@ pub struct PeerState {
     pub audio_recv_count: u64,
     pub audio_recv_prev: u64,
     pub prev_status: String,
+    /// Timestamp of the most recent connection attempt for this peer. Used by the
+    /// Hello-completion watchdog to detect peers that are active (receiving audio)
+    /// but whose Hello handshake never finished. Reset on each reconnect attempt.
+    pub added_at: Instant,
+    /// True after the Hello-completion watchdog has already sent a soft retry for
+    /// this connection attempt. Prevents duplicate Hello re-sends on every tick.
+    pub hello_retry_sent: bool,
 }
 
 impl PeerState {
@@ -40,6 +47,8 @@ impl PeerState {
             audio_recv_count: 0,
             audio_recv_prev: 0,
             prev_status: String::new(),
+            added_at: Instant::now(),
+            hello_retry_sent: false,
         }
     }
 }
@@ -199,6 +208,55 @@ impl PeerRegistry {
             .iter()
             .find(|(_, p)| p.identity.as_deref() == Some(identity))
             .map(|(id, _)| id.clone())
+    }
+
+    /// Reset the added_at clock for a peer, e.g. after a successful reconnect
+    /// attempt so the Hello-completion watchdog gets a fresh window.
+    pub fn reset_added_at(&mut self, peer_id: &str) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.added_at = Instant::now();
+            peer.hello_retry_sent = false;
+        }
+    }
+
+    /// Return peer IDs that are active (have received messages) but whose Hello
+    /// handshake has not completed (identity still unknown).
+    ///
+    /// Split into two buckets:
+    /// - `soft`: elapsed since `added_at` is between `soft_timeout` and `hard_timeout` →
+    ///   re-send Hello to prompt the remote to reply
+    /// - `hard`: elapsed since `added_at` >= `hard_timeout` → force reconnect
+    ///
+    /// Peers with `reconnect_pending = true` are excluded from both buckets to
+    /// avoid interfering with an in-progress reconnect timer.
+    pub fn no_identity_active_peers(
+        &self,
+        soft_timeout: Duration,
+        hard_timeout: Duration,
+    ) -> (Vec<String>, Vec<String>) {
+        let now = Instant::now();
+        let mut soft = Vec::new();
+        let mut hard = Vec::new();
+        for (id, p) in &self.peers {
+            if !p.ever_received_message || p.identity.is_some() || p.reconnect_pending {
+                continue;
+            }
+            let elapsed = now.duration_since(p.added_at);
+            if elapsed >= hard_timeout {
+                hard.push(id.clone());
+            } else if elapsed >= soft_timeout && !p.hello_retry_sent {
+                soft.push(id.clone());
+            }
+        }
+        (soft, hard)
+    }
+
+    /// Mark that the Hello-completion watchdog has already sent a soft retry
+    /// for this peer, so it won't fire again on subsequent ticks.
+    pub fn mark_hello_retry_sent(&mut self, peer_id: &str) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.hello_retry_sent = true;
+        }
     }
 
     /// Derive a display status string for a peer.
@@ -430,6 +488,96 @@ mod tests {
 
         // find_by_identity should now resolve the peer
         assert_eq!(reg.find_by_identity("uuid-alice"), Some("peer1".to_string()));
+    }
+
+    #[test]
+    fn no_identity_active_peers_soft_bucket() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Alice".to_string()));
+        let peer = reg.get_mut("peer1").unwrap();
+        peer.ever_received_message = true;
+        // identity remains None
+        peer.added_at = Instant::now() - Duration::from_secs(6);
+
+        let (soft, hard) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.contains(&"peer1".to_string()), "should be in soft bucket at 6s");
+        assert!(hard.is_empty());
+
+        // After marking retry sent, peer should no longer appear in soft bucket
+        reg.mark_hello_retry_sent("peer1");
+        let (soft, _) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.is_empty(), "should not repeat soft retry after mark");
+    }
+
+    #[test]
+    fn no_identity_active_peers_hard_bucket() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Alice".to_string()));
+        let peer = reg.get_mut("peer1").unwrap();
+        peer.ever_received_message = true;
+        peer.added_at = Instant::now() - Duration::from_secs(16);
+
+        let (soft, hard) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.is_empty(), "should not be in soft bucket at 16s");
+        assert!(hard.contains(&"peer1".to_string()), "should be in hard bucket at 16s");
+    }
+
+    #[test]
+    fn no_identity_active_peers_excludes_reconnecting() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Alice".to_string()));
+        let peer = reg.get_mut("peer1").unwrap();
+        peer.ever_received_message = true;
+        peer.added_at = Instant::now() - Duration::from_secs(20);
+        peer.reconnect_pending = true;
+
+        let (soft, hard) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.is_empty(), "reconnecting peer must be excluded from soft");
+        assert!(hard.is_empty(), "reconnecting peer must be excluded from hard");
+    }
+
+    #[test]
+    fn no_identity_active_peers_excludes_identified() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Alice".to_string()));
+        let peer = reg.get_mut("peer1").unwrap();
+        peer.ever_received_message = true;
+        peer.identity = Some("alice-uuid".to_string());
+        peer.added_at = Instant::now() - Duration::from_secs(20);
+
+        let (soft, hard) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.is_empty(), "identified peer must be excluded");
+        assert!(hard.is_empty(), "identified peer must be excluded");
+    }
+
+    #[test]
+    fn reset_added_at_refreshes_clock() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), None);
+        let peer = reg.get_mut("peer1").unwrap();
+        peer.added_at = Instant::now() - Duration::from_secs(20);
+
+        reg.reset_added_at("peer1");
+
+        assert!(
+            reg.get("peer1").unwrap().added_at.elapsed() < Duration::from_secs(1),
+            "added_at should be reset to now"
+        );
     }
 
     #[test]

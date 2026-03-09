@@ -581,6 +581,9 @@ async fn session_loop(
                                 peer.last_seen = Instant::now();
                                 peer.hello_sent = false;
                             }
+                            // Reset the Hello-completion clock so the watchdog gives
+                            // this reconnect attempt a fresh window before triggering again.
+                            peers.reset_added_at(&pid);
                             let hello = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
                                 display_name: Some(display_name.clone()),
@@ -1038,6 +1041,31 @@ async fn session_loop(
                     let name = peers.get(&stale_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&stale_id).to_string();
                     ui_warn!(&app, "Peer {name} stuck in pre-connect — forcing reconnection after {PRE_CONNECT_TIMEOUT:?}");
                     mesh.close_peer(&stale_id).await;
+                }
+                // Active peers (audio flowing) whose Hello handshake hasn't completed —
+                // identity unknown means no slot is assigned and the session tab stays empty.
+                // Two-tier response: re-send Hello first (soft), then force reconnect (hard).
+                const HELLO_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+                const HELLO_RECONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+                let (hello_retry_peers, hello_reconnect_peers) =
+                    peers.no_identity_active_peers(HELLO_RETRY_TIMEOUT, HELLO_RECONNECT_TIMEOUT);
+                let hello_msg = SyncMessage::Hello {
+                    peer_id: peer_id.clone(),
+                    display_name: Some(display_name.clone()),
+                    identity: Some(identity.clone()),
+                };
+                for pid in hello_retry_peers {
+                    let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
+                    ui_warn!(&app, "Peer {name} active but Hello not received after {HELLO_RETRY_TIMEOUT:?} — re-sending Hello");
+                    if let Err(e) = mesh.send_to(&pid, &hello_msg).await {
+                        debug!(peer = %pid, error = %e, "Hello retry send failed");
+                    }
+                    peers.mark_hello_retry_sent(&pid);
+                }
+                for pid in hello_reconnect_peers {
+                    let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
+                    ui_warn!(&app, "Peer {name} active but no identity after {HELLO_RECONNECT_TIMEOUT:?} — forcing reconnect");
+                    mesh.close_peer(&pid).await;
                 }
             }
 
