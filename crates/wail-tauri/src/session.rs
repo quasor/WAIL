@@ -1056,6 +1056,7 @@ async fn session_loop(
                     if let Err(e) = mesh.send_to(&pid, &hello_msg).await {
                         debug!(peer = %pid, error = %e, "Hello retry send failed");
                     }
+                    peers.mark_hello_retry_sent(&pid);
                 }
                 for pid in hello_reconnect_peers {
                     let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();

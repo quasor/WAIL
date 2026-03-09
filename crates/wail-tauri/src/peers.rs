@@ -28,6 +28,9 @@ pub struct PeerState {
     /// Hello-completion watchdog to detect peers that are active (receiving audio)
     /// but whose Hello handshake never finished. Reset on each reconnect attempt.
     pub added_at: Instant,
+    /// True after the Hello-completion watchdog has already sent a soft retry for
+    /// this connection attempt. Prevents duplicate Hello re-sends on every tick.
+    pub hello_retry_sent: bool,
 }
 
 impl PeerState {
@@ -45,6 +48,7 @@ impl PeerState {
             audio_recv_prev: 0,
             prev_status: String::new(),
             added_at: Instant::now(),
+            hello_retry_sent: false,
         }
     }
 }
@@ -211,6 +215,7 @@ impl PeerRegistry {
     pub fn reset_added_at(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.added_at = Instant::now();
+            peer.hello_retry_sent = false;
         }
     }
 
@@ -239,11 +244,19 @@ impl PeerRegistry {
             let elapsed = now.duration_since(p.added_at);
             if elapsed >= hard_timeout {
                 hard.push(id.clone());
-            } else if elapsed >= soft_timeout {
+            } else if elapsed >= soft_timeout && !p.hello_retry_sent {
                 soft.push(id.clone());
             }
         }
         (soft, hard)
+    }
+
+    /// Mark that the Hello-completion watchdog has already sent a soft retry
+    /// for this peer, so it won't fire again on subsequent ticks.
+    pub fn mark_hello_retry_sent(&mut self, peer_id: &str) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.hello_retry_sent = true;
+        }
     }
 
     /// Derive a display status string for a peer.
@@ -492,6 +505,14 @@ mod tests {
         );
         assert!(soft.contains(&"peer1".to_string()), "should be in soft bucket at 6s");
         assert!(hard.is_empty());
+
+        // After marking retry sent, peer should no longer appear in soft bucket
+        reg.mark_hello_retry_sent("peer1");
+        let (soft, _) = reg.no_identity_active_peers(
+            Duration::from_secs(5),
+            Duration::from_secs(15),
+        );
+        assert!(soft.is_empty(), "should not repeat soft retry after mark");
     }
 
     #[test]
