@@ -21,7 +21,6 @@
     "active": true,
     "targets": [
       "dmg",
-      "nsis",
       "appimage",
       "deb"
     ],
@@ -39,12 +38,6 @@
       "../../target/bundled/wail-plugin-recv.clap": "plugins/wail-plugin-recv.clap",
       "../../target/bundled/wail-plugin-recv.vst3": "plugins/wail-plugin-recv.vst3",
       "../../target/bundled/opus.dll": "plugins/opus.dll"
-    },
-    "windows": {
-      "nsis": {
-        "template": "nsis/installer.nsi",
-        "installMode": "perMachine"
-      }
     }
   }
 }

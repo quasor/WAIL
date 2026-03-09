@@ -1,0 +1,15 @@
+VERIFICATION
+============
+
+The binaries in this package are built from source as part of the
+WAIL project's GitHub Actions CI pipeline.
+
+Project: https://github.com/MostDistant/WAIL
+License: MIT (see LICENSE.txt)
+
+Binaries are compiled from the tagged release commit and embedded
+directly into this .nupkg. To verify, download the corresponding
+source tarball from the GitHub Release and build with:
+
+  cargo tauri build --bundles none
+  cargo xtask build-plugin

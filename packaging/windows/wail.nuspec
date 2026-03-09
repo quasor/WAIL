@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.chocolatey.org/2010/07/nuspec.xsd">
+  <metadata>
+    <id>wail</id>
+    <version>$version$</version>
+    <title>WAIL - WebRTC Audio Interchange for Link</title>
+    <authors>MostDistant</authors>
+    <projectUrl>https://github.com/MostDistant/WAIL</projectUrl>
+    <licenseUrl>https://github.com/MostDistant/WAIL/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>WAIL synchronizes Ableton Link sessions across the internet using WebRTC. Includes DAW plugins (CLAP and VST3) for intervalic audio streaming.</description>
+    <tags>ableton link webrtc audio music daw vst3 clap ninjam</tags>
+    <dependencies>
+      <dependency id="webview2-runtime" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

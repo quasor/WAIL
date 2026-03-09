@@ -23,7 +23,7 @@ wail-install-plugins
 
 Then rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
 
-**Windows** — Run the `.exe` installer. The setup wizard includes a plugin options page where you can choose to install the WAIL Send and Recv VST3 and CLAP plugins, with customizable install paths (defaulting to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling WAIL via Windows Settings > Add & Remove Programs also removes the plugins.
+**Windows** — Install via Chocolatey: `choco install wail --source <release-url>`. Use `--params "'/VST3Dir:path /CLAPDir:path'"` for custom plugin directories (defaults to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling via `choco uninstall wail` also removes the plugins.
 
 **Linux** — Install the `.deb` package (`sudo dpkg -i wail_*.deb`) or download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`). The WAIL Send and Recv plugins are automatically installed to `~/.clap/` and `~/.vst3/` on first launch.
 

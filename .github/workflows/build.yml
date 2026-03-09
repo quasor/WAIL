@@ -129,8 +129,6 @@ jobs:
           Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
           Copy-Item target\bundled\wail-plugin-recv.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
-          if (Test-Path target\release\bundle\nsis) { Copy-Item -Recurse target\release\bundle\nsis dist\nsis }
-          if (Test-Path target\release\bundle\msi) { Copy-Item -Recurse target\release\bundle\msi dist\msi }
 
       - uses: actions/upload-artifact@v4
         with:
