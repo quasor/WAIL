@@ -304,7 +304,11 @@ async fn session_loop(
 
             // --- Outgoing peer log broadcast ---
             Ok(entry) = log_rx.recv(), if ws_log_handle.is_enabled() && signaling_reconnect.is_none() => {
-                mesh.send_log(&entry.level, &entry.target, &entry.message, entry.timestamp_us);
+                // Only broadcast wail-crate logs to peers; third-party warnings
+                // (tao, webrtc, tokio) are local concerns.
+                if entry.target.starts_with("wail") {
+                    mesh.send_log(&entry.level, &entry.target, &entry.message, entry.timestamp_us);
+                }
             }
 
             // --- Accept plugin IPC connection ---
