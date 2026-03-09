@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.14.4 (2026-03-09)
+
+### Fixes
+
+- add libx11-xcb-dev to Linux CI system dependencies (#186)
+- remove incompatible --delete-branch flag from merge queue workflow (#187)
+- Automatically merge the release PR so every push to main flows straight through to a release without manual intervention.
+
 ## 1.14.3 (2026-03-09)
 
 ### Fixes
