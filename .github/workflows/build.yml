@@ -200,7 +200,8 @@ jobs:
             patchelf \
             libopus-dev \
             cmake \
-            g++
+            g++ \
+            libx11-xcb-dev
 
       - name: Install cargo-binstall
         run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
