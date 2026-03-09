@@ -12,7 +12,7 @@ const joinBtn = document.getElementById('join-btn');
 const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
-const setBpmBtn = document.getElementById('set-bpm-btn');
+const sessionBpmInput = document.getElementById('session-bpm');
 const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
@@ -442,14 +442,16 @@ invoke('get_default_recording_dir').then(dir => {
 }).catch(() => {});
 
 // --- Settings Panel ---
-settingsBtn.addEventListener('click', () => {
-  // Populate settings panel with current values
+function openSettings() {
   settingsDisplayNameInput.value = getDisplayName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
   settingsLogSharingCheckbox.checked = getLogSharingEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
   settingsPanel.style.display = 'flex';
-});
+}
+
+settingsBtn.addEventListener('click', openSettings);
+document.getElementById('session-settings-btn').addEventListener('click', openSettings);
 
 settingsCloseBtn.addEventListener('click', () => {
   settingsPanel.style.display = 'none';
@@ -528,10 +530,10 @@ function showSession(room) {
   clearLog();
   document.getElementById('session-room').textContent = room;
   document.getElementById('peer-list').innerHTML = '<span class="empty">No peers connected</span>';
-  document.getElementById('session-audio').textContent = '0 sent / 0 recv';
-  document.getElementById('session-audio-bytes').textContent = '0 B sent / 0 B recv';
+  document.getElementById('session-audio').textContent = '0 / 0';
+  document.getElementById('session-audio-bytes').textContent = '0 B / 0 B';
   document.getElementById('session-plugin').textContent = 'disconnected';
-  document.getElementById('session-plugin').className = '';
+  document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-interval').textContent = '-';
   testToneEnabled = document.getElementById('test-tone').checked;
@@ -542,7 +544,7 @@ function showSession(room) {
 
 function updateTestToneUI() {
   document.getElementById('session-test-tone').textContent = testToneEnabled ? 'ON' : 'OFF';
-  document.getElementById('session-test-tone').className = testToneEnabled ? 'connected' : '';
+  document.getElementById('session-test-tone').className = testToneEnabled ? 'status-value connected' : 'status-value';
   toggleTestToneBtn.textContent = testToneEnabled ? 'Disable' : 'Enable';
 }
 
@@ -600,23 +602,25 @@ disconnectBtn.addEventListener('click', async () => {
   showJoin();
 });
 
-// --- Set BPM ---
-setBpmBtn.addEventListener('click', async () => {
-  const bpm = parseFloat(document.getElementById('session-bpm').value);
+// --- Set BPM (on Enter or blur) ---
+async function applyBpm() {
+  const bpm = parseFloat(sessionBpmInput.value);
   if (isNaN(bpm) || bpm < 20 || bpm > 999) return;
   try {
     await invoke('change_bpm', { bpm });
   } catch (err) {
     console.error('BPM change error:', err);
   }
-});
+}
 
-document.getElementById('session-bpm').addEventListener('keydown', (e) => {
+sessionBpmInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
-    setBpmBtn.click();
+    sessionBpmInput.blur();
   }
 });
+
+sessionBpmInput.addEventListener('change', applyBpm);
 
 // --- Test Tone Toggle ---
 toggleTestToneBtn.addEventListener('click', async () => {
@@ -636,7 +640,7 @@ async function setupListeners() {
 
   unlisten.push(await listen('status:update', (event) => {
     const s = event.payload;
-    const bpmInput = document.getElementById('session-bpm');
+    const bpmInput = sessionBpmInput;
     if (document.activeElement !== bpmInput) {
       bpmInput.value = s.bpm.toFixed(1);
     }
@@ -644,14 +648,14 @@ async function setupListeners() {
     document.getElementById('link-no-peers-warning').style.display =
       (s.link_peers === 0 && s.plugin_connected) ? '' : 'none';
     document.getElementById('session-audio').textContent =
-      `${s.audio_sent} sent / ${s.audio_recv} recv`;
+      `${s.audio_sent} / ${s.audio_recv}`;
     document.getElementById('session-audio-bytes').textContent =
-      `${formatBytes(s.audio_bytes_sent)} sent / ${formatBytes(s.audio_bytes_recv)} recv`;
-    document.getElementById('session-interval').textContent = `${s.interval_bars} bars`;
+      `${formatBytes(s.audio_bytes_sent)} / ${formatBytes(s.audio_bytes_recv)}`;
+    document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
     document.getElementById('session-plugin').textContent =
       s.plugin_connected ? 'connected' : 'disconnected';
     document.getElementById('session-plugin').className =
-      s.plugin_connected ? 'connected' : '';
+      s.plugin_connected ? 'status-value connected' : 'status-value';
 
     // Sync test tone state
     testToneEnabled = s.test_tone_enabled;
@@ -687,7 +691,7 @@ async function setupListeners() {
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
-    document.getElementById('session-bpm').value = event.payload.bpm.toFixed(1);
+    sessionBpmInput.value = event.payload.bpm.toFixed(1);
   }));
 
   unlisten.push(await listen('session:error', (event) => {
@@ -700,12 +704,12 @@ async function setupListeners() {
 
   unlisten.push(await listen('plugin:connected', () => {
     document.getElementById('session-plugin').textContent = 'connected';
-    document.getElementById('session-plugin').className = 'connected';
+    document.getElementById('session-plugin').className = 'status-value connected';
   }));
 
   unlisten.push(await listen('plugin:disconnected', () => {
     document.getElementById('session-plugin').textContent = 'disconnected';
-    document.getElementById('session-plugin').className = '';
+    document.getElementById('session-plugin').className = 'status-value';
   }));
 
   unlisten.push(await listen('log:entry', (event) => {

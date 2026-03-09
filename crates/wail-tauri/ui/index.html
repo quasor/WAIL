@@ -9,6 +9,7 @@
 <body>
   <!-- First Launch Screen -->
   <div id="first-launch-screen">
+    <img src="logo.png" alt="WAIL" class="app-logo">
     <h1>WAIL</h1>
     <p class="subtitle">Wide Area Intervalic Link</p>
     <p class="first-launch-prompt">What's your name?</p>
@@ -22,7 +23,10 @@
   <div id="join-screen" style="display:none">
     <div class="header-row">
       <div>
-        <h1>WAIL</h1>
+        <div class="header-brand">
+          <img src="logo.png" alt="" class="header-logo">
+          <h1>WAIL</h1>
+        </div>
         <p class="subtitle">Wide Area Intervalic Link</p>
       </div>
       <div class="header-controls">
@@ -102,14 +106,14 @@
     </div>
 
     <!-- Settings Panel Overlay -->
-    <div id="settings-panel" class="settings-overlay" style="display:none">
-      <div class="settings-card">
-        <div class="settings-header">
+    <div id="settings-panel" class="modal-overlay" style="display:none">
+      <div class="modal-card">
+        <div class="modal-header">
           <h2>Settings</h2>
-          <button type="button" id="settings-close-btn" class="icon-btn" title="Close">×</button>
+          <button type="button" id="settings-close-btn" class="icon-btn" title="Close">&times;</button>
         </div>
 
-        <form id="settings-form">
+        <form id="settings-form" class="modal-body">
           <label for="settings-display-name">Display Name</label>
           <input type="text" id="settings-display-name" placeholder="Your name" required autocomplete="off">
 
@@ -137,8 +141,12 @@
   <!-- Session View -->
   <div id="session-screen" style="display:none">
     <div class="session-header">
-      <h2>WAIL</h2>
-      <span id="session-room" class="room-badge"></span>
+      <div class="session-header-left">
+        <img src="logo.png" alt="" class="header-logo header-logo-sm">
+        <h2>WAIL</h2>
+        <span id="session-room" class="room-badge"></span>
+      </div>
+      <button type="button" id="session-settings-btn" class="icon-btn" title="Settings">&#9881;</button>
     </div>
 
     <div class="tab-bar">
@@ -148,61 +156,57 @@
 
     <!-- Session tab -->
     <div id="session-tab-session-content">
-      <div class="stat-group">
-        <label>BPM</label>
-        <div class="bpm-row">
-          <input type="number" id="session-bpm" min="20" max="999" step="0.1">
-          <button type="button" id="set-bpm-btn">Set</button>
+      <section class="session-section">
+        <h3 class="section-label">Peers</h3>
+        <div id="peer-list" class="peer-list">
+          <span class="empty">No peers connected</span>
         </div>
-      </div>
-
-      <div class="stat-group">
-        <label>Link Peers (LAN)</label>
-        <span id="session-link-peers">0</span>
-      </div>
+      </section>
 
       <div id="link-no-peers-warning" class="warning" style="display:none">
         Start Ableton Link in your DAW — audio is not being transmitted
       </div>
 
-      <div class="stat-group">
-        <label>Slots</label>
-        <div id="peer-list" class="peer-list">
-          <span class="empty">No peers connected</span>
+      <section class="session-section">
+        <h3 class="section-label">Status</h3>
+        <div class="status-grid">
+          <div class="status-cell">
+            <label>BPM</label>
+            <input type="number" id="session-bpm" min="20" max="999" step="0.1" class="bpm-inline">
+          </div>
+          <div class="status-cell">
+            <label>Interval</label>
+            <span class="status-value" id="session-interval">-</span>
+          </div>
+          <div class="status-cell">
+            <label>Link Peers</label>
+            <span class="status-value" id="session-link-peers">0</span>
+          </div>
+          <div class="status-cell">
+            <label>Plugin</label>
+            <span class="status-value" id="session-plugin">disconnected</span>
+          </div>
+          <div class="status-cell">
+            <label>Audio</label>
+            <span class="status-value" id="session-audio">0 / 0</span>
+            <span id="session-audio-bytes" class="audio-bytes">0 B / 0 B</span>
+          </div>
+          <div class="status-cell">
+            <label>Test Tone</label>
+            <div class="test-tone-row">
+              <span class="status-value" id="session-test-tone">OFF</span>
+              <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
+            </div>
+          </div>
+          <div class="status-cell" id="recording-stat" style="display:none">
+            <label>Recording</label>
+            <div class="recording-row">
+              <span id="session-recording" class="rec-badge">REC</span>
+              <span class="status-value" id="recording-size">0 MB</span>
+            </div>
+          </div>
         </div>
-      </div>
-
-      <div class="stat-group">
-        <label>Audio</label>
-        <span id="session-audio">0 sent / 0 recv</span>
-        <span id="session-audio-bytes" class="audio-bytes">0 B sent / 0 B recv</span>
-      </div>
-
-      <div class="stat-group">
-        <label>Interval</label>
-        <span id="session-interval">-</span>
-      </div>
-
-      <div class="stat-group">
-        <label>Plugin</label>
-        <span id="session-plugin">disconnected</span>
-      </div>
-
-      <div class="stat-group">
-        <label>Test Tone</label>
-        <div class="test-tone-row">
-          <span id="session-test-tone">OFF</span>
-          <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
-        </div>
-      </div>
-
-      <div class="stat-group" id="recording-stat" style="display:none">
-        <label>Recording</label>
-        <div class="recording-row">
-          <span id="session-recording" class="rec-badge">REC</span>
-          <span id="recording-size">0 MB</span>
-        </div>
-      </div>
+      </section>
     </div>
 
     <!-- Network tab -->
@@ -236,17 +240,17 @@
   </div>
 
   <!-- Plugin Install Error Modal -->
-  <div id="plugin-error-modal" class="settings-overlay" style="display:none">
-    <div class="settings-card">
-      <div class="settings-header">
+  <div id="plugin-error-modal" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
         <h2>Plugin Installation Failed</h2>
-        <button type="button" id="plugin-error-close-btn" class="icon-btn" title="Close">×</button>
+        <button type="button" id="plugin-error-close-btn" class="icon-btn" title="Close">&times;</button>
       </div>
       <p>WAIL could not automatically install the Send and Recv plugins:</p>
       <ul id="plugin-error-list"></ul>
       <p>You can install them manually by running <code>cargo xtask install-plugin</code> from the WAIL source directory.</p>
       <button type="button" id="plugin-error-ok-btn">OK</button>
-    </div>
+    </div><!-- .modal-card -->
   </div>
 
   <script src="main.js"></script>
