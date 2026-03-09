@@ -70,6 +70,8 @@ pub struct WailSendPlugin {
     streaming_frame_number: u32,
     /// Opus frame size in samples per channel (set during initialize)
     opus_frame_size: usize,
+    /// Sender for returning cleared interval buffers to IntervalRing (zero-alloc recycling)
+    buf_return_tx: Option<crossbeam_channel::Sender<Vec<f32>>>,
     editor_state: Arc<EguiState>,
 }
 
@@ -88,6 +90,7 @@ impl Default for WailSendPlugin {
             streaming_interval_index: None,
             streaming_frame_number: 0,
             opus_frame_size: 960, // 20ms at 48kHz, updated in initialize
+            buf_return_tx: None,
             editor_state: EguiState::from_size(300, 130),
         }
     }
@@ -200,13 +203,19 @@ impl Plugin for WailSendPlugin {
             .main_input_channels
             .map(|c| c.get() as u16)
             .unwrap_or(2);
-        let bridge = AudioBridge::new(
+        let mut bridge = AudioBridge::new(
             buffer_config.sample_rate as u32,
             channels,
             DEFAULT_BARS,
             DEFAULT_QUANTUM,
             DEFAULT_BITRATE_KBPS,
         );
+
+        // Wire buffer return channel: completed interval buffers are recycled
+        // back to IntervalRing, eliminating audio-thread allocations after warmup.
+        let (buf_return_tx, buf_return_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
+        bridge.set_buffer_return_rx(buf_return_rx);
+        self.buf_return_tx = Some(buf_return_tx);
 
         let max_buf = buffer_config.max_buffer_size as usize * channels as usize;
         self.interleave_buf = vec![0.0f32; max_buf];
@@ -318,7 +327,13 @@ impl Plugin for WailSendPlugin {
                 playback.fill(0.0);
 
                 permit_alloc(|| {
-                    drop(bridge.process_rt(interleave, playback, beat_position));
+                    let completed = bridge.process_rt(interleave, playback, beat_position);
+                    if let Some(ref tx) = self.buf_return_tx {
+                        for mut ci in completed {
+                            ci.samples.clear();
+                            let _ = tx.try_send(ci.samples);
+                        }
+                    }
                 });
 
                 // --- Streaming frame dispatch ---
