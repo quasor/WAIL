@@ -802,8 +802,20 @@ Section Install
   ${If} $InstallVST3 = ${BST_CHECKED}
     DetailPrint "Installing VST3 plugins to $VST3Dir..."
     CreateDirectory "$VST3Dir"
-    CopyFiles /SILENT "$INSTDIR\resources\plugins\wail-plugin-send.vst3" "$VST3Dir"
-    CopyFiles /SILENT "$INSTDIR\resources\plugins\wail-plugin-recv.vst3" "$VST3Dir"
+    SetOverwrite on
+    ClearErrors
+    CopyFiles "$INSTDIR\resources\plugins\wail-plugin-send.vst3" "$VST3Dir"
+    ${If} ${Errors}
+      DetailPrint "WARNING: Failed to copy wail-plugin-send.vst3 to $VST3Dir"
+    ${EndIf}
+    ClearErrors
+    CopyFiles "$INSTDIR\resources\plugins\wail-plugin-recv.vst3" "$VST3Dir"
+    ${If} ${Errors}
+      DetailPrint "WARNING: Failed to copy wail-plugin-recv.vst3 to $VST3Dir"
+    ${EndIf}
+    ; Place opus.dll inside each VST3 bundle so the DAW can find it at load time
+    CopyFiles "$INSTDIR\resources\plugins\opus.dll" "$VST3Dir\wail-plugin-send.vst3\Contents\x86_64-win"
+    CopyFiles "$INSTDIR\resources\plugins\opus.dll" "$VST3Dir\wail-plugin-recv.vst3\Contents\x86_64-win"
     WriteRegStr HKLM "Software\WAIL\PluginPaths" "VST3Dir" "$VST3Dir"
     WriteRegDWORD HKLM "Software\WAIL\PluginPaths" "InstalledVST3" 1
   ${EndIf}
@@ -812,8 +824,19 @@ Section Install
   ${If} $InstallCLAP = ${BST_CHECKED}
     DetailPrint "Installing CLAP plugins to $CLAPDir..."
     CreateDirectory "$CLAPDir"
-    CopyFiles /SILENT "$INSTDIR\resources\plugins\wail-plugin-send.clap" "$CLAPDir"
-    CopyFiles /SILENT "$INSTDIR\resources\plugins\wail-plugin-recv.clap" "$CLAPDir"
+    SetOverwrite on
+    ClearErrors
+    CopyFiles "$INSTDIR\resources\plugins\wail-plugin-send.clap" "$CLAPDir"
+    ${If} ${Errors}
+      DetailPrint "WARNING: Failed to copy wail-plugin-send.clap to $CLAPDir"
+    ${EndIf}
+    ClearErrors
+    CopyFiles "$INSTDIR\resources\plugins\wail-plugin-recv.clap" "$CLAPDir"
+    ${If} ${Errors}
+      DetailPrint "WARNING: Failed to copy wail-plugin-recv.clap to $CLAPDir"
+    ${EndIf}
+    ; Place opus.dll alongside CLAP plugins so the DAW can find it at load time
+    CopyFiles "$INSTDIR\resources\plugins\opus.dll" "$CLAPDir"
     WriteRegStr HKLM "Software\WAIL\PluginPaths" "CLAPDir" "$CLAPDir"
     WriteRegDWORD HKLM "Software\WAIL\PluginPaths" "InstalledCLAP" 1
   ${EndIf}

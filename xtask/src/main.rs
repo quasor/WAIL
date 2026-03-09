@@ -452,6 +452,15 @@ fn build_tauri() -> Result<()> {
     println!("Building plugins first...");
     build_plugin(&[])?;
 
+    // Ensure opus.dll placeholder exists for Tauri resource bundling.
+    // On Windows the real opus.dll should already be in the build environment;
+    // on other platforms an empty placeholder prevents Tauri from erroring on
+    // the missing resource mapping entry in tauri.conf.json.
+    let opus_placeholder = workspace_dir().join("target/bundled/opus.dll");
+    if !opus_placeholder.exists() {
+        fs::write(&opus_placeholder, b"")?;
+    }
+
     println!("\nBuilding WAIL Tauri app...");
     let mut cmd = Command::new("cargo");
     cmd.args(["tauri", "build", "-c", "crates/wail-tauri/tauri.conf.json"])

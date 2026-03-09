@@ -93,6 +93,9 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
+      - name: Create opus.dll placeholder for cross-platform resources
+        run: mkdir -p target/bundled && touch target/bundled/opus.dll
+
       - name: Clean stale Tauri bundles
         run: rm -rf target/release/bundle/
 
@@ -183,6 +186,10 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
         run: cargo xtask build-plugin
 
+      - name: Stage opus.dll for Tauri bundling
+        shell: pwsh
+        run: Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll target\bundled\opus.dll
+
       - name: Clean stale Tauri bundles
         run: Remove-Item -Recurse -Force target\release\bundle -ErrorAction SilentlyContinue
         shell: pwsh
@@ -201,6 +208,9 @@ jobs:
           Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
           Copy-Item target\bundled\wail-plugin-recv.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
+          # Place opus.dll inside VST3 bundles and alongside CLAP for manual installs
+          Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
+          Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
           if (Test-Path target\release\bundle\nsis\*.exe) { Copy-Item target\release\bundle\nsis\*.exe dist\ }
           if (Test-Path target\release\bundle\msi\*.msi) { Copy-Item target\release\bundle\msi\*.msi dist\ }
 
@@ -268,6 +278,9 @@ jobs:
 
       - name: Build plugin
         run: cargo xtask build-plugin
+
+      - name: Create opus.dll placeholder for cross-platform resources
+        run: mkdir -p target/bundled && touch target/bundled/opus.dll
 
       - name: Clean stale Tauri bundles
         run: rm -rf target/release/bundle/

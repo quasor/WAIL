@@ -34,10 +34,11 @@
       "icons/icon.png"
     ],
     "resources": {
-      "../../target/bundled/wail-plugin-send.clap/": "plugins/wail-plugin-send.clap/",
-      "../../target/bundled/wail-plugin-send.vst3/": "plugins/wail-plugin-send.vst3/",
-      "../../target/bundled/wail-plugin-recv.clap/": "plugins/wail-plugin-recv.clap/",
-      "../../target/bundled/wail-plugin-recv.vst3/": "plugins/wail-plugin-recv.vst3/"
+      "../../target/bundled/wail-plugin-send.clap": "plugins/wail-plugin-send.clap",
+      "../../target/bundled/wail-plugin-send.vst3": "plugins/wail-plugin-send.vst3",
+      "../../target/bundled/wail-plugin-recv.clap": "plugins/wail-plugin-recv.clap",
+      "../../target/bundled/wail-plugin-recv.vst3": "plugins/wail-plugin-recv.vst3",
+      "../../target/bundled/opus.dll": "plugins/opus.dll"
     },
     "windows": {
       "nsis": {
