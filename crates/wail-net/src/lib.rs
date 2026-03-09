@@ -488,13 +488,20 @@ impl PeerMesh {
     }
 
     /// Close a specific peer's WebRTC connection (without removing from the mesh).
-    /// The connection state callback will fire, which can trigger `MeshEvent::PeerFailed`.
+    /// Always signals failure via `failure_tx` so the `PeerFailed` handler runs.
+    ///
+    /// Note: `pc.close()` transitions state to `Closed`, not `Failed`, so the
+    /// `on_peer_connection_state_change` callback does **not** send to `failure_tx`.
+    /// We send directly here to ensure the reconnect logic always fires.
     pub async fn close_peer(&self, peer_id: &str) {
         if let Some(pc) = self.peers.get(peer_id) {
             if let Err(e) = pc.close().await {
                 warn!(peer = %peer_id, error = %e, "Error closing peer connection");
             }
         }
+        // Signal failure directly — close() → Closed (not Failed), so the callback won't.
+        // The reconnect_pending guard in PeerFailed deduplicates concurrent events.
+        let _ = self.failure_tx.send(peer_id.to_string());
     }
 
     /// Remove a peer from the mesh, closing its WebRTC connection.

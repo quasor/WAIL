@@ -1020,16 +1020,20 @@ async fn session_loop(
                     mesh.remove_peer(&dead_id).await;
                     let _ = app.emit("peer:left", PeerLeftEvent { peer_id: dead_id });
                 }
-                // Safety net: peers whose ICE never connected and are stuck beyond 2× the normal
-                // timeout. The PeerFailed path handles the common case (~30s ICE timeout); this
-                // catches the rare case where WebRTC never fires a Failed state at all.
+                // Safety net: peers whose ICE never connected and are stuck beyond the timeout.
+                // close_peer sends to failure_tx directly (pc.close() → Closed, not Failed,
+                // so the state-change callback does not fire it). The PeerFailed handler then
+                // schedules a reconnect timer with backoff.
                 const PRE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
                 let stale_peers = peers.stale_preconnect_peers(PRE_CONNECT_TIMEOUT);
                 for stale_id in stale_peers {
+                    // Skip peers already being reconnected — their timer will update last_seen.
+                    if peers.get(&stale_id).is_some_and(|p| p.reconnect_pending) {
+                        continue;
+                    }
                     let name = peers.get(&stale_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&stale_id).to_string();
                     ui_warn!(&app, "Peer {name} stuck in pre-connect — forcing reconnection after {PRE_CONNECT_TIMEOUT:?}");
                     mesh.close_peer(&stale_id).await;
-                    // close_peer triggers PeerConnectionState::Failed → failure_tx → PeerFailed handler
                 }
             }
 
