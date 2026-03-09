@@ -296,8 +296,9 @@ Two independent time domains exist in the system:
 
 Every push to `main` triggers continuous deployment:
 
-1. `auto-release.yml` → consumes `.changeset/` files and conventional commits, bumps versions, updates CHANGELOG, creates a release PR, and auto-merges it
-2. `release-on-merge.yml` → detects the merged release PR, runs `knope release` to create a GitHub release + git tag
-3. `release.yml` → builds platform artifacts (macOS, Windows, Linux — plugins + Tauri installers) and uploads them to the GitHub release
+1. `auto-release.yml` → consumes `.changeset/` files and conventional commits, bumps versions, updates CHANGELOG, creates a release PR, auto-merges it, then runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds
+2. `release.yml` → builds platform artifacts (macOS, Windows, Linux — plugins + Tauri installers) and uploads them to the GitHub release
+
+The release and artifact dispatch steps run inline in `auto-release.yml` because `GITHUB_TOKEN` merges don't trigger other workflows. `release-on-merge.yml` remains as a fallback for manual merges of release PRs.
 
 > **Note:** The auto-merge step uses `GITHUB_TOKEN` which cannot bypass branch protection rules. If required status checks or PR review requirements are ever added to `main`, the auto-merge will fail and you'll need a GitHub App token with bypass permissions, or exempt the `release` branch from those rules.
