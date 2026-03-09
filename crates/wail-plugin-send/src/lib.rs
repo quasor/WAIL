@@ -401,7 +401,7 @@ impl Plugin for WailSendPlugin {
             }
         }
 
-        ProcessStatus::Normal
+        ProcessStatus::KeepAlive
     }
 }
 

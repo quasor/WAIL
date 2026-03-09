@@ -445,7 +445,7 @@ impl Plugin for WailRecvPlugin {
             }
         }
 
-        ProcessStatus::Normal
+        ProcessStatus::KeepAlive
     }
 }
 
