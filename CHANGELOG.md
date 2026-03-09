@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.14.6 (2026-03-09)
+
+### Fixes
+
+- compensate for network latency when syncing beat at join time (#189)
+- wire buffer return channel in wail-plugin-send (#190)
+- Compensate for one-way network latency when snapping beat at join time. The `forceBeatAtTime` call now adds `RTT/2 * BPM/60` beats to account for the transit time of the first `StateSnapshot`, reducing join-time beat offset at higher latencies.
+- Eliminate audio-thread allocation in wail-plugin-send by wiring the buffer return channel. After 2-3 interval warmup, `spare_record` is replenished from returned buffers instead of `Vec::with_capacity()`.
+
 ## 1.14.5 (2026-03-09)
 
 ### Fixes
