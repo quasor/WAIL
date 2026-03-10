@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.15.2 (2026-03-10)
+
+### Fixes
+
+- correct Windows exe filename in release workflow (#202)
+
 ## 1.15.1 (2026-03-10)
 
 ### Fixes
