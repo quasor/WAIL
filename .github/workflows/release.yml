@@ -125,7 +125,7 @@ jobs:
       - name: Build Tauri app
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: cargo tauri build --bundles none
+        run: cargo tauri build --no-bundle
 
       - name: Determine version
         id: version
