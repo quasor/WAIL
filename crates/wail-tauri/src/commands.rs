@@ -130,6 +130,15 @@ pub fn change_bpm(state: State<'_, SessionState>, bpm: f64) -> Result<(), String
 }
 
 #[tauri::command]
+pub fn send_chat(state: State<'_, SessionState>, text: String) -> Result<(), String> {
+    let session = state.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *session {
+        let _ = handle.cmd_tx.send(SessionCommand::SendChat(text));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn set_telemetry(handle: State<'_, TelemetryHandle>, enabled: bool) -> Result<(), String> {
     handle.set_enabled(enabled);
     info!(enabled, "Telemetry toggled");

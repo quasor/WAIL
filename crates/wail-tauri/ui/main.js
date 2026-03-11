@@ -22,6 +22,9 @@ const settingsDisplayNameInput = document.getElementById('settings-display-name'
 const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
 const settingsLogSharingCheckbox = document.getElementById('settings-log-sharing');
 const settingsRememberCheckbox = document.getElementById('settings-remember');
+const chatInput = document.getElementById('chat-input');
+const chatSendBtn = document.getElementById('chat-send-btn');
+const chatMessages = document.getElementById('chat-messages');
 
 // Version label
 window.__TAURI__.app.getVersion().then(v => {
@@ -528,6 +531,7 @@ function showSession(room) {
   sessionScreen.style.display = '';
   sessionError.style.display = 'none';
   clearLog();
+  clearChatMessages();
   document.getElementById('session-room').textContent = room;
   document.getElementById('peer-list').innerHTML = '<span class="empty">No peers connected</span>';
   document.getElementById('session-audio').textContent = '0 / 0';
@@ -634,6 +638,15 @@ toggleTestToneBtn.addEventListener('click', async () => {
   updateTestToneUI();
 });
 
+// --- Chat ---
+chatSendBtn.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+
 // --- Event Listeners ---
 async function setupListeners() {
   cleanup();
@@ -717,6 +730,11 @@ async function setupListeners() {
     addLogEntry(p.level, p.message, p.peer_name || p.peer_id || null);
   }));
 
+  unlisten.push(await listen('chat:message', (event) => {
+    const p = event.payload;
+    addChatMessage(p.sender_name, p.is_own, p.text);
+  }));
+
   unlisten.push(await listen('peers:network', (event) => {
     const peers = event.payload.peers;
     const tbody = document.getElementById('network-table-body');
@@ -782,6 +800,53 @@ function clearLog() {
   const badge = document.getElementById('log-count');
   badge.textContent = '0';
   badge.className = 'log-badge';
+}
+
+// --- Chat panel ---
+const MAX_CHAT_ENTRIES = 200;
+
+function sendChatMessage() {
+  const text = chatInput.value.trim();
+  if (!text) return;
+  chatInput.value = '';
+  invoke('send_chat', { text }).catch(err => console.error('Send chat error:', err));
+}
+
+function addChatMessage(senderName, isOwn, text) {
+  const time = new Date().toLocaleTimeString();
+  const entry = document.createElement('div');
+  entry.className = 'chat-entry' + (isOwn ? ' chat-own' : '');
+
+  const sender = document.createElement('span');
+  sender.className = 'chat-sender';
+  sender.textContent = isOwn ? 'You' : senderName;
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'chat-time';
+  timeSpan.textContent = time;
+
+  const messageText = document.createElement('span');
+  messageText.className = 'chat-text';
+  messageText.textContent = text;
+
+  entry.appendChild(sender);
+  entry.appendChild(timeSpan);
+  entry.appendChild(messageText);
+
+  chatMessages.appendChild(entry);
+
+  // Cap at MAX_CHAT_ENTRIES
+  while (chatMessages.children.length > MAX_CHAT_ENTRIES) {
+    chatMessages.removeChild(chatMessages.firstChild);
+  }
+
+  // Auto-scroll to bottom
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function clearChatMessages() {
+  chatMessages.innerHTML = '';
+  chatInput.value = '';
 }
 
 function escapeHtml(text) {

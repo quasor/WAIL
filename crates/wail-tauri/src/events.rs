@@ -140,3 +140,10 @@ pub struct LogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_name: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageEvent {
+    pub sender_name: String,
+    pub is_own: bool,
+    pub text: String,
+}

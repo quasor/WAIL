@@ -50,6 +50,7 @@ pub struct SessionHandle {
 
 pub enum SessionCommand {
     ChangeBpm(f64),
+    SendChat(String),
     Disconnect,
 }
 
@@ -294,6 +295,18 @@ async fn session_loop(
                         if link_cmd_tx.send(LinkCommand::SetTempo(new_bpm)).is_err() {
                             ui_warn!(&app, "Link bridge stopped");
                         }
+                    }
+                    SessionCommand::SendChat(text) => {
+                        let msg = SyncMessage::ChatMessage {
+                            sender_name: display_name.clone(),
+                            text: text.clone(),
+                        };
+                        mesh.broadcast(&msg).await;
+                        let _ = app.emit("chat:message", ChatMessageEvent {
+                            sender_name: display_name.clone(),
+                            is_own: true,
+                            text,
+                        });
                     }
                     SessionCommand::Disconnect => {
                         ui_info!(&app, "Disconnecting...");
@@ -851,6 +864,14 @@ async fn session_loop(
                             peer_audio_status.insert(from.clone(), cur);
                             ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
                         }
+                    }
+
+                    SyncMessage::ChatMessage { sender_name, text } => {
+                        let _ = app.emit("chat:message", ChatMessageEvent {
+                            sender_name,
+                            is_own: false,
+                            text,
+                        });
                     }
                 }
             }

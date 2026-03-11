@@ -81,6 +81,10 @@ pub enum SyncMessage {
         intervals_received: u64,
         plugin_connected: bool,
     },
+    ChatMessage {
+        sender_name: String,
+        text: String,
+    },
 }
 
 /// Messages exchanged over the WebSocket signaling channel.
@@ -201,6 +205,23 @@ mod tests {
                 assert_eq!(intervals_sent, 5);
                 assert_eq!(intervals_received, 3);
                 assert!(plugin_connected);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_message_roundtrip() {
+        let msg = SyncMessage::ChatMessage {
+            sender_name: "Ringo".into(),
+            text: "Let's change key".into(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SyncMessage::ChatMessage { sender_name, text } => {
+                assert_eq!(sender_name, "Ringo");
+                assert_eq!(text, "Let's change key");
             }
             other => panic!("unexpected variant: {other:?}"),
         }
