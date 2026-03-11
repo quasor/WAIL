@@ -133,6 +133,8 @@ jobs:
           Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
           Copy-Item target\bundled\wail-plugin-recv.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
+          Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
+          Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
 
       - uses: actions/upload-artifact@v4
         with:
