@@ -154,6 +154,7 @@ pub fn run(test_args: Option<TestModeArgs>) {
             commands::join_room,
             commands::disconnect,
             commands::change_bpm,
+            commands::send_chat,
             commands::set_telemetry,
             commands::set_log_sharing,
             commands::list_public_rooms,
