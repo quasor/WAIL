@@ -127,49 +127,14 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
         run: cargo tauri build --no-bundle
 
-      - name: Determine version
-        id: version
-        shell: pwsh
-        run: |
-          $conf = Get-Content crates\wail-tauri\tauri.conf.json | ConvertFrom-Json
-          echo "version=$($conf.version)" >> $env:GITHUB_OUTPUT
-
-      - name: Stage Chocolatey package
-        shell: pwsh
-        run: |
-          $staged = "packaging\windows\tools\staged"
-          New-Item -ItemType Directory -Force $staged
-
-          # Main Tauri exe and resources
-          Copy-Item target\release\wail-tauri.exe $staged\WAIL.exe
-          if (Test-Path target\release\resources) {
-            Copy-Item -Recurse target\release\resources $staged\resources
-          }
-
-          # opus.dll
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll $staged\
-
-          # Plugin bundles
-          Copy-Item target\bundled\wail-plugin-send.clap $staged\
-          Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 $staged\wail-plugin-send.vst3
-          Copy-Item target\bundled\wail-plugin-recv.clap $staged\
-          Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 $staged\wail-plugin-recv.vst3
-
-          # opus.dll inside VST3 bundles
-          Copy-Item $staged\opus.dll $staged\wail-plugin-send.vst3\Contents\x86_64-win\
-          Copy-Item $staged\opus.dll $staged\wail-plugin-recv.vst3\Contents\x86_64-win\
-
-      - name: Build Chocolatey package
-        shell: pwsh
-        run: |
-          cd packaging\windows
-          choco pack wail.nuspec --version ${{ steps.version.outputs.version }}
-
       - name: Collect artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
-          Copy-Item packaging\windows\wail.*.nupkg dist\
+          Copy-Item target\release\wail-tauri.exe dist\WAIL.exe
+          if (Test-Path target\release\resources) {
+            Copy-Item -Recurse target\release\resources dist\resources
+          }
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
           Copy-Item target\bundled\wail-plugin-send.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
@@ -300,7 +265,6 @@ jobs:
       - name: Find individual installers
         id: files
         run: |
-          echo "nupkg=$(ls wail-release-windows/wail.*.nupkg 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "appimage=$(ls wail-release-linux/*.AppImage 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "deb=$(ls wail-release-linux/*.deb 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "src_tarball=$(ls wail-homebrew-src/wail-*-src.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
@@ -311,7 +275,6 @@ jobs:
           files: |
             wail-windows-x64.zip
             wail-linux-x64.zip
-            ${{ steps.files.outputs.nupkg }}
             ${{ steps.files.outputs.appimage }}
             ${{ steps.files.outputs.deb }}
             ${{ steps.files.outputs.src_tarball }}
