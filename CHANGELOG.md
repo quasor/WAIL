@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.16.1 (2026-03-11)
+
+### Fixes
+
+- remove duplicate changelog entries and prevent future accumulation (#214)
+
 ## 1.16.0 (2026-03-11)
 
 ### Features
