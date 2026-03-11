@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.16.0 (2026-03-11)
+
+### Features
+
+- add peer chat to session view (#209)
+- show own stereo pair sends in session view (#212)
+- Add peer chat for WAIL session view. Musicians can now send text messages to other peers during jam sessions via a collapsible chat panel. Messages are sent over the existing WebRTC sync DataChannel and appear immediately on all connected peers with sender names and timestamps.
+- Session view now shows your own stereo pair sends (WAIL Send plugin connections), so you can see whether your audio is connected and actively sending.
+- Windows release now ships as a plain zip file (WAIL.exe + plugins + opus.dll) instead of a Chocolatey installer.
+
+### Fixes
+
+- prevent audio dropout at interval boundaries and add channel overflow logging (#207)
+- isolate Opus decoder per interval to prevent state leak at boundaries (#210)
+- align connected badges in peer list (#211)
+- Fix Opus decoder state leak across interval boundaries in recv plugin.
+- Fix audio dropout at interval boundaries by decoding WAIF frames incrementally instead of waiting for full interval assembly.
+
 ## 1.15.3 (2026-03-10)
 
 ### Fixes
