@@ -80,6 +80,15 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ---
 
+## Design Decisions
+
+### TempoChangeDetector extraction
+**Status:** Done
+**File:** `crates/wail-core/src/link.rs`
+**Decision:** Extracted tempo-change detection logic (threshold check + echo guard state machine) from `LinkBridge` into a separate `pub(crate) TempoChangeDetector` struct. `LinkBridge` delegates to it. The detector accepts `Instant` as a parameter for deterministic testing without `AblLink` (C FFI + CMake). Integration testing of the full `LinkBridge` → `AblLink` path is deferred to e2e tests.
+
+---
+
 ## Polish (low priority)
 
 | ID | Item | File | Status |
