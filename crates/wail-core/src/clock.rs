@@ -80,9 +80,16 @@ impl ClockSync {
         }
 
         // Use median RTT (robust to outliers)
-        let mut rtts: Vec<i64> = clock.samples.iter().copied().collect();
-        rtts.sort();
-        clock.rtt_us = rtts[rtts.len() / 2];
+        let samples: Vec<i64> = clock.samples.iter().copied().collect();
+        clock.rtt_us = Self::median_of(&samples);
+    }
+
+    /// Compute the median of a slice of RTT samples.
+    /// Used internally by `handle_pong`.
+    pub(crate) fn median_of(samples: &[i64]) -> i64 {
+        let mut sorted: Vec<i64> = samples.to_vec();
+        sorted.sort();
+        sorted[sorted.len() / 2]
     }
 
     /// Get the estimated RTT for a peer in microseconds.

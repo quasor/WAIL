@@ -103,6 +103,24 @@ mod tests {
         );
     }
 
+    // RED TEST — Critical #1: median computation panics on empty samples.
+    //
+    // `ClockSync::median_of` does `sorted[sorted.len() / 2]` — panics on
+    // empty input. Currently unreachable through handle_pong() because it
+    // always pushes a sample before computing. But the function has no
+    // self-defense: any refactor that separates entry creation from sample
+    // insertion, or calls median_of on a drained VecDeque, hits a panic
+    // that crashes the session select! loop and the DAW host process.
+    //
+    // Expected behavior: return 0 (or another safe default) for empty input.
+    #[test]
+    fn median_of_empty_samples_does_not_panic() {
+        // This currently PANICS — index out of bounds on empty slice.
+        // The fix should make it return 0 for empty input.
+        let result = ClockSync::median_of(&[]);
+        assert_eq!(result, 0, "median of empty samples should return 0");
+    }
+
     // §10 — Jitter: one extreme outlier RTT among seven normal samples does not
     // dominate the median RTT estimate.
     #[test]
