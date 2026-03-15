@@ -364,4 +364,81 @@ mod tests {
         // 130.02 exceeds threshold → change
         assert_eq!(d.check(130.02, now), Some(130.02));
     }
+
+    // RED TEST — Critical #2: NaN BPM poisons the tempo change detector.
+    //
+    // A remote peer can send `TempoChange { bpm: NaN }` (malicious or buggy
+    // JSON). `set_last_tempo(NaN)` stores NaN as the baseline. From that
+    // point on, EVERY `check()` computes `(new_bpm - NaN).abs()` = NaN,
+    // and `NaN > 0.01` is false, so NO future tempo change is ever
+    // detected. The detector is permanently broken for this session.
+    //
+    // Real-world impact: If any peer in a jam session has a bug that sends
+    // NaN BPM, all other peers' tempo sync stops working permanently.
+    // They'd have to leave and rejoin the room to recover. The NaN also
+    // propagates to Link SDK via set_tempo(NaN), which is undefined
+    // behavior in the C++ SDK.
+    //
+    // Expected: NaN BPM should be rejected (check returns None, baseline
+    // remains unchanged).
+    #[test]
+    fn nan_bpm_does_not_poison_detector() {
+        let mut d = detector(120.0);
+        let now = Instant::now();
+
+        // A remote peer sends NaN BPM
+        d.set_last_tempo(f64::NAN);
+
+        // The detector should still work — NaN must not have been stored
+        // as the baseline. A legitimate tempo change should be detected.
+        let result = d.check(130.0, now);
+        assert_eq!(
+            result,
+            Some(130.0),
+            "After NaN BPM, detector must still detect legitimate changes. \
+             Got None because NaN poisoned the baseline: (130.0 - NaN).abs() > 0.01 is false"
+        );
+    }
+
+    // RED TEST — Critical #2b: zero BPM is passed to Link SDK unchecked.
+    //
+    // `set_last_tempo(0.0)` stores 0 as the baseline, which isn't harmful
+    // to the detector itself. But the real issue is upstream: session.rs
+    // calls `LinkCommand::SetTempo(0.0)` → `LinkBridge::set_tempo(0.0)` →
+    // `session_state.set_tempo(0.0, time)` on the C FFI. Ableton Link's
+    // SDK behavior with 0 BPM is implementation-defined and could freeze
+    // or corrupt the timeline.
+    //
+    // This test verifies the detector rejects zero BPM at the check() level.
+    #[test]
+    fn zero_bpm_rejected_by_detector() {
+        let mut d = detector(120.0);
+        let now = Instant::now();
+
+        // Remote peer sends 0 BPM (bug or malicious)
+        let result = d.check(0.0, now);
+        assert!(
+            result.is_none(),
+            "Zero BPM should be rejected by the detector, but got Some(0.0). \
+             A 0 BPM value would be forwarded to the Ableton Link C FFI, \
+             which could freeze the session timeline."
+        );
+        // Baseline must remain at 120.0
+        assert_eq!(d.last_tempo(), 120.0, "Baseline must not change after zero BPM");
+    }
+
+    // RED TEST — Critical #2c: negative BPM is passed to Link SDK unchecked.
+    #[test]
+    fn negative_bpm_rejected_by_detector() {
+        let mut d = detector(120.0);
+        let now = Instant::now();
+
+        let result = d.check(-120.0, now);
+        assert!(
+            result.is_none(),
+            "Negative BPM should be rejected by the detector, but got Some(-120.0). \
+             A negative BPM value would corrupt the Ableton Link session."
+        );
+        assert_eq!(d.last_tempo(), 120.0, "Baseline must not change after negative BPM");
+    }
 }
