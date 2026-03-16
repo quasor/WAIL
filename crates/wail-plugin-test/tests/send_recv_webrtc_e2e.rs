@@ -11,6 +11,10 @@
 //!
 //! No external services or DAW required: in-process signaling, localhost WebRTC.
 //!
+//! **Must run with `--test-threads=1`**: all tests mutate the process-global
+//! `WAIL_IPC_ADDR` env var and leak plugin instances to prevent dylib unload.
+//! Parallel execution causes IPC port cross-contamination between tests.
+//!
 //! Requires: `cargo xtask build-plugin` before running.
 
 mod common;
@@ -443,6 +447,230 @@ fn send_and_recv_plugin_webrtc_e2e() {
 
     // 10. Leak both hosts to prevent the .clap dylibs from unloading while background
     //     IPC threads are still running (same pattern as all other wail-plugin-test tests).
+    send_host.leak();
+    recv_host.leak();
+}
+
+// ---------------------------------------------------------------------------
+// Real-time paced test
+// ---------------------------------------------------------------------------
+
+/// Drive send + recv plugins at wall-clock real-time speed.
+///
+/// The existing `send_and_recv_plugin_webrtc_e2e` test drives ~14× faster than
+/// real-time, which masks timing bugs where streaming audio frames arrive after
+/// an interval boundary swap. This test uses `thread::sleep` to pace callbacks
+/// at the actual DAW audio clock rate, reproducing the "2 bars sound, 2 bars
+/// silence" dropout that occurs when live-append is broken.
+///
+/// Duration: ~30s of real-time audio (shorter than the fast test's ~60s of
+/// simulated audio, but faithful to production timing).
+#[test]
+fn realtime_paced_no_dropout_e2e() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    // 1. Load both .clap binaries
+    let mut send_host = load_send();
+    let mut recv_host = load_recv();
+
+    let send_ipc_port = common::random_port();
+    let recv_ipc_port = common::random_port();
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    // 2. Start signaling + both mini_apps; wait for WebRTC to establish.
+    rt.block_on(async {
+        let signaling_url = common::start_test_signaling_server().await;
+
+        let url_a = signaling_url.clone();
+        tokio::spawn(common::mini_app_session(
+            send_ipc_port,
+            url_a,
+            "realtime-room".into(),
+            "peer-a".into(),
+            "test".into(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        tokio::spawn(common::mini_app_session(
+            recv_ipc_port,
+            signaling_url,
+            "realtime-room".into(),
+            "peer-b".into(),
+            "test".into(),
+        ));
+
+        tokio::time::sleep(Duration::from_secs(8)).await;
+    });
+
+    // 3. Activate plugins
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{send_ipc_port}")) };
+    let send_stopped = send_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate send plugin");
+    let mut send_proc = send_stopped
+        .start_processing()
+        .expect("Failed to start send processing");
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{recv_ipc_port}")) };
+    let recv_stopped = recv_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate recv plugin");
+    let mut recv_proc = recv_stopped
+        .start_processing()
+        .expect("Failed to start recv processing");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 4. Drive both plugins at REAL-TIME speed.
+    //
+    //    buf_size = 4096 samples per channel at 48 kHz = ~85.3 ms per callback.
+    //    We sleep for this duration between callbacks to match the DAW clock.
+    //
+    //    Run for ~30 seconds of real-time audio:
+    //      callbacks = 30s / 85.3ms ≈ 352
+    //    Plus ~2-interval pipeline warmup (188 callbacks in fast mode, but at
+    //    real-time speed the warmup is 1 interval = 94 callbacks).
+    //    Total: 94 warmup + 352 steady ≈ 450 callbacks.
+
+    let buf_size: u32 = 4096;
+    let num_callbacks: u64 = 450;
+    let sleep_per_callback = Duration::from_secs_f64(buf_size as f64 / 48000.0);
+
+    let mut non_silent_buffers: u32 = 0;
+    let mut in_audio_phase = false;
+    let mut current_gap: u32 = 0;
+    let mut max_gap: u32 = 0;
+
+    // Per-interval stats: (index, non_silent, total)
+    let mut interval_stats: Vec<(u64, u32, u32)> = Vec::new();
+    let mut cur_interval = u64::MAX;
+    let mut cur_ns: u32 = 0;
+    let mut cur_total: u32 = 0;
+
+    let wall_start = std::time::Instant::now();
+
+    for i in 0..num_callbacks {
+        let steady_time = i * buf_size as u64;
+        let interval_index = steady_time / 384_000;
+
+        if interval_index != cur_interval {
+            if cur_interval != u64::MAX {
+                interval_stats.push((cur_interval, cur_ns, cur_total));
+            }
+            cur_interval = interval_index;
+            cur_ns = 0;
+            cur_total = 0;
+        }
+        cur_total += 1;
+
+        let send_freq = interval_freq(interval_index);
+        drive_send(&mut send_proc, buf_size, steady_time, send_freq);
+        let out_l = drive_recv(&mut recv_proc, buf_size, steady_time);
+
+        let energy = rms(&out_l);
+        if energy > 0.001 {
+            non_silent_buffers += 1;
+            cur_ns += 1;
+            if in_audio_phase {
+                max_gap = max_gap.max(current_gap);
+                current_gap = 0;
+            }
+            in_audio_phase = true;
+        } else if in_audio_phase {
+            current_gap += 1;
+        }
+
+        // Real-time pacing: sleep to match the DAW audio clock.
+        // Subtract the time already spent in process() so we don't drift.
+        let expected_elapsed = sleep_per_callback * (i as u32 + 1);
+        let actual_elapsed = wall_start.elapsed();
+        if let Some(remaining) = expected_elapsed.checked_sub(actual_elapsed) {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    // Finalize
+    if cur_interval != u64::MAX {
+        interval_stats.push((cur_interval, cur_ns, cur_total));
+    }
+    max_gap = max_gap.max(current_gap);
+
+    let wall_elapsed = wall_start.elapsed();
+    let max_gap_ms = max_gap as f64 * buf_size as f64 / 48000.0 * 1000.0;
+
+    // Find pipeline lag
+    let lag = interval_stats
+        .iter()
+        .find(|(_, ns, _)| *ns > 0)
+        .map(|(idx, _, _)| *idx)
+        .unwrap_or(0);
+
+    // Log per-interval breakdown
+    for (idx, non_silent, total) in &interval_stats {
+        let pct = if *total > 0 { *non_silent as f64 / *total as f64 * 100.0 } else { 0.0 };
+        eprintln!(
+            "[realtime]   Interval {idx:2}: {non_silent:3}/{total:3} ({pct:.0}%)"
+        );
+    }
+
+    eprintln!(
+        "[realtime] Summary: non_silent={non_silent_buffers}/{num_callbacks}, \
+         lag={lag}, max_gap={max_gap} ({max_gap_ms:.0}ms), wall_time={:.1}s",
+        wall_elapsed.as_secs_f64()
+    );
+
+    // 5. Assertions
+    //
+    //    At real-time speed, pipeline lag should be 1 interval (not 2 like the fast test).
+    //    After warmup, every interval should have >85% audio coverage and the max gap
+    //    between non-silent buffers must be small (≤ 3 buffers / ~256ms).
+
+    // Must have substantial audio output
+    let warmup_callbacks = (lag + 1) * 94; // callbacks consumed by pipeline warmup
+    let steady_callbacks = num_callbacks.saturating_sub(warmup_callbacks);
+    let expected_min = (steady_callbacks as f64 * 0.80) as u32;
+    assert!(
+        non_silent_buffers >= expected_min,
+        "Expected ≥{expected_min} non-silent buffers in steady state, \
+         got {non_silent_buffers}/{num_callbacks} (lag={lag}, warmup={warmup_callbacks} callbacks)."
+    );
+
+    // No multi-bar silence gaps after audio starts
+    assert!(
+        max_gap <= 3,
+        "Detected a gap of {max_gap} consecutive silent buffers ({max_gap_ms:.0}ms) — \
+         at real-time speed, interval transitions must be seamless. \
+         A gap > 3 buffers (~256ms) indicates the live-append path is not working."
+    );
+
+    // Per-interval coverage: every post-warmup interval must have >75% audio
+    for (idx, non_silent, total) in &interval_stats {
+        if *idx <= lag { continue; } // skip warmup intervals
+        let pct = *non_silent as f64 / *total as f64 * 100.0;
+        assert!(
+            pct > 75.0,
+            "Interval {idx} has only {pct:.0}% audio coverage ({non_silent}/{total}). \
+             This is the 'bars of silence' bug — each interval must have >75% audio at real-time speed."
+        );
+    }
+
+    eprintln!(
+        "[realtime] PASSED — {non_silent_buffers} non-silent buffers, \
+         max_gap={max_gap} ({max_gap_ms:.0}ms), all post-warmup intervals >75% audio."
+    );
+
+    // 6. Cleanup
+    let send_stopped = send_proc.stop_processing();
+    send_host.deactivate(send_stopped);
+    let recv_stopped = recv_proc.stop_processing();
+    recv_host.deactivate(recv_stopped);
     send_host.leak();
     recv_host.leak();
 }

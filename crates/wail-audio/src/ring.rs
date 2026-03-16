@@ -90,6 +90,10 @@ pub struct IntervalRing {
     completed: Vec<CompletedInterval>,
     /// Remote peer intervals waiting to be mixed into next playback slot
     pending_remote: Vec<RemoteInterval>,
+    /// The interval index whose audio is currently in the playback slot.
+    /// Set during swap_intervals() so that late-arriving frames for this
+    /// index can be appended directly instead of waiting for the next swap.
+    playback_interval: Option<i64>,
     /// Audio parameters (retained for future use in resampling/diagnostics)
     #[allow(dead_code)]
     sample_rate: u32,
@@ -156,6 +160,7 @@ impl IntervalRing {
             current_interval: None,
             completed: Vec::with_capacity(2),
             pending_remote: Vec::with_capacity(MAX_REMOTE_PEERS),
+            playback_interval: None,
             sample_rate,
             channels,
             bars,
@@ -245,10 +250,52 @@ impl IntervalRing {
 
     /// Feed a remote peer's decoded interval audio for playback.
     ///
-    /// This will be mixed into the playback slot at the next interval boundary.
+    /// If the audio matches the currently playing interval, it is appended
+    /// directly to the active playback slot (live append) so that streaming
+    /// frames arriving after the swap don't cause silence gaps. Otherwise,
+    /// it is queued in `pending_remote` for the next interval boundary.
+    ///
     /// Multiple peers' audio is summed together. Each unique `(peer_id, stream_id)`
     /// pair gets its own isolated slot for per-stream DAW routing.
     pub fn feed_remote(&mut self, peer_id: String, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
+        // Live append: if this frame is for the interval currently being played
+        // back, append directly to the playback slot instead of waiting for the
+        // next swap. This eliminates the "2 bars sound, 2 bars silence" dropout
+        // caused by streaming frames arriving after the boundary swap.
+        if self.playback_interval == Some(interval_index) {
+            // Live append: use the per-peer slot's length as the write cursor
+            // so multiple peers sum correctly at the same playback position.
+            if let Some(slot_idx) = self.find_peer_slot(&peer_id, stream_id) {
+                let peer_pos = self.peer_slots[slot_idx].samples.len();
+                let max_write = self.playback_slot.len().saturating_sub(peer_pos);
+                let write_len = samples.len().min(max_write);
+                if write_len > 0 {
+                    let new_end = peer_pos + write_len;
+
+                    // Extend playback_len if this peer writes beyond current end.
+                    // Zero-clear the extension so the first peer to reach a region
+                    // doesn't sum with stale data.
+                    if new_end > self.playback_len {
+                        for s in &mut self.playback_slot[self.playback_len..new_end] {
+                            *s = 0.0;
+                        }
+                        self.playback_len = new_end;
+                    }
+
+                    // Sum into the shared playback slot
+                    for (i, &s) in samples[..write_len].iter().enumerate() {
+                        self.playback_slot[peer_pos + i] += s;
+                    }
+
+                    // Extend the per-peer slot for isolated routing
+                    self.peer_slots[slot_idx].samples.extend_from_slice(&samples[..write_len]);
+                }
+                return;
+            }
+            // Peer slot not yet assigned — fall through to pending_remote.
+            // This happens for the very first frame before the peer is known.
+        }
+
         // Accumulate into existing entry for the same (peer_id, stream_id, interval_index)
         // to support incremental per-frame decode without creating hundreds of entries.
         if let Some(existing) = self.pending_remote.iter_mut().find(|r| {
@@ -301,6 +348,7 @@ impl IntervalRing {
         self.playback_pos = 0;
         self.playback_len = 0;
         self.current_interval = None;
+        self.playback_interval = None;
         self.completed.clear();
         self.pending_remote.clear();
         for slot in &mut self.peer_slots {
@@ -446,6 +494,13 @@ impl IntervalRing {
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
     }
 
+    /// Find an existing active peer slot (for live-append). Does not allocate.
+    fn find_peer_slot(&self, peer_id: &str, stream_id: u16) -> Option<usize> {
+        self.peer_slots.iter().enumerate().find(|(_, s)| {
+            s.active && s.peer_id == peer_id && s.stream_id == stream_id
+        }).map(|(i, _)| i)
+    }
+
     /// Look up or assign a slot index for a (peer_id, stream_id) pair.
     /// Returns None if all slots are full or the peer's identity is unknown.
     fn assign_peer_slot(&mut self, peer_id: &str, stream_id: u16) -> Option<usize> {
@@ -526,6 +581,10 @@ impl IntervalRing {
         // Mix pending remote intervals into pre-allocated playback slot
         self.playback_pos = 0;
         self.playback_len = 0;
+        // Track the interval being played so late-arriving frames can append live.
+        // Use the highest interval index from pending_remote, or completed_index
+        // if nothing is pending (the sender's interval we're about to play).
+        self.playback_interval = Some(completed_index);
 
         // Take pending_remote, drain it (preserving capacity), then put it back.
         let mut pending = std::mem::take(&mut self.pending_remote);
@@ -956,6 +1015,233 @@ mod tests {
         // Must not panic
         ring.process(&input, &mut output, 10.0);
         assert!(ring.current_interval().is_some());
+    }
+
+    // --- Test: Partial feed before swap causes truncated playback ---
+    //
+    // Simulates real-time streaming where the sender's audio arrives as
+    // incremental 20ms decoded chunks. If only half the interval's audio
+    // has arrived when the receiver crosses the boundary, only that half
+    // plays — the rest is silence ("2 bars sound, 2 bars silence").
+
+    #[test]
+    fn partial_feed_before_swap_causes_silence_in_second_half() {
+        let mut ring = make_ring();
+        let buf = 256; // small process buffer
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        // Start interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Simulate: only HALF an interval's audio arrives before the swap.
+        // Full interval at 48kHz stereo, 4 bars, 120 BPM = 768,000 samples.
+        // Feed only the first half.
+        let full_interval_samples = 768_000;
+        let half = full_interval_samples / 2;
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; half]);
+
+        // Cross into interval 1 — swap_intervals() mixes pending_remote
+        ring.process(&input, &mut output, 16.0);
+
+        // Playback should have audio (first buffer is in crossfade region)
+        let energy: f32 = output.iter().map(|s| s * s).sum::<f32>().sqrt();
+        assert!(energy > 0.0, "First buffer after swap should have audio");
+
+        // Read through the first half — should have audio
+        let mut audio_samples_read = buf;
+        let beats_per_sample = 120.0 / 60.0 / 48000.0 * 0.5; // stereo: 2 samples per frame
+        let mut beat = 16.0 + (buf as f64 * beats_per_sample);
+
+        while audio_samples_read < half {
+            ring.process(&input, &mut output, beat);
+            let energy: f32 = output.iter().map(|s| s * s).sum::<f32>().sqrt();
+            assert!(energy > 0.01, "Should have audio at sample offset {audio_samples_read}");
+            audio_samples_read += buf;
+            beat += buf as f64 * beats_per_sample;
+        }
+
+        // Now read past the half-way point — should be SILENCE
+        // (this is the bug: playback_len was only half the interval)
+        ring.process(&input, &mut output, beat);
+        let silence_energy: f32 = output.iter().map(|s| s * s).sum::<f32>().sqrt();
+        assert!(
+            silence_energy < f32::EPSILON,
+            "Expected silence after partial feed exhausted, got energy={silence_energy}"
+        );
+    }
+
+    #[test]
+    fn incremental_feed_with_network_latency() {
+        // Simulates real-time streaming with network latency. The sender
+        // streams 20ms Opus frames during interval N, but they arrive at
+        // the receiver with a delay. This means some of interval N's frames
+        // arrive after the receiver has already crossed the N→N+1 boundary.
+        //
+        // Without live-append, those late frames are queued for the N+1→N+2
+        // swap, causing ~50% silence per interval ("2 bars sound, 2 bars
+        // silence"). With live-append, late frames extend the active playback
+        // slot, providing continuous audio.
+        //
+        // Setup: 48kHz stereo, buffer=256, 4 bars @ 120 BPM = 8s intervals.
+        // Network latency: ~200ms → ~75 callbacks worth of delay.
+
+        let mut ring = make_ring();
+        let buf = 256;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+        let frame_size = 1920; // 20ms Opus frame, stereo
+
+        let callbacks_per_interval = 768_000 / buf; // 3000
+        let callbacks_per_frame = 8; // ~one frame per 8 callbacks (20ms / 2.67ms)
+        // Network latency: frames arrive ~75 callbacks late (~200ms).
+        // This pushes ~10% of each interval's frames past the swap boundary.
+        let latency_callbacks: usize = 75;
+
+        // Use a queue to simulate delayed frame delivery.
+        // Each entry: (delivery_callback, interval_index, samples)
+        let mut frame_queue: std::collections::VecDeque<(usize, i64, Vec<f32>)> =
+            std::collections::VecDeque::new();
+
+        let total_intervals = 4;
+        let mut interval_audio_pcts: Vec<f64> = Vec::new();
+        let mut global_cb: usize = 0;
+
+        ring.process(&input, &mut output, 0.0);
+        global_cb += 1;
+
+        for interval in 0..total_intervals {
+            let base_beat = interval as f64 * 16.0;
+            let mut audio_buffers = 0u32;
+            let mut silent_buffers = 0u32;
+            let mut frames_fed = 0u32;
+
+            for cb in 1..=callbacks_per_interval {
+                let beat = base_beat + cb as f64 * buf as f64 * (120.0 / 60.0 / 48000.0 * 0.5);
+
+                // Schedule a frame with network latency
+                if cb % callbacks_per_frame == 0 {
+                    frame_queue.push_back((
+                        global_cb + latency_callbacks,
+                        interval as i64,
+                        vec![0.5f32; frame_size],
+                    ));
+                }
+
+                // Deliver any frames whose latency has elapsed
+                while let Some(&(delivery_cb, _, _)) = frame_queue.front() {
+                    if delivery_cb <= global_cb {
+                        let (_, idx, samples) = frame_queue.pop_front().unwrap();
+                        ring.feed_remote("peer-a".into(), 0, idx, samples);
+                        frames_fed += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                ring.process(&input, &mut output, beat);
+                global_cb += 1;
+
+                if output.iter().any(|&s| s.abs() > 0.001) {
+                    audio_buffers += 1;
+                } else {
+                    silent_buffers += 1;
+                }
+            }
+
+            // Cross into next interval
+            let next_beat = (interval as f64 + 1.0) * 16.0;
+
+            // Deliver queued frames before the swap callback
+            while let Some(&(delivery_cb, _, _)) = frame_queue.front() {
+                if delivery_cb <= global_cb {
+                    let (_, idx, samples) = frame_queue.pop_front().unwrap();
+                    ring.feed_remote("peer-a".into(), 0, idx, samples);
+                    frames_fed += 1;
+                } else {
+                    break;
+                }
+            }
+
+            ring.process(&input, &mut output, next_beat);
+            global_cb += 1;
+            if output.iter().any(|&s| s.abs() > 0.001) {
+                audio_buffers += 1;
+            } else {
+                silent_buffers += 1;
+            }
+
+            let total = audio_buffers + silent_buffers;
+            let pct = audio_buffers as f64 / total as f64 * 100.0;
+            interval_audio_pcts.push(pct);
+            eprintln!(
+                "[test]   Interval {interval}: {audio_buffers}/{total} audio ({pct:.0}%), fed {frames_fed} frames"
+            );
+        }
+
+        // Interval 0 has no playback (pipeline warmup). Interval 1 may have
+        // reduced coverage. By interval 2, live-append should provide >90%.
+        let steady_state_pct = interval_audio_pcts[2..].iter().copied()
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or(0.0);
+
+        eprintln!("[test] Steady-state min coverage (intervals 2+): {steady_state_pct:.0}%");
+
+        assert!(
+            steady_state_pct > 90.0,
+            "Expected >90% audio coverage in steady state (intervals 2+), \
+             got {steady_state_pct:.0}%. Late-arriving frames should be \
+             live-appended to the active playback slot."
+        );
+    }
+
+    #[test]
+    fn late_arriving_audio_after_swap_is_live_appended() {
+        // Verifies that audio fed AFTER a swap for the currently playing
+        // interval is live-appended to the playback slot immediately,
+        // rather than waiting for the next swap (which caused silence gaps).
+        let mut ring = make_ring();
+        let buf = XFADE_LEN + 128;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        // Interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed first half before swap
+        let half = 384_000;
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; half]);
+
+        // Cross into interval 1 — first half mixed into playback
+        ring.process(&input, &mut output, 16.0);
+        let initial_remaining = ring.playback_remaining();
+        assert!(initial_remaining > 0, "Should have partial playback");
+
+        // Feed second half AFTER the swap (tagged as interval 0 = currently playing).
+        // With live-append, this should extend the playback slot directly.
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; half]);
+
+        // Playback should have grown — NOT queued in pending_remote
+        assert_eq!(
+            ring.pending_remote_count(), 0,
+            "Late audio should be live-appended, not queued in pending_remote"
+        );
+        assert!(
+            ring.playback_remaining() > initial_remaining,
+            "Playback should have grown after live append"
+        );
+
+        // Read through — second half should produce audio, not silence
+        let mut found_audio_after_half = false;
+        let mut beat = 16.5;
+        for _ in 0..(half / buf + 10) {
+            ring.process(&input, &mut output, beat);
+            beat += 0.01;
+            if output.iter().any(|&s| s.abs() > 0.001) {
+                found_audio_after_half = true;
+            }
+        }
+        assert!(found_audio_after_half, "Live-appended audio should be audible");
     }
 
     // --- Test: Per-peer playback slots ---
