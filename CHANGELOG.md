@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.17.0 (2026-03-16)
+
+### Features
+
+- make logs and chat top-level tabs in session view (#218)
+- test external tempo changes via TempoChangeDetector extraction (#216)
+
+### Fixes
+
+- remove duplicate changelog entries and prevent future accumulation (#214)
+- live-append late-arriving Opus frames to active playback slot (#217)
+- sync GUI stream/slot list from observed audio frames (#219)
+
 ## 1.16.0 (2026-03-11)
 
 ### Features
