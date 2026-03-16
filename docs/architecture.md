@@ -103,6 +103,8 @@ At each interval boundary:
 - Pending remote intervals are mixed (summed) into the playback slot
 - Record and playback positions reset to zero
 
+Late-arriving frames (remote audio for the current playback interval that arrives after the swap) are **live-appended** directly to the active playback slot rather than queued for the next boundary. This eliminates the "2 bars sound, 2 bars silence" dropout that occurs at real-time network pacing.
+
 Each unique `ClientChannelMapping` (persistent `client_id` + `channel_index`) is assigned its own playback slot and Recv plugin auxiliary output via a `SlotTable`. If all 15 slots are exhausted, overflow audio is merged into the peer's channel 0 slot.
 
 Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` entries move from active to reserved. When the same persistent identity reconnects (possibly with a new session-scoped `peer_id`), they reclaim their original slots, keeping DAW aux routing stable across reconnects.
@@ -122,8 +124,9 @@ DAW Track A
   → IPC TCP frame (tag 0x01 with peer_id) to Recv Plugin B
   → FrameAssembler collects WAIF frames, assembles on final frame
   → AudioDecoder.decode_interval() — Opus decode to f32
-  → IntervalRing.feed_remote() — queue for next playback slot
-  → Next boundary: remote audio becomes playback slot
+  → IntervalRing.feed_remote() — live-append if interval is currently playing,
+                                  otherwise queue for next playback slot
+  → Next boundary: queued remote audio becomes playback slot
   → WAIL Recv plugin process() — IntervalRing reads playback to output
 DAW Track B hears Peer A's previous interval
 ```
