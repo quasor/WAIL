@@ -243,7 +243,7 @@ async fn session_loop(
 
     let mut ipc_pool = IpcWriterPool::new();
     let mut next_conn_id: usize = 0;
-    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<(usize, Vec<u8>)>(64);
     let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
 
     // Initialize local recording if configured
@@ -403,7 +403,7 @@ async fn session_loop(
                                         if is_send {
                                             recv_buf.push(&buf[..n]);
                                             while let Some(frame) = recv_buf.next_frame() {
-                                                match tx.try_send(frame) {
+                                                match tx.try_send((conn_id, frame)) {
                                                     Ok(()) => {}
                                                     Err(mpsc::error::TrySendError::Full(_)) => {
                                                         if !logged_ipc_drop {
@@ -434,7 +434,7 @@ async fn session_loop(
             }
 
             // --- Audio from plugin IPC → broadcast to WebRTC peers ---
-            Some(frame) = ipc_from_plugin_rx.recv() => {
+            Some((conn_id, frame)) = ipc_from_plugin_rx.recv() => {
                 // Streaming audio frames (20ms Opus chunks, tag 0x05)
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     if interval.current_index().is_none() {
@@ -445,6 +445,10 @@ async fn session_loop(
                     if wire_data.len() >= 7 && &wire_data[0..4] == b"WAIF" {
                         let stream_id = u16::from_le_bytes([wire_data[5], wire_data[6]]);
                         local_send_active.insert(stream_id);
+                        // Update stream_index if plugin changed it after connect
+                        if let Some(stored) = local_send_streams.get_mut(&conn_id) {
+                            *stored = stream_id;
+                        }
                     }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
@@ -892,6 +896,12 @@ async fn session_loop(
                     peer.last_seen = Instant::now();
                     peer.ever_received_message = true;
                     peer.audio_recv_count += 1;
+                }
+                // Assign a slot for this (peer, stream_id) if not already present so
+                // the GUI slot list stays in sync with the recv plugin's aux outputs.
+                if data.len() >= 7 && &data[0..4] == b"WAIF" {
+                    let stream_id = u16::from_le_bytes([data[5], data[6]]);
+                    let _ = peers.assign_slot(&from, stream_id);
                 }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
