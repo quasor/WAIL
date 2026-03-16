@@ -1,0 +1,19 @@
+[package]
+name = "wail-test-client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wail-test-client"
+path = "src/main.rs"
+
+[dependencies]
+wail-core = { path = "../wail-core" }
+wail-audio = { path = "../wail-audio" }
+wail-net = { path = "../wail-net" }
+tokio = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }

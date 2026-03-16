@@ -9,6 +9,7 @@ members = [
     "crates/wail-plugin-recv",
     "crates/wail-plugin-test",
     "crates/wail-tauri",
+    "crates/wail-test-client",
     "xtask",
 ]
 

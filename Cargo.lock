@@ -7451,6 +7451,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wail-test-client"
+version = "1.17.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio 1.49.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid 1.21.0",
+ "wail-audio",
+ "wail-core",
+ "wail-net",
+]
+
+[[package]]
 name = "waitgroup"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
