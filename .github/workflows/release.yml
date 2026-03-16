@@ -59,44 +59,28 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-binstall.exe
-            ~/.cargo/bin/cargo-nih-plug
-            ~/.cargo/bin/cargo-tauri.exe
-            target
-          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: windows-cargo-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Cache vcpkg
+        id: vcpkg-cache
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
           key: vcpkg-opus-x64-windows-v1
 
       - name: Install opus via vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         run: vcpkg install opus:x64-windows
 
       - name: Install pkg-config
         run: choco install pkgconfiglite -y
 
-      - name: Install cargo-binstall
-        run: |
-          if (!(Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy Unrestricted -Scope Process; iex (iwr "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.ps1").Content
-          }
-        shell: pwsh
-
-      - name: Install cargo-nih-plug
-        run: |
-          if (!(Get-Command cargo-nih-plug -ErrorAction SilentlyContinue)) {
-            cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
-          }
-        shell: pwsh
+      - name: Cache CLI tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\bin\cargo-tauri.exe
+          key: windows-cli-tools-v1
 
       - name: Install tauri-cli
         env:
@@ -112,7 +96,7 @@ jobs:
       - name: Build plugin
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: cargo xtask build-plugin
+        run: cargo xtask bundle-plugin
 
       - name: Stage opus.dll for Tauri bundling
         shell: pwsh
@@ -143,10 +127,6 @@ jobs:
           Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
           Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
 
-      - name: Strip PDB files before cache
-        shell: pwsh
-        run: Get-ChildItem -Path target -Filter "*.pdb" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
-
       - uses: actions/upload-artifact@v4
         with:
           name: wail-release-windows
@@ -162,18 +142,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-binstall
-            ~/.cargo/bin/cargo-nih-plug
-            ~/.cargo/bin/cargo-tauri
-            target
-          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: linux-cargo-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install system dependencies
         run: |
@@ -190,11 +159,11 @@ jobs:
             g++ \
             libx11-xcb-dev
 
-      - name: Install cargo-binstall
-        run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-
-      - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+      - name: Cache CLI tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: linux-cli-tools-v1
 
       - name: Install tauri-cli
         env:
@@ -206,7 +175,7 @@ jobs:
           tar -xzf /tmp/cargo-tauri-x86_64-unknown-linux-gnu.tgz -C ~/.cargo/bin/
 
       - name: Build plugin
-        run: cargo xtask build-plugin
+        run: cargo xtask bundle-plugin
 
       - name: Create opus.dll placeholder for cross-platform resources
         run: mkdir -p target/bundled && touch target/bundled/opus.dll
