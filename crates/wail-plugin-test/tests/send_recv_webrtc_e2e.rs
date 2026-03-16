@@ -189,282 +189,18 @@ fn drive_recv(
 }
 
 // ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
-
-#[test]
-fn send_and_recv_plugin_webrtc_e2e() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .with_test_writer()
-        .try_init();
-
-    // 1. Load both .clap binaries (CLAP main-thread affinity: all plugin calls stay here)
-    let mut send_host = load_send();
-    let mut recv_host = load_recv();
-
-    // 2. Pick random IPC ports for the two mini_app sessions
-    let send_ipc_port = common::random_port();
-    let recv_ipc_port = common::random_port();
-
-    // 3. Start a tokio runtime in a background thread for all async networking.
-    //    Plugin process() calls are synchronous and stay on this thread.
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
-
-    // 4. Start signaling + both mini_apps; wait for WebRTC to establish (~6 s on localhost).
-    //    mini_app_a accepts the Send plugin's IPC connection and broadcasts audio over WebRTC.
-    //    mini_app_b accepts the Recv plugin's IPC connection and forwards received audio to it.
-    rt.block_on(async {
-        let signaling_url = common::start_test_signaling_server().await;
-
-        let url_a = signaling_url.clone();
-        tokio::spawn(common::mini_app_session(
-            send_ipc_port,
-            url_a,
-            "e2e-room".into(),
-            "peer-a".into(),
-            "test".into(),
-        ));
-
-        // Small delay so peer-a joins first (peer-a < peer-b lexicographically → initiates ICE)
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        tokio::spawn(common::mini_app_session(
-            recv_ipc_port,
-            signaling_url,
-            "e2e-room".into(),
-            "peer-b".into(),
-            "test".into(),
-        ));
-
-        // Wait for WebRTC DataChannels to open between the two mini_apps.
-        // On localhost with no TURN relay this typically takes 1-3 s; 8 s is generous.
-        tokio::time::sleep(Duration::from_secs(8)).await;
-    });
-
-    // 5. Activate send plugin → its IPC thread reads WAIL_IPC_ADDR and connects to mini_app_a.
-    //    SAFETY: test binary is single-threaded at this point; no other thread reads this var.
-    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{send_ipc_port}")) };
-    let send_stopped = send_host
-        .activate(48000.0, 32, 4096)
-        .expect("Failed to activate send plugin");
-    let mut send_proc = send_stopped
-        .start_processing()
-        .expect("Failed to start send processing");
-
-    // Small delay for send plugin's IPC thread to connect before recv plugin changes the var.
-    std::thread::sleep(Duration::from_millis(200));
-
-    // 6. Activate recv plugin → its IPC thread connects to mini_app_b.
-    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{recv_ipc_port}")) };
-    let recv_stopped = recv_host
-        .activate(48000.0, 32, 4096)
-        .expect("Failed to activate recv plugin");
-    let mut recv_proc = recv_stopped
-        .start_processing()
-        .expect("Failed to start recv processing");
-
-    // Small delay for recv plugin's IPC thread to connect before driving audio.
-    std::thread::sleep(Duration::from_millis(500));
-
-    // 7. Drive both plugins in an interleaved loop for ~1 minute of audio playback.
-    //
-    //    Parameters:
-    //      sample_rate = 48000, buf_size = 4096, BPM = 120, bars = 4, quantum = 4
-    //      samples_per_interval = bars × quantum × 60 / BPM × sample_rate
-    //                           = 4 × 4 × 60 / 120 × 48000 = 384,000
-    //      callbacks_per_interval = 384,000 / 4096 ≈ 94
-    //
-    //    Because the test drives faster than real-time, the IPC→WebRTC→IPC pipeline
-    //    has a 2-interval warmup (vs. 1-interval in production where the DAW paces
-    //    callbacks at the audio clock rate). After the warmup, audio flows continuously
-    //    with zero gap at each interval boundary — the ring buffer's crossfade swap is
-    //    always ready because the previous interval's data arrived during the preceding
-    //    94-callback window.
-    //
-    //    Callback budget for 1 minute of audio playback:
-    //      - 2-interval pipeline warmup = 2 × 94 = 188 callbacks
-    //      - 60 seconds of output     = 60 × 48000 / 4096 ≈ 703 callbacks
-    //      - Total minimum            = 891 callbacks → use 950 for margin
-    //
-    //    Network I/O runs on tokio background threads concurrently with this loop.
-
-    let buf_size: u32 = 4096;
-    let num_callbacks: u64 = 950;
-    let mut non_silent_buffers: u32 = 0;
-
-    // Gap tracking: measure the longest run of consecutive silent buffers AFTER
-    // the first non-silent buffer appears. Zero gap means seamless interval transitions.
-    let mut in_audio_phase = false;
-    let mut current_gap: u32 = 0;
-    let mut max_gap: u32 = 0;
-
-    // Per-interval stats and ZCR sums for temporal-alignment verification.
-    // (index, non_silent, total, zcr_sum)
-    let mut interval_stats: Vec<(u64, u32, u32, f64)> = Vec::new();
-    let mut cur_interval = u64::MAX;
-    let mut cur_interval_non_silent: u32 = 0;
-    let mut cur_interval_total: u32 = 0;
-    let mut cur_interval_zcr_sum: f64 = 0.0;
-
-    for i in 0..num_callbacks {
-        let steady_time = i * buf_size as u64;
-        let interval_index = steady_time / 384_000;
-
-        if interval_index != cur_interval {
-            if cur_interval != u64::MAX {
-                interval_stats.push((
-                    cur_interval,
-                    cur_interval_non_silent,
-                    cur_interval_total,
-                    cur_interval_zcr_sum,
-                ));
-            }
-            cur_interval = interval_index;
-            cur_interval_non_silent = 0;
-            cur_interval_total = 0;
-            cur_interval_zcr_sum = 0.0;
-        }
-        cur_interval_total += 1;
-
-        // Tag each send interval with a distinct frequency so we can verify that
-        // the recv side plays the correct interval's content in the correct window.
-        let send_freq = interval_freq(interval_index);
-        drive_send(&mut send_proc, buf_size, steady_time, send_freq);
-        let out_l = drive_recv(&mut recv_proc, buf_size, steady_time);
-
-        let energy = rms(&out_l);
-        if energy > 0.001 {
-            non_silent_buffers += 1;
-            cur_interval_non_silent += 1;
-            cur_interval_zcr_sum += zcr(&out_l, 48000) as f64;
-            if in_audio_phase {
-                max_gap = max_gap.max(current_gap);
-                current_gap = 0;
-            }
-            in_audio_phase = true;
-        } else if in_audio_phase {
-            current_gap += 1;
-        }
-    }
-    // Finalize last interval and any trailing gap
-    if cur_interval != u64::MAX {
-        interval_stats.push((
-            cur_interval,
-            cur_interval_non_silent,
-            cur_interval_total,
-            cur_interval_zcr_sum,
-        ));
-    }
-    max_gap = max_gap.max(current_gap);
-
-    // Find the pipeline lag (in intervals) by locating the first interval with audio.
-    // In production at real-time speed this is 1 interval (NINJAM design); the test
-    // drives ~14× faster so the pipeline has an extra interval of backlog → lag = 2.
-    let lag = interval_stats
-        .iter()
-        .find(|(_, ns, _, _)| *ns > 0)
-        .map(|(idx, _, _, _)| *idx)
-        .unwrap_or(0);
-
-    // Log per-interval breakdown with frequency tag
-    for (idx, non_silent, total, zcr_sum) in &interval_stats {
-        let pct = *non_silent as f64 / *total as f64 * 100.0;
-        let avg_zcr = if *non_silent > 0 { *zcr_sum / *non_silent as f64 } else { 0.0 };
-        let detected = if avg_zcr > 550.0 { "~880Hz" } else if avg_zcr > 0.1 { "~220Hz" } else { "(silent)" };
-        let send_idx = idx.saturating_sub(lag);
-        let expected_freq = interval_freq(send_idx);
-        eprintln!(
-            "[test]   Recv interval {idx:2}: {non_silent:3}/{total:3} ({pct:.0}%)  \
-             ZCR≈{avg_zcr:.0}Hz ({detected})  [from send interval {send_idx}, sent {expected_freq:.0}Hz]"
-        );
-    }
-
-    let max_gap_ms = max_gap as f64 * buf_size as f64 / 48000.0 * 1000.0;
-    eprintln!(
-        "[test] E2E summary: non_silent={non_silent_buffers}/{num_callbacks}, \
-         lag={lag} intervals, max_gap={max_gap} buffers ({max_gap_ms:.0}ms)"
-    );
-
-    // 8a. Assert ≥1 minute of contiguous non-silent output with no audible gaps.
-    assert!(
-        non_silent_buffers >= 700,
-        "Expected ≥700 non-silent buffers (≈60s of audio) via the full \
-         Send→WebRTC→Recv path, got {non_silent_buffers}/{num_callbacks}."
-    );
-    assert!(
-        max_gap <= 2,
-        "Detected a gap of {max_gap} consecutive silent buffers ({max_gap_ms:.0}ms) — \
-         interval-boundary transitions must be seamless (≤ 2 buffers / ~170ms)."
-    );
-
-    // 8b. Assert temporal alignment: recv interval N plays send interval N−lag's content.
-    //
-    //     Each send interval is tagged with a distinct frequency (220Hz = even, 880Hz = odd).
-    //     Since lag=2 (even), parity is preserved: recv even intervals should play 220Hz,
-    //     recv odd intervals should play 880Hz.
-    //
-    //     We verify each fully-covered recv interval (≥ 75% non-silent).  The ZCR
-    //     threshold of 550 Hz sits midway between 220 Hz and 880 Hz.
-    //
-    //     This catches bugs where the ring buffer plays the wrong interval (off-by-one
-    //     in the swap logic) or where interval content is mixed across boundaries.
-    let zcr_threshold = (FREQ_EVEN + FREQ_ODD) / 2.0; // 550 Hz
-    for (recv_idx, non_silent, total, zcr_sum) in &interval_stats {
-        // Only check intervals that are substantially non-silent and fully inside the run
-        if (*non_silent as f64) < (*total as f64 * 0.75) { continue; }
-        if *recv_idx < lag { continue; }
-
-        let send_idx = recv_idx - lag;
-        let expected_freq = interval_freq(send_idx);
-        let avg_zcr = zcr_sum / *non_silent as f64;
-        let detected_high = avg_zcr > zcr_threshold as f64;
-        let expected_high = expected_freq > zcr_threshold;
-        assert_eq!(
-            detected_high, expected_high,
-            "Temporal alignment failure at recv interval {recv_idx}: \
-             expected {expected_freq:.0}Hz (from send interval {send_idx}), \
-             but ZCR≈{avg_zcr:.0}Hz indicates {}. \
-             Recv interval N must play send interval N−{lag} content.",
-            if detected_high { "880Hz (odd)" } else { "220Hz (even)" },
-        );
-    }
-
-    eprintln!(
-        "[test] PASSED — Send→WebRTC→Recv: {non_silent_buffers} non-silent buffers, \
-         max_gap={max_gap} ({max_gap_ms:.0}ms), temporal alignment verified across {} intervals.",
-        interval_stats.iter().filter(|(idx, ns, total, _)| {
-            *idx >= lag && (*ns as f64) >= (*total as f64 * 0.75)
-        }).count()
-    );
-
-    // 9. Stop and deactivate (order matters: stop_processing before deactivate)
-    let send_stopped = send_proc.stop_processing();
-    send_host.deactivate(send_stopped);
-
-    let recv_stopped = recv_proc.stop_processing();
-    recv_host.deactivate(recv_stopped);
-
-    // 10. Leak both hosts to prevent the .clap dylibs from unloading while background
-    //     IPC threads are still running (same pattern as all other wail-plugin-test tests).
-    send_host.leak();
-    recv_host.leak();
-}
-
-// ---------------------------------------------------------------------------
 // Real-time paced test
 // ---------------------------------------------------------------------------
 
-/// Drive send + recv plugins at wall-clock real-time speed.
+/// Drive send + recv plugins at wall-clock real-time speed with ZCR temporal alignment.
 ///
-/// The existing `send_and_recv_plugin_webrtc_e2e` test drives ~14× faster than
-/// real-time, which masks timing bugs where streaming audio frames arrive after
-/// an interval boundary swap. This test uses `thread::sleep` to pace callbacks
-/// at the actual DAW audio clock rate, reproducing the "2 bars sound, 2 bars
-/// silence" dropout that occurs when live-append is broken.
+/// Paces callbacks at the actual DAW audio clock rate (via `thread::sleep`),
+/// reproducing the "2 bars sound, 2 bars silence" dropout that occurs when
+/// live-append is broken. Each send interval is tagged with an alternating
+/// frequency (220Hz / 880Hz); ZCR analysis on the recv side verifies that the
+/// correct interval's content is playing at the right time.
 ///
-/// Duration: ~30s of real-time audio (shorter than the fast test's ~60s of
-/// simulated audio, but faithful to production timing).
+/// Duration: ~30s of real-time audio, faithful to production timing.
 #[test]
 fn realtime_paced_no_dropout_e2e() {
     let _ = tracing_subscriber::fmt()
@@ -548,11 +284,12 @@ fn realtime_paced_no_dropout_e2e() {
     let mut current_gap: u32 = 0;
     let mut max_gap: u32 = 0;
 
-    // Per-interval stats: (index, non_silent, total)
-    let mut interval_stats: Vec<(u64, u32, u32)> = Vec::new();
+    // Per-interval stats: (index, non_silent, total, zcr_sum)
+    let mut interval_stats: Vec<(u64, u32, u32, f64)> = Vec::new();
     let mut cur_interval = u64::MAX;
     let mut cur_ns: u32 = 0;
     let mut cur_total: u32 = 0;
+    let mut cur_zcr_sum: f64 = 0.0;
 
     let wall_start = std::time::Instant::now();
 
@@ -562,11 +299,12 @@ fn realtime_paced_no_dropout_e2e() {
 
         if interval_index != cur_interval {
             if cur_interval != u64::MAX {
-                interval_stats.push((cur_interval, cur_ns, cur_total));
+                interval_stats.push((cur_interval, cur_ns, cur_total, cur_zcr_sum));
             }
             cur_interval = interval_index;
             cur_ns = 0;
             cur_total = 0;
+            cur_zcr_sum = 0.0;
         }
         cur_total += 1;
 
@@ -578,6 +316,7 @@ fn realtime_paced_no_dropout_e2e() {
         if energy > 0.001 {
             non_silent_buffers += 1;
             cur_ns += 1;
+            cur_zcr_sum += zcr(&out_l, 48000) as f64;
             if in_audio_phase {
                 max_gap = max_gap.max(current_gap);
                 current_gap = 0;
@@ -598,7 +337,7 @@ fn realtime_paced_no_dropout_e2e() {
 
     // Finalize
     if cur_interval != u64::MAX {
-        interval_stats.push((cur_interval, cur_ns, cur_total));
+        interval_stats.push((cur_interval, cur_ns, cur_total, cur_zcr_sum));
     }
     max_gap = max_gap.max(current_gap);
 
@@ -608,15 +347,20 @@ fn realtime_paced_no_dropout_e2e() {
     // Find pipeline lag
     let lag = interval_stats
         .iter()
-        .find(|(_, ns, _)| *ns > 0)
-        .map(|(idx, _, _)| *idx)
+        .find(|(_, ns, _, _)| *ns > 0)
+        .map(|(idx, _, _, _)| *idx)
         .unwrap_or(0);
 
-    // Log per-interval breakdown
-    for (idx, non_silent, total) in &interval_stats {
+    // Log per-interval breakdown with ZCR frequency tag
+    for (idx, non_silent, total, zcr_sum) in &interval_stats {
         let pct = if *total > 0 { *non_silent as f64 / *total as f64 * 100.0 } else { 0.0 };
+        let avg_zcr = if *non_silent > 0 { *zcr_sum / *non_silent as f64 } else { 0.0 };
+        let detected = if avg_zcr > 550.0 { "~880Hz" } else if avg_zcr > 0.1 { "~220Hz" } else { "(silent)" };
+        let send_idx = idx.saturating_sub(lag);
+        let expected_freq = interval_freq(send_idx);
         eprintln!(
-            "[realtime]   Interval {idx:2}: {non_silent:3}/{total:3} ({pct:.0}%)"
+            "[realtime]   Interval {idx:2}: {non_silent:3}/{total:3} ({pct:.0}%)  \
+             ZCR≈{avg_zcr:.0}Hz ({detected})  [from send interval {send_idx}, sent {expected_freq:.0}Hz]"
         );
     }
 
@@ -651,7 +395,7 @@ fn realtime_paced_no_dropout_e2e() {
     );
 
     // Per-interval coverage: every post-warmup interval must have >75% audio
-    for (idx, non_silent, total) in &interval_stats {
+    for (idx, non_silent, total, _) in &interval_stats {
         if *idx <= lag { continue; } // skip warmup intervals
         let pct = *non_silent as f64 / *total as f64 * 100.0;
         assert!(
@@ -661,9 +405,41 @@ fn realtime_paced_no_dropout_e2e() {
         );
     }
 
+    // Temporal alignment: verify recv interval N plays send interval N−lag's content.
+    //
+    // Each send interval is tagged with a distinct frequency (220Hz = even, 880Hz = odd).
+    // ZCR threshold of 550Hz sits midway between the two; detected frequency must match
+    // the expected frequency for the corresponding send interval.
+    //
+    // This catches ring buffer swap ordering bugs (off-by-one in interval boundaries).
+    let zcr_threshold = (FREQ_EVEN + FREQ_ODD) / 2.0; // 550 Hz
+    for (recv_idx, non_silent, total, zcr_sum) in &interval_stats {
+        if (*non_silent as f64) < (*total as f64 * 0.75) { continue; } // skip sparse intervals
+        if *recv_idx <= lag { continue; } // skip warmup
+
+        let send_idx = recv_idx - lag;
+        let expected_freq = interval_freq(send_idx);
+        let avg_zcr = zcr_sum / *non_silent as f64;
+        let detected_high = avg_zcr > zcr_threshold as f64;
+        let expected_high = expected_freq > zcr_threshold;
+        assert_eq!(
+            detected_high, expected_high,
+            "Temporal alignment failure at recv interval {recv_idx}: \
+             expected {expected_freq:.0}Hz (from send interval {send_idx}), \
+             but ZCR≈{avg_zcr:.0}Hz indicates {}. \
+             Recv interval N must play send interval N−{lag} content.",
+            if detected_high { "880Hz (odd)" } else { "220Hz (even)" },
+        );
+    }
+
+    let zcr_verified = interval_stats.iter().filter(|(idx, ns, total, _)| {
+        *idx > lag && (*ns as f64) >= (*total as f64 * 0.75)
+    }).count();
+
     eprintln!(
         "[realtime] PASSED — {non_silent_buffers} non-silent buffers, \
-         max_gap={max_gap} ({max_gap_ms:.0}ms), all post-warmup intervals >75% audio."
+         max_gap={max_gap} ({max_gap_ms:.0}ms), all post-warmup intervals >75% audio, \
+         temporal alignment verified across {zcr_verified} intervals."
     );
 
     // 6. Cleanup
