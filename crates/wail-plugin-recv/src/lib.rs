@@ -8,10 +8,12 @@ use std::time::Duration;
 use assert_no_alloc::permit_alloc;
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
-use nih_plug_egui::{create_egui_editor, egui, EguiState};
+use nih_plug_egui::{create_egui_editor, EguiState};
 
+mod editor;
 mod params;
 
+use editor::EditorData;
 use params::WailRecvParams;
 use wail_audio::{
     nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire,
@@ -63,6 +65,10 @@ pub struct WailRecvPlugin {
     /// Used to avoid redundant `rescan_audio_port_names()` calls.
     applied_slot_names: Vec<Option<String>>,
     editor_state: Arc<EguiState>,
+    /// Shared visualization state for the egui editor.
+    editor_data: Arc<Mutex<EditorData>>,
+    /// Last observed interval index — used to detect boundary crossings for markers.
+    last_interval: i64,
 }
 
 impl Default for WailRecvPlugin {
@@ -80,7 +86,9 @@ impl Default for WailRecvPlugin {
             beat_fallback_warned: false,
             pending_names: HashMap::new(),
             applied_slot_names: vec![None; wail_audio::MAX_REMOTE_PEERS],
-            editor_state: EguiState::from_size(300, 130),
+            editor_state: EguiState::from_size(380, 460),
+            editor_data: Arc::new(Mutex::new(EditorData::default())),
+            last_interval: 0,
         }
     }
 }
@@ -187,22 +195,13 @@ impl Plugin for WailRecvPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let data = self.editor_data.clone();
         create_egui_editor(
             self.editor_state.clone(),
-            (),
+            data,
             |_, _| {},
-            |egui_ctx, _setter, _state| {
-                egui::CentralPanel::default().show(egui_ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading("WAIL Recv");
-                        ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
-                        ui.add_space(8.0);
-                        ui.hyperlink_to(
-                            "github.com/MostDistant/WAIL",
-                            "https://github.com/MostDistant/WAIL",
-                        );
-                    });
-                });
+            |egui_ctx, _setter, state| {
+                editor::draw_editor(egui_ctx, state);
             },
         )
     }
@@ -288,6 +287,7 @@ impl Plugin for WailRecvPlugin {
         // and recreating the Opus encoder/decoder all require allocation — wrap in permit_alloc.
         permit_alloc(|| {
             self.cumulative_samples = 0;
+            self.last_interval = 0;
             self.pending_names.clear();
             for name in &mut self.applied_slot_names {
                 *name = None;
@@ -438,6 +438,41 @@ impl Plugin for WailRecvPlugin {
                     let n = aux_buf.samples().min(num_samples);
                     write_peer_to_aux(peer_buf, aux_buf.as_slice(), n, num_channels as usize);
                 }
+
+                // Update visualization state for the editor GUI
+                let interval_index = (beat_position / (DEFAULT_BARS as f64 * DEFAULT_QUANTUM)).floor() as i64;
+                let is_boundary = interval_index != self.last_interval;
+                self.last_interval = interval_index;
+
+                permit_alloc(|| {
+                    if let Ok(mut vis) = self.editor_data.try_lock() {
+                        vis.bpm = bpm;
+                        let interval_len = DEFAULT_BARS as f64 * DEFAULT_QUANTUM;
+                        vis.interval_progress = ((beat_position % interval_len) / interval_len) as f32;
+                        vis.current_interval = interval_index;
+
+                        // Compute per-slot RMS and push to sparkline history
+                        let active_info = bridge.peer_info();
+                        for slot_idx in 0..num_aux {
+                            let peer_buf = &self.peer_bufs[slot_idx][..buf_size];
+                            let rms = editor::compute_rms(peer_buf);
+                            let peak = editor::compute_peak(peer_buf);
+                            vis.slots[slot_idx].push_rms(rms, is_boundary);
+                            vis.slots[slot_idx].peak = peak;
+                        }
+
+                        // Sync slot active state and names
+                        for slot_idx in 0..wail_audio::MAX_REMOTE_PEERS {
+                            let is_active = active_info.iter().any(|(s, _, _)| *s == slot_idx);
+                            vis.slots[slot_idx].active = is_active;
+                        }
+                        for (slot, peer_id, _) in &active_info {
+                            if let Some(name) = self.pending_names.get(peer_id.as_str()) {
+                                vis.slots[*slot].set_name(name);
+                            }
+                        }
+                    }
+                });
             }
         }
 
