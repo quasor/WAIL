@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.17.1 (2026-03-17)
+
+### Fixes
+
+- eliminate audio gaps and artifacts at interval boundaries (#223)
+- restore chat and logs tabs after session disconnect (#225)
+
 ## 1.17.0 (2026-03-16)
 
 ### Features
