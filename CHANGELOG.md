@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.0 (2026-03-17)
+
+### Features
+
+- add Link sync and xtask command to test client (#232)
+
 ## 1.18.1 (2026-03-17)
 
 ### Fixes
