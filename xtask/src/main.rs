@@ -22,6 +22,7 @@ TASKS:
   build-tauri     Build plugins, then build the Tauri distributable
   test            Build plugins if missing, then run cargo test
   run-turn        Start a local coturn TURN server
+  test-client     Run the test tone client
 
 OPTIONS (install):
   --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
@@ -45,7 +46,13 @@ OPTIONS (run-turn):
   --min-port <N>  Relay port range start  (default: 49152)
   --max-port <N>  Relay port range end    (default: 49252)
 
+OPTIONS (test-client):
+  All arguments are forwarded to wail-test-client.
+  See `cargo xtask test-client -- --help` for available options.
+
 EXAMPLES:
+  cargo xtask test-client
+  cargo xtask test-client -- --room my-room --bpm 140
   cargo xtask install
   cargo xtask install --no-plugin-build
   cargo xtask build-plugin
@@ -104,6 +111,10 @@ fn main() -> Result<()> {
         Some("run-turn") => {
             args.remove(0);
             run_turn(&args)
+        }
+        Some("test-client") => {
+            args.remove(0);
+            run_test_client(&args)
         }
         Some(task) => bail!("Unknown task: {task}\n\n{HELP}"),
         None => {
@@ -567,6 +578,15 @@ fn run_turn(args: &[String]) -> Result<()> {
         .arg(format!("--max-port={max_port}"));
 
     println!("Starting coturn TURN server...\n");
+    run_cmd(cmd)
+}
+
+fn run_test_client(args: &[String]) -> Result<()> {
+    println!("Building and running wail-test-client...");
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args(["run", "-p", "wail-test-client", "--"]);
+    cmd.args(args);
+    cmd.current_dir(workspace_dir());
     run_cmd(cmd)
 }
 
