@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.0 (2026-03-17)
+
+### Features
+
+- add synthwave audio visualization to recv plugin GUI (#228)
+
 ## 1.17.2 (2026-03-17)
 
 ### Fixes
