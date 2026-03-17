@@ -11,6 +11,7 @@ path = "src/main.rs"
 wail-core = { path = "../wail-core" }
 wail-audio = { path = "../wail-audio" }
 wail-net = { path = "../wail-net" }
+rusty_link = "0.4"
 tokio = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing = { workspace = true }

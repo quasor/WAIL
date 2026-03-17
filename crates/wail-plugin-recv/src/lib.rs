@@ -466,7 +466,9 @@ fn ipc_thread_recv(
         );
     }
 
-    let mut decoders: HashMap<(String, u16, i64), AudioDecoder> = HashMap::new();
+    // Key by (peer_id, stream_id) — reuse decoder across intervals to avoid
+    // the ~120ms Opus warm-up ramp that occurs with a fresh decoder.
+    let mut decoders: HashMap<(String, u16), AudioDecoder> = HashMap::new();
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -521,7 +523,7 @@ fn ipc_thread_recv(
                                                 // the final frame arrives. This ensures decoded
                                                 // PCM reaches the audio thread continuously,
                                                 // avoiding dropout at interval boundaries.
-                                                let dec_key = (peer_id.clone(), frame.stream_id, frame.interval_index);
+                                                let dec_key = (peer_id.clone(), frame.stream_id);
                                                 let dec = decoders.entry(dec_key).or_insert_with(|| {
                                                     match AudioDecoder::new(opus_rate, channels) {
                                                         Ok(d) => d,

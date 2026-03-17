@@ -373,8 +373,9 @@ mod tests {
             "Should be silence when no audio was fed before boundary, RMS={}",
             energy.sqrt());
 
-        // NOW the bulk-decoded audio arrives (too late for interval 1 playback)
-        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; buf_size]);
+        // NOW the bulk-decoded audio arrives (too late for interval 0 playback).
+        // Tagged as interval 1 (the current recording interval).
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.5f32; buf_size]);
 
         // It sits in pending_remote, won't play until the NEXT boundary swap.
         // Process more within interval 1 — still silence from the missed swap.
@@ -1071,5 +1072,217 @@ mod tests {
         // After reading once above, read positions advanced, so these may be partial.
         // But since the total is 4096 and we read 4096 each time, we should still
         // see that at least one of them has data from the first read.
+    }
+
+    // ---------------------------------------------------------------
+    // Test: Constant tone amplitude continuity across interval boundaries
+    // ---------------------------------------------------------------
+
+    /// Verifies that a constant 440 Hz sine tone played through the full
+    /// encode → per-frame decode → ring buffer path maintains consistent
+    /// amplitude across interval boundaries. Catches two regressions:
+    ///
+    /// 1. Opus decoder warm-up ramp: if a fresh decoder is created per
+    ///    interval, the first ~6 frames (~120ms) ramp up from silence.
+    /// 2. Crossfade amplitude dip: if the crossfade window or curve is
+    ///    wrong, there's a momentary volume drop at the boundary.
+    ///
+    /// The test uses a SINGLE decoder across all intervals (matching the
+    /// production recv plugin path) and checks that no 20ms window near
+    /// the boundary drops below 50% of the steady-state RMS.
+    #[test]
+    fn constant_tone_no_amplitude_drop_at_boundary() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        // Single decoder reused across intervals — matches production behavior.
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = encoder.frame_size(); // 960 samples per channel
+        let frame_samples = frame_size * CH as usize;
+
+        // Continuous sine phase across all intervals (like the test client).
+        let mut phase: f64 = 0.0;
+        let freq = 440.0f64;
+        let phase_inc = freq * std::f64::consts::TAU / SR as f64;
+
+        let buf_size = frame_samples; // process in 20ms chunks for precise boundary tracking
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        let beats_per_interval = BARS as f64 * Q; // 16.0
+        let bpm = 120.0;
+        let seconds_per_beat = 60.0 / bpm;
+        let seconds_per_frame = frame_size as f64 / SR as f64; // 0.02s
+        let beats_per_frame = seconds_per_frame / seconds_per_beat;
+
+        // Run for 3 full intervals (0, 1, 2) + partial interval 3.
+        let total_frames = ((beats_per_interval * 3.5) / beats_per_frame) as usize;
+        let mut beat = 0.0f64;
+
+        // Collect per-frame RMS of the output for analysis.
+        let mut frame_rms: Vec<(f64, f32)> = Vec::new(); // (beat, rms)
+
+        for _ in 0..total_frames {
+            // Generate one frame of continuous sine.
+            let mut pcm = vec![0.0f32; frame_samples];
+            for i in 0..frame_size {
+                let val = phase.sin() as f32 * 0.5;
+                pcm[i * CH as usize] = val;
+                pcm[i * CH as usize + 1] = val;
+                phase += phase_inc;
+            }
+            phase %= std::f64::consts::TAU;
+
+            // Encode and decode with persistent decoder.
+            let opus_bytes = encoder.encode_frame(&pcm).unwrap();
+            let decoded_pcm = decoder.decode_frame(&opus_bytes).unwrap();
+
+            // Determine interval index from beat.
+            let interval_index = (beat / beats_per_interval).floor() as i64;
+
+            // Feed decoded audio to ring.
+            ring.feed_remote("sender".into(), 0, interval_index, decoded_pcm);
+
+            // Drive the ring (silence input — we only care about playback output).
+            ring.process(&input, &mut output, beat);
+
+            let r = rms(&output);
+            frame_rms.push((beat, r));
+
+            beat += beats_per_frame;
+        }
+
+        // Skip the first interval (Opus priming delay) and analyze from interval 1 onward.
+        let skip_beats = beats_per_interval;
+        let steady_state: Vec<f32> = frame_rms.iter()
+            .filter(|(b, _)| *b >= skip_beats + beats_per_interval * 0.5) // mid-interval 1
+            .map(|(_, r)| *r)
+            .collect();
+
+        assert!(!steady_state.is_empty(), "Should have steady-state samples");
+
+        let steady_rms = steady_state.iter().sum::<f32>() / steady_state.len() as f32;
+        assert!(steady_rms > 0.05,
+            "Steady-state RMS should be well above silence, got {steady_rms}");
+
+        // Check the boundary regions (±5 frames around each boundary).
+        // No frame should drop below 50% of steady-state RMS.
+        let boundary_beats: Vec<f64> = (1..3).map(|i| i as f64 * beats_per_interval).collect();
+        let window_beats = beats_per_frame * 5.0;
+
+        for boundary in &boundary_beats {
+            let near_boundary: Vec<(f64, f32)> = frame_rms.iter()
+                .filter(|(b, _)| (*b - boundary).abs() < window_beats && *b > skip_beats)
+                .cloned()
+                .collect();
+
+            for (b, r) in &near_boundary {
+                assert!(
+                    *r > steady_rms * 0.5,
+                    "Amplitude drop at boundary beat {boundary}: frame at beat {b:.1} has RMS {r:.4}, \
+                     steady-state is {steady_rms:.4}. This indicates either Opus decoder warm-up \
+                     (fresh decoder per interval) or a crossfade issue."
+                );
+            }
+        }
+    }
+
+    /// Proves the failure mode: if a NEW Opus decoder is created for each
+    /// interval (the old per-interval isolation pattern), the first ~6 frames
+    /// ramp up from silence, causing an audible ~120ms fade-in.
+    #[test]
+    fn fresh_decoder_per_interval_causes_amplitude_ramp() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+
+        let frame_size = encoder.frame_size();
+        let frame_samples = frame_size * CH as usize;
+
+        let mut phase: f64 = 0.0;
+        let freq = 440.0f64;
+        let phase_inc = freq * std::f64::consts::TAU / SR as f64;
+
+        let buf_size = frame_samples;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        let beats_per_interval = BARS as f64 * Q;
+        let bpm = 120.0;
+        let seconds_per_beat = 60.0 / bpm;
+        let seconds_per_frame = frame_size as f64 / SR as f64;
+        let beats_per_frame = seconds_per_frame / seconds_per_beat;
+
+        let total_frames = ((beats_per_interval * 2.5) / beats_per_frame) as usize;
+        let mut beat = 0.0f64;
+        let mut current_interval = -1i64;
+
+        // Fresh decoder per interval — the OLD behavior.
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+        let mut frame_rms: Vec<(f64, f32)> = Vec::new();
+
+        for _ in 0..total_frames {
+            let mut pcm = vec![0.0f32; frame_samples];
+            for i in 0..frame_size {
+                let val = phase.sin() as f32 * 0.5;
+                pcm[i * CH as usize] = val;
+                pcm[i * CH as usize + 1] = val;
+                phase += phase_inc;
+            }
+            phase %= std::f64::consts::TAU;
+
+            let interval_index = (beat / beats_per_interval).floor() as i64;
+
+            // Create a FRESH decoder when the interval changes.
+            if interval_index != current_interval {
+                decoder = AudioDecoder::new(SR, CH).unwrap();
+                current_interval = interval_index;
+            }
+
+            let opus_bytes = encoder.encode_frame(&pcm).unwrap();
+            let decoded_pcm = decoder.decode_frame(&opus_bytes).unwrap();
+
+            ring.feed_remote("sender".into(), 0, interval_index, decoded_pcm);
+            ring.process(&input, &mut output, beat);
+
+            frame_rms.push((beat, rms(&output)));
+            beat += beats_per_frame;
+        }
+
+        // Find the first frame of interval 2 and check that it has low amplitude
+        // (proving the warm-up ramp exists with fresh decoders).
+        let boundary_2 = 2.0 * beats_per_interval;
+        let first_frames_after: Vec<f32> = frame_rms.iter()
+            .filter(|(b, _)| *b >= boundary_2 && *b < boundary_2 + beats_per_frame * 3.0)
+            .map(|(_, r)| *r)
+            .collect();
+
+        // Get steady-state from mid-interval 1.
+        let mid_interval_1 = beats_per_interval * 1.5;
+        let steady: Vec<f32> = frame_rms.iter()
+            .filter(|(b, _)| (*b - mid_interval_1).abs() < beats_per_frame * 5.0)
+            .map(|(_, r)| *r)
+            .collect();
+
+        if !steady.is_empty() && !first_frames_after.is_empty() {
+            let steady_avg = steady.iter().sum::<f32>() / steady.len() as f32;
+            let boundary_avg = first_frames_after.iter().sum::<f32>() / first_frames_after.len() as f32;
+
+            // With a fresh decoder, the first few frames should be significantly quieter.
+            // This test documents the regression so it doesn't silently return.
+            if steady_avg > 0.05 {
+                assert!(
+                    boundary_avg < steady_avg * 0.9,
+                    "Fresh decoder per interval should cause amplitude ramp at boundary, \
+                     but boundary_avg={boundary_avg:.4} is not below 90% of steady={steady_avg:.4}. \
+                     If this fails, Opus decoder behavior may have changed."
+                );
+            }
+        }
     }
 }

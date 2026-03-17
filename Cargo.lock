@@ -7456,6 +7456,7 @@ version = "1.17.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rusty_link",
  "tokio 1.49.0",
  "tracing",
  "tracing-subscriber",

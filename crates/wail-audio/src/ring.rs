@@ -211,7 +211,11 @@ impl IntervalRing {
                 self.swap_intervals(prev);
             }
             None => {
-                // First process call — start recording
+                // First process call — start recording.
+                // Set playback_interval so feed_remote() can live-append
+                // frames for this interval immediately, instead of queuing
+                // them in pending_remote until the first boundary swap.
+                self.playback_interval = Some(interval_index);
             }
             _ => {}
         }
@@ -581,15 +585,24 @@ impl IntervalRing {
         // Mix pending remote intervals into pre-allocated playback slot
         self.playback_pos = 0;
         self.playback_len = 0;
-        // Track the interval being played so late-arriving frames can append live.
-        // Use the highest interval index from pending_remote, or completed_index
-        // if nothing is pending (the sender's interval we're about to play).
-        self.playback_interval = Some(completed_index);
 
-        // Take pending_remote, drain it (preserving capacity), then put it back.
+        // Capture previous playback interval BEFORE updating — entries for
+        // the outgoing interval may be in pending_remote if the peer slot
+        // wasn't assigned during live-append (first audio from a new peer).
+        let prev_playback = self.playback_interval;
+
+        // Track the interval being played so late-arriving frames can append live.
+        self.playback_interval = Some(completed_index);
         let mut pending = std::mem::take(&mut self.pending_remote);
+        let mut keep = Vec::new();
         let pending_count = pending.len();
+        let mut mixed_count = 0usize;
         for mut remote in pending.drain(..) {
+            if remote.index != completed_index && Some(remote.index) != prev_playback {
+                keep.push(remote);
+                continue;
+            }
+            mixed_count += 1;
             // Assign slot FIRST so we can check needs_fade_in before summing
             let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
 
@@ -662,10 +675,12 @@ impl IntervalRing {
                 }
             }
         }
-        // Put the drained (empty but with capacity) Vec back
-        self.pending_remote = pending;
+        // Put back entries for future intervals, plus the drained vec
+        keep.extend(pending.drain(..));
+        self.pending_remote = keep;
 
         // Diagnostic: log boundary swap details to identify gap root cause
+        let kept_count = self.pending_remote.len();
         let active_peers: Vec<_> = self.peer_slots.iter()
             .filter(|s| s.active)
             .map(|s| {
@@ -676,6 +691,8 @@ impl IntervalRing {
         tracing::info!(
             completed_index = completed_index,
             pending_count = pending_count,
+            mixed_count = mixed_count,
+            kept_for_future = kept_count,
             playback_len = self.playback_len,
             peers = ?active_peers,
             "INTERVAL SWAP"
@@ -1492,7 +1509,7 @@ mod tests {
 
         // Now peer-a reconnects — their affinity slot is taken
         ring.notify_peer_joined("peer-a-new", "identity-alice");
-        ring.feed_remote("peer-a-new".into(), 0, 3, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new".into(), 0, 2, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 48.0);
 
         // Should get a different slot (first-fit fallback)
