@@ -37,7 +37,9 @@ class Wail < Formula
     # Note: this produces the raw wail-tauri binary, not a full .app bundle.
     # For the polished macOS .app, use the DMG from the Releases page instead.
     system "cargo", "build", "--release", "--package", "wail-tauri", "--locked"
+    system "cargo", "build", "--release", "--package", "wail-test-client", "--locked"
     bin.install "target/release/wail-tauri" => "wail"
+    bin.install "target/release/wail-test-client"
 
     # Build plugin libraries first (separate --locked invocations, no nested cargo).
     system "cargo", "build", "--release", "--locked", "--package", "wail-plugin-send", "--lib"
@@ -77,6 +79,7 @@ class Wail < Formula
   test do
     assert_predicate bin/"wail", :exist?
     assert_predicate bin/"wail-install-plugins", :exist?
+    assert_predicate bin/"wail-test-client", :exist?
     assert_predicate lib/"wail-plugin-send.clap", :exist?
     assert_predicate lib/"wail-plugin-recv.clap", :exist?
     assert_predicate lib/"wail-plugin-send.vst3", :exist?
