@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.18.1 (2026-03-17)
+
+### Fixes
+
+- Build improvements: dev profile optimization and test-client distribution (#230)
+
 ## 1.18.0 (2026-03-17)
 
 ### Features
