@@ -72,6 +72,8 @@ pub struct WailSendPlugin {
     opus_frame_size: usize,
     /// Sender for returning cleared interval buffers to IntervalRing (zero-alloc recycling)
     buf_return_tx: Option<crossbeam_channel::Sender<Vec<f32>>>,
+    /// Previous transport playing state for detecting stop→play transitions.
+    was_playing: Option<bool>,
     editor_state: Arc<EguiState>,
 }
 
@@ -91,6 +93,7 @@ impl Default for WailSendPlugin {
             streaming_frame_number: 0,
             opus_frame_size: 960, // 20ms at 48kHz, updated in initialize
             buf_return_tx: None,
+            was_playing: None,
             editor_state: EguiState::from_size(300, 130),
         }
     }
@@ -278,6 +281,7 @@ impl Plugin for WailSendPlugin {
             self.frame_buffer.clear();
             self.streaming_interval_index = None;
             self.streaming_frame_number = 0;
+            self.was_playing = None;
             if let Ok(mut bridge) = self.bridge.lock() {
                 if let Some(ref mut b) = *bridge {
                     b.reset();
@@ -298,6 +302,24 @@ impl Plugin for WailSendPlugin {
 
         let bpm = transport.tempo.unwrap_or(120.0);
         let playing = transport.playing;
+
+        // Detect transport restart (stopped → playing) and reset interval tracking
+        // so beat position discontinuities don't leave stale buffer positions.
+        let transport_restarted = self.was_playing == Some(false) && playing;
+        self.was_playing = Some(playing);
+        if transport_restarted {
+            permit_alloc(|| {
+                self.cumulative_samples = 0;
+                self.streaming_interval_index = None;
+                self.streaming_frame_number = 0;
+                self.frame_buffer.clear();
+                if let Ok(mut bridge) = self.bridge.lock() {
+                    if let Some(ref mut b) = *bridge {
+                        b.reset_transport();
+                    }
+                }
+            });
+        }
 
         let beat_position = match transport.pos_beats() {
             Some(b) => b,

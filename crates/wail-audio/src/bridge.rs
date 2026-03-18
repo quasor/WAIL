@@ -172,6 +172,14 @@ impl AudioBridge {
             .ok();
     }
 
+    /// Reset interval tracking and buffer positions without clearing peer state.
+    ///
+    /// Use this on transport restart. Unlike `reset()`, this preserves peer slot
+    /// assignments and does not recreate Opus codecs.
+    pub fn reset_transport(&mut self) {
+        self.ring.reset_transport();
+    }
+
     /// Read per-peer isolated audio from a specific slot.
     /// The slot index corresponds to `peer_playback_slots()` / `peer_info()`.
     pub fn read_peer_playback(&mut self, slot: usize, output: &mut [f32]) -> usize {

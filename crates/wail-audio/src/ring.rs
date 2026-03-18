@@ -110,6 +110,8 @@ pub struct IntervalRing {
     /// Needed because audio arrives keyed by session-scoped peer_id, but SlotTable
     /// uses persistent client_id.
     peer_identity_map: Vec<(String, String)>,
+    /// Last observed beat position — used to detect backward jumps (transport restart).
+    last_beat_position: f64,
 }
 
 /// A completed local recording ready for encoding.
@@ -168,6 +170,7 @@ impl IntervalRing {
             peer_slots,
             slot_table: SlotTable::new(),
             peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            last_beat_position: 0.0,
         }
     }
 
@@ -200,6 +203,27 @@ impl IntervalRing {
                 self.spare_record = Vec::with_capacity(self.slot_capacity);
             }
         }
+
+        // Detect beat position regression: if beat jumped backward by more than
+        // 1 beat, the DAW transport was restarted or seeked. Reset positional state
+        // so playback and recording start fresh from the new position.
+        if self.last_beat_position > 0.0 && beat_position < self.last_beat_position - 1.0 {
+            tracing::info!(
+                prev_beat = %format!("{:.2}", self.last_beat_position),
+                new_beat = %format!("{:.2}", beat_position),
+                "Beat position regression detected — resetting interval tracking"
+            );
+            self.record_pos = 0;
+            self.record_slot.clear();
+            self.playback_pos = 0;
+            self.playback_len = 0;
+            self.current_interval = None;
+            self.playback_interval = None;
+            for slot in &mut self.peer_slots {
+                slot.read_pos = 0;
+            }
+        }
+        self.last_beat_position = beat_position;
 
         let interval_index = self.beat_to_interval(beat_position);
         let mut boundary_crossed = None;
@@ -360,6 +384,26 @@ impl IntervalRing {
         }
         self.slot_table.clear();
         self.peer_identity_map.clear();
+        self.last_beat_position = 0.0;
+    }
+
+    /// Reset interval tracking and buffer positions without clearing peer state.
+    ///
+    /// Use this on transport restart: beat position is about to jump, so interval
+    /// tracking and read/write positions must start fresh. Peer slot assignments,
+    /// identity mappings, and pending remote audio are preserved.
+    pub fn reset_transport(&mut self) {
+        self.record_slot.clear();
+        self.record_pos = 0;
+        self.playback_pos = 0;
+        self.playback_len = 0;
+        self.current_interval = None;
+        self.playback_interval = None;
+        self.completed.clear();
+        self.last_beat_position = 0.0;
+        for slot in &mut self.peer_slots {
+            slot.read_pos = 0;
+        }
     }
 
     /// Current interval index, if any.
@@ -2132,6 +2176,133 @@ mod tests {
         assert!(
             output2.iter().all(|&s| s == 0.0),
             "Expected silence after reset, but got audio"
+        );
+    }
+
+    // --- Transport restart / beat regression ---
+
+    #[test]
+    fn beat_regression_resets_positions() {
+        let mut ring = make_ring();
+        let input = vec![0.5f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Advance through beats 0, 4, 8, 12 (all within interval 0)
+        ring.process(&input, &mut output, 0.0);
+        ring.process(&input, &mut output, 4.0);
+        ring.process(&input, &mut output, 8.0);
+        ring.process(&input, &mut output, 12.0);
+
+        assert_eq!(ring.current_interval(), Some(0));
+        assert!(ring.record_position() > 0, "Should have recorded samples");
+
+        // Simulate transport restart: beat jumps back to 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Regression should have cleared current_interval (then re-set it via None branch)
+        assert_eq!(ring.current_interval(), Some(0));
+        // Record position should be just the last buffer (fresh start + one buffer)
+        assert_eq!(ring.record_position(), 256);
+    }
+
+    #[test]
+    fn no_false_regression_on_normal_advance() {
+        let mut ring = make_ring();
+        let input = vec![0.5f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        ring.process(&input, &mut output, 0.0);
+        ring.process(&input, &mut output, 4.0);
+        ring.process(&input, &mut output, 8.0);
+
+        // Record position should accumulate normally (no reset)
+        assert_eq!(ring.record_position(), 256 * 3);
+    }
+
+    #[test]
+    fn reset_transport_preserves_peer_slots() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Start an interval and feed remote audio
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; 512]);
+
+        // Cross boundary so peer slot gets assigned
+        ring.process(&input, &mut output, 16.0);
+
+        let peers_before = ring.active_peer_slots();
+        assert!(!peers_before.is_empty(), "Should have active peer slots");
+
+        // Reset transport
+        ring.reset_transport();
+
+        // Peer slots should still be active
+        let peers_after = ring.active_peer_slots();
+        assert_eq!(peers_before.len(), peers_after.len());
+        assert_eq!(peers_before[0].1, peers_after[0].1, "Peer ID should be preserved");
+    }
+
+    #[test]
+    fn reset_transport_resets_positions() {
+        let mut ring = make_ring();
+        let input = vec![0.5f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        ring.process(&input, &mut output, 0.0);
+        ring.process(&input, &mut output, 8.0);
+
+        assert!(ring.record_position() > 0);
+        assert!(ring.current_interval().is_some());
+
+        ring.reset_transport();
+
+        assert_eq!(ring.record_position(), 0);
+        assert_eq!(ring.current_interval(), None);
+        assert_eq!(ring.playback_remaining(), 0);
+    }
+
+    #[test]
+    fn transport_restart_full_playback() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Process first interval
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed remote audio for interval 0
+        let remote = vec![0.5f32; 1024];
+        ring.feed_remote("peer-a".into(), 0, 0, remote.clone());
+
+        // Cross boundary to interval 1 — remote audio becomes playback
+        ring.process(&input, &mut output, 16.0);
+
+        // Read some playback (simulate partial playback before transport stop)
+        ring.process(&input, &mut output, 17.0);
+        let played_before_stop = output.iter().filter(|&&s| s != 0.0).count();
+        assert!(played_before_stop > 0, "Should have played some audio");
+
+        // Simulate transport restart at beat 0
+        ring.reset_transport();
+
+        // Feed the same remote audio again for the new interval 0
+        ring.feed_remote("peer-a".into(), 0, 0, remote.clone());
+
+        // Start fresh interval
+        ring.process(&input, &mut output, 0.0);
+
+        // Cross boundary again
+        ring.process(&input, &mut output, 16.0);
+
+        // Now playback should start from the beginning (full audio)
+        let mut full_output = vec![0.0f32; 1024];
+        ring.process(&input, &mut full_output, 17.0);
+        let played_after_restart = full_output.iter().filter(|&&s| s != 0.0).count();
+        assert!(
+            played_after_restart > 0,
+            "Should have full playback after transport restart"
         );
     }
 }

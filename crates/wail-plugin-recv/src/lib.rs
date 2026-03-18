@@ -69,6 +69,8 @@ pub struct WailRecvPlugin {
     editor_state: Arc<EguiState>,
     /// Shared visualization state for the egui editor.
     editor_data: Arc<Mutex<EditorData>>,
+    /// Previous transport playing state for detecting stop→play transitions.
+    was_playing: Option<bool>,
     /// Last observed interval index — used to detect boundary crossings for markers.
     last_interval: i64,
 }
@@ -88,6 +90,7 @@ impl Default for WailRecvPlugin {
             beat_fallback_warned: false,
             pending_names: HashMap::new(),
             applied_slot_names: vec![None; wail_audio::MAX_REMOTE_PEERS],
+            was_playing: None,
             editor_state: EguiState::from_size(380, 460),
             editor_data: Arc::new(Mutex::new(EditorData::default())),
             last_interval: 0,
@@ -293,6 +296,7 @@ impl Plugin for WailRecvPlugin {
         // and recreating the Opus encoder/decoder all require allocation — wrap in permit_alloc.
         permit_alloc(|| {
             self.cumulative_samples = 0;
+            self.was_playing = None;
             self.last_interval = 0;
             self.pending_names.clear();
             for name in &mut self.applied_slot_names {
@@ -317,6 +321,22 @@ impl Plugin for WailRecvPlugin {
         let num_samples = buffer.samples();
 
         let bpm = transport.tempo.unwrap_or(120.0);
+        let playing = transport.playing;
+
+        // Detect transport restart (stopped → playing) and reset interval tracking
+        // so beat position discontinuities don't leave stale buffer positions.
+        let transport_restarted = self.was_playing == Some(false) && playing;
+        self.was_playing = Some(playing);
+        if transport_restarted {
+            permit_alloc(|| {
+                self.cumulative_samples = 0;
+                if let Ok(mut bridge) = self.bridge.lock() {
+                    if let Some(ref mut b) = *bridge {
+                        b.reset_transport();
+                    }
+                }
+            });
+        }
 
         let beat_position = match transport.pos_beats() {
             Some(b) => b,
