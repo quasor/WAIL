@@ -501,10 +501,19 @@ fn run_test(args: &[String]) -> Result<()> {
         bundle_plugin(&["--debug".to_string()])?;
     }
 
+    // Strip leading "--" separator — it delimits xtask args from cargo-test
+    // args, but forwarding it would cause cargo to treat subsequent flags
+    // (like -p) as test-binary args instead of cargo args.
+    let forward_args = if args.first().map(|s| s.as_str()) == Some("--") {
+        &args[1..]
+    } else {
+        args
+    };
+
     println!("\nRunning cargo test...");
     let mut cmd = Command::new(env!("CARGO"));
     cmd.arg("test");
-    cmd.args(args);
+    cmd.args(forward_args);
     cmd.current_dir(&root);
     run_cmd(cmd)
 }
