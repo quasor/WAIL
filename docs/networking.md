@@ -136,9 +136,11 @@ Frame drops are tracked independently per phase so you can distinguish setup-rel
 
 **Per-direction tracking.** For each unique direction (e.g., Peer1→Peer2 and Peer2→Peer1), the server tracks:
 
-- `frames_expected` — total 20ms audio frames the receiver expected from the sender
-- `frames_received` — total frames actually received
+- `frames_expected` — total WAIF frames (20ms Opus packets) the receiver expected from the sender, as determined by `FrameAssembler` during interval assembly
+- `frames_received` — total WAIF frames actually received (non-gap)
 - `frames_dropped` — `expected - received`
+
+Note: these counts come from `FrameAssembler` in `wail-audio`, which tracks gaps within assembled intervals. A "frame" here is a single 20ms WAIF streaming frame. Frames dropped at the DataChannel/backpressure level before reaching `FrameAssembler` are not counted (see networking.md §8 "Audio channel drop with no feedback").
 
 **Client reporting.** Clients send a `metrics_report` message to the signaling server every 2 seconds (on the existing status tick). This message includes:
 

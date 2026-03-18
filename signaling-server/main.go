@@ -159,7 +159,16 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 
 		if s.Phase == "playing" {
 			// Subtract the snapshot at transition to get playing-phase-only counts.
-			snap := s.transitionSnapshot[directionKey{from: remotePeer, to: reporter}]
+			// Skip directions that weren't reported before the transition to avoid
+			// inflating playing-phase counts with pre-transition cumulative values.
+			snap, hasSnap := s.transitionSnapshot[directionKey{from: remotePeer, to: reporter}]
+			if !hasSnap {
+				// First report for this direction came after the transition.
+				// Use current values as the baseline so the first delta is zero.
+				s.transitionSnapshot[directionKey{from: remotePeer, to: reporter}] = report
+				ps.lastPerPeer[remotePeer] = report
+				continue
+			}
 			expected := report.FramesExpected - snap.FramesExpected
 			received := report.FramesReceived - snap.FramesReceived
 			dm, exists := target[dk]
@@ -572,6 +581,7 @@ func (h *hub) leaveUnlocked(c *conn) {
 		// If room is empty, clean up
 		if peerCountAfter == 0 {
 			delete(h.rooms, room)
+			delete(h.completedSessions, room)
 			h.db.Exec("DELETE FROM rooms WHERE room = ?", room)
 		}
 	}
@@ -787,7 +797,15 @@ func sessionToJSON(s *session) sessionJSON {
 	return sj
 }
 
+// isPrivateRoom checks if a room is password-protected. Caller must hold h.mu.
+func (h *hub) isPrivateRoom(room string) bool {
+	var pwHash sql.NullString
+	h.db.QueryRow("SELECT password_hash FROM rooms WHERE room = ?", room).Scan(&pwHash)
+	return pwHash.Valid && pwHash.String != ""
+}
+
 // snapshotMetrics returns a point-in-time snapshot. Caller must hold h.mu.
+// Sessions for password-protected rooms are excluded (consistent with /rooms).
 func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 	var active []sessionJSON
 	var completed []sessionJSON
@@ -796,10 +814,16 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 		if roomFilter != "" && room != roomFilter {
 			continue
 		}
+		if h.isPrivateRoom(room) {
+			continue
+		}
 		active = append(active, sessionToJSON(s))
 	}
 	for room, sessions := range h.completedSessions {
 		if roomFilter != "" && room != roomFilter {
+			continue
+		}
+		if h.isPrivateRoom(room) {
 			continue
 		}
 		for _, s := range sessions {
@@ -936,6 +960,8 @@ const statusEl = document.getElementById('status');
 const activeEl = document.getElementById('active');
 const completedEl = document.getElementById('completed');
 
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
 function dropClass(expected, dropped) {
   if (expected === 0) return 'no-data';
   const pct = dropped / expected * 100;
@@ -950,7 +976,7 @@ function renderDirections(dirs) {
   for (const [dir, m] of Object.entries(dirs)) {
     const pct = m.frames_expected > 0 ? (m.frames_dropped / m.frames_expected * 100).toFixed(1) : '—';
     const cls = dropClass(m.frames_expected, m.frames_dropped);
-    html += '<tr><td>' + dir + '</td><td>' + m.frames_expected + '</td><td>' + m.frames_received +
+    html += '<tr><td>' + esc(dir) + '</td><td>' + m.frames_expected + '</td><td>' + m.frames_received +
             '</td><td class="' + cls + '">' + m.frames_dropped + '</td><td class="' + cls + '">' + pct + (m.frames_expected > 0 ? '%' : '') + '</td></tr>';
   }
   html += '</table>';
@@ -960,12 +986,12 @@ function renderDirections(dirs) {
 function renderSession(s) {
   const phaseClass = s.phase === 'playing' ? 'playing' : 'joining';
   let html = '<div class="session">';
-  html += '<div class="session-header"><span class="room">' + s.room + '</span>';
-  html += '<span class="badge ' + phaseClass + '">' + s.phase + '</span>';
-  html += '<span class="meta">' + s.duration + '</span>';
-  if (s.ended_at) html += '<span class="meta">ended ' + new Date(s.ended_at).toLocaleTimeString() + '</span>';
+  html += '<div class="session-header"><span class="room">' + esc(s.room) + '</span>';
+  html += '<span class="badge ' + phaseClass + '">' + esc(s.phase) + '</span>';
+  html += '<span class="meta">' + esc(s.duration) + '</span>';
+  if (s.ended_at) html += '<span class="meta">ended ' + esc(new Date(s.ended_at).toLocaleTimeString()) + '</span>';
   html += '</div>';
-  html += '<div class="peers">Peers: ' + s.peers.join(', ') + '</div>';
+  html += '<div class="peers">Peers: ' + s.peers.map(esc).join(', ') + '</div>';
   html += '<div class="phase-label">Joining</div>' + renderDirections(s.joining);
   html += '<div class="phase-label">Playing</div>' + renderDirections(s.playing);
   html += '</div>';

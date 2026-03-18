@@ -309,7 +309,7 @@ A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when t
 
 ### Per-direction frame drop tracking
 
-For each unique direction (e.g., `peer1→peer2`), the server tracks `frames_expected`, `frames_received`, and `frames_dropped` independently per phase. This distinguishes setup-related drops from network-quality drops during playback.
+For each unique direction (e.g., `peer1→peer2`), the server tracks `frames_expected`, `frames_received`, and `frames_dropped` independently per phase. This distinguishes setup-related drops from network-quality drops during playback. Frame counts come from `FrameAssembler` gap detection within assembled intervals — each "frame" is a 20ms WAIF streaming Opus packet.
 
 Clients report cumulative per-peer frame counts every 2 seconds via a `metrics_report` message on the signaling WebSocket. The server computes playing-phase deltas by snapshotting values at the joining→playing transition.
 

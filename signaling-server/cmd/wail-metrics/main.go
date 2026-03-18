@@ -87,7 +87,10 @@ func main() {
 	if *jsonOut {
 		// Pretty-print JSON
 		var v any
-		json.Unmarshal(body, &v)
+		if err := json.Unmarshal(body, &v); err != nil {
+			fmt.Fprintf(os.Stderr, "parse response: %v\n", err)
+			os.Exit(1)
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(v)

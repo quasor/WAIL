@@ -11,7 +11,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 
-use wail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
+use wail_core::protocol::{PeerFrameReport, SignalMessage, SignalPayload, SyncMessage};
 use peer::PeerConnection;
 use signaling::SignalingClient;
 
@@ -468,8 +468,17 @@ impl PeerMesh {
     }
 
     /// Send a metrics report to the signaling server (not relayed to peers).
-    pub fn send_metrics_report(&self, report: SignalMessage) {
-        if let Err(e) = self.signaling.outgoing_tx.send(report) {
+    pub fn send_metrics_report(
+        &self,
+        dc_open: bool,
+        plugin_connected: bool,
+        per_peer: HashMap<String, PeerFrameReport>,
+    ) {
+        if let Err(e) = self.signaling.outgoing_tx.send(SignalMessage::MetricsReport {
+            dc_open,
+            plugin_connected,
+            per_peer,
+        }) {
             tracing::warn!("failed to send metrics report: {e}");
         }
     }

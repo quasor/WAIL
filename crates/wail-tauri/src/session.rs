@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
 
 use wail_audio::{ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
-use wail_core::protocol::{PeerFrameReport, SignalMessage};
+use wail_core::protocol::PeerFrameReport;
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -1309,11 +1309,11 @@ async fn session_loop(
                             frames_received: ps.map_or(0, |s| s.total_frames_received),
                         });
                     }
-                    mesh.send_metrics_report(SignalMessage::MetricsReport {
+                    mesh.send_metrics_report(
                         dc_open,
-                        plugin_connected: !ipc_pool.is_empty() || test_mode,
+                        !ipc_pool.is_empty() || test_mode,
                         per_peer,
-                    });
+                    );
                 }
             }
         }
