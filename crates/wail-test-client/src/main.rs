@@ -16,7 +16,7 @@ use uuid::Uuid;
 use wail_audio::codec::AudioEncoder;
 use wail_audio::wire::AudioFrameWire;
 use wail_audio::{AudioDecoder, AudioFrame, FrameAssembler};
-use wail_core::protocol::SyncMessage;
+use wail_core::protocol::{PeerFrameReport, SyncMessage};
 use wail_core::IntervalTracker;
 use wail_net::{fetch_metered_ice_servers, ice_servers_with_turn, metered_stun_fallback, MeshEvent, PeerMesh};
 
@@ -608,9 +608,10 @@ async fn main() -> Result<()> {
                     frame_in_interval += 1;
                 }
 
-                // Print per-peer health every 5 seconds.
+                // Print per-peer health and send metrics report every 5 seconds.
                 if last_health_print.elapsed() >= Duration::from_secs(5) && !peer_remote_sent.is_empty() {
                     last_health_print = Instant::now();
+                    let mut per_peer_metrics = HashMap::new();
                     for (pid, &remote_sent) in &peer_remote_sent {
                         let local_recv = peer_frames_recv.get(pid).copied().unwrap_or(0);
                         let pct = if remote_sent > 0 {
@@ -620,6 +621,19 @@ async fn main() -> Result<()> {
                         };
                         let name = peer_names.get(pid).map(|s| s.as_str()).unwrap_or(&pid[..pid.len().min(8)]);
                         println!("[{name}] health: {local_recv}/{remote_sent} frames ({pct:.1}%)");
+                        per_peer_metrics.insert(pid.clone(), PeerFrameReport {
+                            frames_expected: remote_sent,
+                            frames_received: local_recv,
+                            rtt_us: None,
+                            jitter_us: None,
+                            dc_drops: 0,
+                            late_frames: 0,
+                            decode_failures: 0,
+                        });
+                    }
+                    if let Some(ref m) = mesh_opt {
+                        let has_audio_dc = m.any_audio_dc_open();
+                        m.send_metrics_report(has_audio_dc, true, per_peer_metrics, 0, None);
                     }
                 }
 
