@@ -19,7 +19,7 @@ jobs:
   build-homebrew-tarball:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
@@ -42,7 +42,7 @@ jobs:
           tar -czf "wail-${VERSION}-src.tar.gz" -C /tmp "${STAGING}"
           sha256sum "wail-${VERSION}-src.tar.gz" | awk '{print $1}' > "wail-${VERSION}-src.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wail-homebrew-src
           path: |
@@ -52,7 +52,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
@@ -63,7 +63,7 @@ jobs:
 
       - name: Cache vcpkg
         id: vcpkg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: C:\vcpkg\installed
           key: vcpkg-opus-x64-windows-v1
@@ -76,7 +76,7 @@ jobs:
         run: choco install pkgconfiglite -y
 
       - name: Cache CLI tools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~\.cargo\bin\cargo-tauri.exe
@@ -127,7 +127,7 @@ jobs:
           Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
           Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wail-release-windows
           path: dist\
@@ -135,7 +135,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
@@ -160,7 +160,7 @@ jobs:
             libx11-xcb-dev
 
       - name: Cache CLI tools
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: linux-cli-tools-v1
@@ -196,7 +196,7 @@ jobs:
           cp target/release/bundle/appimage/*.AppImage dist/ || true
           cp target/release/bundle/deb/*.deb dist/ || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wail-release-linux
           path: dist/
@@ -207,9 +207,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           path: source
