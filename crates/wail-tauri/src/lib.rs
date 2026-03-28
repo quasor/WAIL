@@ -7,6 +7,7 @@ mod peers;
 mod plugin_install;
 mod recorder;
 mod session;
+mod stream_names;
 pub mod wslog;
 
 use std::sync::Mutex;
@@ -81,6 +82,12 @@ pub fn run(test_args: Option<TestModeArgs>) {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity.clone()));
+
+            let stream_names = stream_names::load(&data_dir);
+            app.manage(stream_names::StreamNameConfig {
+                data_dir: data_dir.clone(),
+                names: std::sync::Mutex::new(stream_names),
+            });
             // On Windows, plugin installation is handled by the NSIS setup.exe installer
             // (which runs elevated), so we skip runtime auto-install to avoid permission errors.
             #[cfg(not(target_os = "windows"))]
@@ -162,6 +169,7 @@ pub fn run(test_args: Option<TestModeArgs>) {
             commands::cleanup_recordings,
             commands::get_active_session,
             commands::get_plugin_install_errors,
+            commands::rename_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WAIL");

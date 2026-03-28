@@ -256,6 +256,7 @@ Two independent time domains exist in the system:
 | `Hello` | sync | JSON | Greeting on connect |
 | `AudioCapabilities` | sync | JSON | Announce send/receive support |
 | `AudioIntervalReady` | sync | JSON | Metadata before binary audio |
+| `StreamNames` | sync | JSON | Human-readable names for sender's audio streams |
 | _(binary audio)_ | audio | WAIF (AudioFrameWire) | Opus-encoded streaming frames |
 
 ## Signaling Protocol Messages

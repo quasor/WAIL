@@ -91,6 +91,12 @@ pub enum SyncMessage {
         sender_name: String,
         text: String,
     },
+    /// Human-readable names for the sender's audio streams (e.g. {"0": "Bass"}).
+    /// Sent after Hello and whenever names change. Full map each time.
+    /// Keys are stringified stream indices (JSON requires string keys).
+    StreamNames {
+        names: HashMap<String, String>,
+    },
 }
 
 /// Messages exchanged over the WebSocket signaling channel.
@@ -309,6 +315,24 @@ mod tests {
             SignalMessage::MetricsReport { ipc_drops, boundary_drift_us, .. } => {
                 assert_eq!(ipc_drops, 0);
                 assert_eq!(boundary_drift_us, None);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_names_roundtrip() {
+        let mut names = HashMap::new();
+        names.insert("0".to_string(), "Bass".to_string());
+        names.insert("1".to_string(), "Drums".to_string());
+        let msg = SyncMessage::StreamNames { names };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SyncMessage::StreamNames { names } => {
+                assert_eq!(names.len(), 2);
+                assert_eq!(names["0"], "Bass");
+                assert_eq!(names["1"], "Drums");
             }
             other => panic!("unexpected variant: {other:?}"),
         }

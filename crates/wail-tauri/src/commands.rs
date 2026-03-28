@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::identity::PeerIdentity;
 use crate::filelog::TelemetryHandle;
+use crate::stream_names::StreamNameConfig;
 use crate::wslog::WsLogHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
@@ -191,4 +192,32 @@ pub fn get_active_session(state: State<'_, SessionState>) -> Option<JoinResult> 
 #[tauri::command]
 pub fn get_plugin_install_errors(state: State<'_, PluginInstallErrors>) -> Vec<String> {
     state.0.lock().map(|e| e.clone()).unwrap_or_default()
+}
+
+const MAX_STREAM_NAME_LEN: usize = 32;
+
+#[tauri::command]
+pub fn rename_stream(
+    state: State<'_, SessionState>,
+    names_state: State<'_, StreamNameConfig>,
+    stream_index: u16,
+    name: String,
+) -> Result<(), String> {
+    let mut names = names_state.names.lock().map_err(|e| e.to_string())?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        names.remove(&stream_index);
+    } else {
+        let clamped: String = trimmed.chars().take(MAX_STREAM_NAME_LEN).collect();
+        names.insert(stream_index, clamped);
+    }
+    crate::stream_names::save(&names_state.data_dir, &names);
+    let snapshot = names.clone();
+    drop(names);
+
+    let session = state.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *session {
+        let _ = handle.cmd_tx.send(SessionCommand::StreamNamesChanged(snapshot));
+    }
+    Ok(())
 }

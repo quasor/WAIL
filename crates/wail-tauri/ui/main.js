@@ -733,19 +733,24 @@ function renderStatus(s) {
   if (localSends.length === 0 && slots.length === 0) {
     slotList.innerHTML = '<span class="empty">No peers connected</span>';
   } else {
-    const localHtml = localSends.map(ls => {
-      const label = localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send';
+    // Skip re-rendering local sends if user is editing a stream name
+    const isEditingStreamName = slotList.querySelector('.stream-name-input') != null;
+    const localHtml = isEditingStreamName ? null : localSends.map(ls => {
+      const label = ls.stream_name
+        ? escapeHtml(ls.stream_name)
+        : (localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send');
       const sendClass = ls.is_sending ? 'peer-status status-connected' : 'peer-status';
       const sendLabel = ls.is_sending ? 'sending' : 'idle';
       return `<div class="peer-item peer-item--local">
-        <span class="peer-slot">Send</span><span class="peer-name">${label}</span>
+        <span class="peer-slot">Send</span><span class="peer-name editable" data-stream-index="${ls.stream_index}">${label}</span>
         <span class="${sendClass}">${sendLabel}</span>
         <span class="peer-rtt"></span>
       </div>`;
     }).join('');
     const remoteHtml = slots.map(sl => {
+      const streamLabel = sl.stream_name ? ` \u2014 ${escapeHtml(sl.stream_name)}` : '';
       const name = sl.display_name
-        ? `${escapeHtml(sl.display_name)} (${escapeHtml(sl.short_id)})`
+        ? `${escapeHtml(sl.display_name)}${streamLabel} (${escapeHtml(sl.short_id)})`
         : escapeHtml(sl.short_id);
       const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
       const status = sl.status || 'connecting';
@@ -756,7 +761,17 @@ function renderStatus(s) {
         <span class="peer-rtt">${rtt}</span>
       </div>`;
     }).join('');
-    slotList.innerHTML = localHtml + remoteHtml;
+    if (isEditingStreamName) {
+      // Only update remote slots, preserve local sends (user is editing)
+      const remoteContainer = slotList.querySelector('.remote-slots');
+      if (remoteContainer) remoteContainer.innerHTML = remoteHtml;
+    } else {
+      slotList.innerHTML = localHtml + `<span class="remote-slots">${remoteHtml}</span>`;
+      // Attach inline edit handlers to local send names
+      slotList.querySelectorAll('.peer-name.editable').forEach(span => {
+        span.addEventListener('click', startStreamNameEdit);
+      });
+    }
   }
 }
 
@@ -964,6 +979,47 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function startStreamNameEdit(e) {
+  const span = e.currentTarget;
+  const streamIndex = parseInt(span.dataset.streamIndex, 10);
+  const currentName = span.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'stream-name-input';
+  input.value = currentName.startsWith('My Send') ? '' : currentName;
+  input.maxLength = 32;
+  input.placeholder = 'Name this send...';
+
+  let committed = false;
+  let cancelled = false;
+  const commit = () => {
+    if (committed || cancelled) return;
+    committed = true;
+    const name = input.value.trim();
+    invoke('rename_stream', { streamIndex, name });
+    // The next status:update will re-render with the new name
+  };
+
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      commit();
+      input.blur();
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      cancelled = true;
+      input.replaceWith(span);
+    }
+  });
+  input.addEventListener('blur', () => {
+    if (!cancelled) commit();
+  });
+
+  span.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 // Check if a session was auto-started (e.g. via --test-room CLI flag)

@@ -15,6 +15,16 @@ use wail_net::PeerMesh;
 use crate::events::*;
 use crate::emit_log;
 use crate::emit_peer_log;
+
+/// Convert internal u16-keyed stream names to string-keyed for wire format.
+fn stream_names_to_wire(names: &HashMap<u16, String>) -> HashMap<String, String> {
+    names.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+}
+
+/// Convert wire-format string-keyed stream names to internal u16-keyed.
+fn stream_names_from_wire(wire: HashMap<String, String>) -> HashMap<u16, String> {
+    wire.into_iter().filter_map(|(k, v)| k.parse::<u16>().ok().map(|idx| (idx, v))).collect()
+}
 use crate::peers::{IpcWriterPool, PeerRegistry};
 use crate::recorder::{RecordingConfig, SessionRecorder};
 use crate::wslog::WsLogHandle;
@@ -53,6 +63,7 @@ pub struct SessionHandle {
 pub enum SessionCommand {
     ChangeBpm(f64),
     SendChat(String),
+    StreamNamesChanged(HashMap<u16, String>),
     Disconnect,
 }
 
@@ -197,6 +208,18 @@ async fn session_loop(
     let mut peers = PeerRegistry::new();
     peers.seed_names(mesh.take_initial_peer_names());
 
+    // Load persisted local stream names
+    let mut local_stream_names: HashMap<u16, String> = app
+        .try_state::<crate::stream_names::StreamNameConfig>()
+        .and_then(|cfg| match cfg.names.lock() {
+            Ok(n) => Some(n.clone()),
+            Err(e) => {
+                warn!("Stream names mutex poisoned, starting with empty names: {e}");
+                None
+            }
+        })
+        .unwrap_or_default();
+
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
     let mut initial_beat_synced = false;
@@ -319,6 +342,11 @@ async fn session_loop(
                             is_own: true,
                             text,
                         });
+                    }
+                    SessionCommand::StreamNamesChanged(names) => {
+                        local_stream_names = names;
+                        let msg = SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) };
+                        mesh.broadcast(&msg).await;
                     }
                     SessionCommand::Disconnect => {
                         ui_info!(&app, "Disconnecting...");
@@ -528,6 +556,10 @@ async fn session_loop(
                             max_streams: None,
                         };
                         mesh.broadcast(&caps).await;
+
+                        if !local_stream_names.is_empty() {
+                            mesh.broadcast(&SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) }).await;
+                        }
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
@@ -637,6 +669,9 @@ async fn session_loop(
                             mesh.broadcast(&hello).await;
                             for p in mesh.connected_peers() {
                                 peers.mark_hello_sent(&p);
+                            }
+                            if !local_stream_names.is_empty() {
+                                mesh.broadcast(&SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) }).await;
                             }
                         }
                         Err(e) => {
@@ -815,6 +850,9 @@ async fn session_loop(
                                 debug!(peer = %from, error = %e, "Failed to send Hello reply");
                                 peers.clear_hello_sent(&from);
                             }
+                            if !local_stream_names.is_empty() {
+                                let _ = mesh.send_to(&from, &SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) }).await;
+                            }
                         }
 
                         let _ = app.emit("peer:joined", PeerJoinedEvent {
@@ -909,6 +947,12 @@ async fn session_loop(
                             is_own: false,
                             text,
                         });
+                    }
+
+                    SyncMessage::StreamNames { names } => {
+                        if let Some(peer) = peers.get_mut(&from) {
+                            peer.stream_names = stream_names_from_wire(names);
+                        }
                     }
                 }
             }
@@ -1266,6 +1310,7 @@ async fn session_loop(
                                 rtt_ms: peer_id.as_deref().and_then(|pid| clock.rtt_us(pid).map(|rtt| rtt as f64 / 1000.0)),
                                 is_sending: is_sending_to,
                                 is_receiving: is_receiving_from,
+                                stream_name: peer_state.and_then(|ps| ps.stream_names.get(&mapping.channel_index).cloned()),
                             }
                         })
                         .collect();
@@ -1315,6 +1360,7 @@ async fn session_loop(
                         .map(|&stream_index| LocalSendInfo {
                             stream_index,
                             is_sending: local_send_active.contains(&stream_index),
+                            stream_name: local_stream_names.get(&stream_index).cloned(),
                         })
                         .collect();
                     local_sends.sort_by_key(|ls| ls.stream_index);

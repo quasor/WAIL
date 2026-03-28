@@ -57,6 +57,9 @@ pub struct LocalSendInfo {
     pub stream_index: u16,
     /// True if audio frames were received from this stream since the last status tick.
     pub is_sending: bool,
+    /// User-chosen name for this stream (e.g. "Bass"), if set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_name: Option<String>,
 }
 
 /// Slot-centric view: one entry per occupied DAW aux output slot.
@@ -82,6 +85,9 @@ pub struct SlotInfo {
     pub is_sending: bool,
     /// Audio was received from this peer since the last status tick.
     pub is_receiving: bool,
+    /// Remote peer's user-chosen name for this stream/channel (e.g. "Bass"), if announced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

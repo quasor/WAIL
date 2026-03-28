@@ -41,6 +41,8 @@ pub struct PeerState {
     /// True after the Hello-completion watchdog has already sent a soft retry for
     /// this connection attempt. Prevents duplicate Hello re-sends on every tick.
     pub hello_retry_sent: bool,
+    /// Remote peer's user-chosen stream names (stream_index → label).
+    pub stream_names: HashMap<u16, String>,
 }
 
 impl PeerState {
@@ -64,6 +66,7 @@ impl PeerState {
             prev_status: String::new(),
             added_at: Instant::now(),
             hello_retry_sent: false,
+            stream_names: HashMap::new(),
         }
     }
 }
