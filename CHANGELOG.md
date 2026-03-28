@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.2 (2026-03-28)
+
+### Fixes
+
+- update GitHub Actions to Node.js 24-compatible versions (#247)
+
 ## 1.23.1 (2026-03-28)
 
 ### Fixes
