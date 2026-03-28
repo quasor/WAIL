@@ -914,7 +914,7 @@ async fn session_loop(
             }
 
             // --- Incoming audio data from peers → forward to plugin ---
-            Some((from, data)) = audio_rx.recv() => {
+            Some((from, mut data)) = audio_rx.recv() => {
                 if let Some(peer) = peers.get_mut(&from) {
                     peer.last_seen = Instant::now();
                     peer.ever_received_message = true;
@@ -967,6 +967,24 @@ async fn session_loop(
                 if let Some(ref rec) = recorder {
                     let name = peers.get(&from).and_then(|p| p.display_name.clone());
                     rec.record_peer(from.clone(), name, data.clone());
+                }
+
+                // Rewrite remote interval index to match local session tracker.
+                // The send plugin uses the DAW's transport.pos_beats() which is
+                // project-local and not synced between peers on different networks.
+                // The session's IntervalTracker IS synced via IntervalBoundary messages.
+                if let Some(local_idx) = interval.current_index() {
+                    if let Some(header) = wail_audio::peek_waif_header(&data) {
+                        if header.interval_index != local_idx {
+                            debug!(
+                                peer = %from,
+                                remote_idx = header.interval_index,
+                                local_idx,
+                                "Remapping remote interval index to local"
+                            );
+                        }
+                    }
+                    wail_audio::rewrite_waif_interval_index(&mut data, local_idx);
                 }
 
                 if !ipc_pool.is_empty() {

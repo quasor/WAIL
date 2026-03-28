@@ -301,6 +301,19 @@ pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
     })
 }
 
+/// Rewrite the interval_index field in a WAIF frame header in-place.
+///
+/// Used by the session layer to remap a remote peer's interval index to
+/// the local session's synced index before forwarding to the recv plugin.
+/// Returns true if the rewrite was performed.
+pub fn rewrite_waif_interval_index(data: &mut [u8], new_index: i64) -> bool {
+    if data.len() >= FRAME_HEADER_SIZE && &data[0..4] == FRAME_MAGIC {
+        data[7..15].copy_from_slice(&new_index.to_le_bytes());
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,5 +664,55 @@ mod tests {
         let mut data = vec![0u8; 25];
         data[0..4].copy_from_slice(b"NOPE");
         assert!(peek_waif_header(&data).is_none());
+    }
+
+    #[test]
+    fn rewrite_waif_interval_index_roundtrip() {
+        let frame = crate::AudioFrame {
+            interval_index: 5,
+            stream_id: 3,
+            frame_number: 7,
+            channels: 2,
+            opus_data: vec![0xAA; 100],
+            is_final: false,
+            sample_rate: 0,
+            total_frames: 0,
+            bpm: 0.0,
+            quantum: 0.0,
+            bars: 0,
+        };
+        let mut data = AudioFrameWire::encode(&frame);
+
+        // Verify original index.
+        let header = peek_waif_header(&data).unwrap();
+        assert_eq!(header.interval_index, 5);
+
+        // Rewrite to 42.
+        assert!(rewrite_waif_interval_index(&mut data, 42));
+
+        // Verify new index, other fields unchanged.
+        let header = peek_waif_header(&data).unwrap();
+        assert_eq!(header.interval_index, 42);
+        assert_eq!(header.frame_number, 7);
+        assert_eq!(header.is_final, false);
+
+        // Full decode confirms stream_id and opus_data intact.
+        let decoded = AudioFrameWire::decode(&data).unwrap();
+        assert_eq!(decoded.interval_index, 42);
+        assert_eq!(decoded.stream_id, 3);
+        assert_eq!(decoded.opus_data, vec![0xAA; 100]);
+    }
+
+    #[test]
+    fn rewrite_waif_interval_index_short_data() {
+        let mut data = vec![0u8; 10];
+        assert!(!rewrite_waif_interval_index(&mut data, 42));
+    }
+
+    #[test]
+    fn rewrite_waif_interval_index_wrong_magic() {
+        let mut data = vec![0u8; 25];
+        data[0..4].copy_from_slice(b"NOPE");
+        assert!(!rewrite_waif_interval_index(&mut data, 42));
     }
 }
