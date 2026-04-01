@@ -108,6 +108,7 @@ pub struct StatusUpdate {
     pub plugin_connected: bool,
     pub recording: bool,
     pub recording_size_bytes: u64,
+    pub test_tone_stream: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +166,21 @@ pub struct LogEntry {
     pub peer_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugIntervalFrame {
+    pub peer_id: String,
+    pub display_name: Option<String>,
+    pub interval_index: i64,
+    pub frame_number: u32,
+    /// Set on the final frame of an interval.
+    pub total_frames: Option<u32>,
+    pub is_final: bool,
+    /// Milliseconds elapsed since local interval boundary.
+    pub arrival_offset_ms: f64,
+    /// True for frames from local send plugins (vs remote peers).
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

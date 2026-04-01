@@ -10,7 +10,7 @@ use crate::stream_names::StreamNameConfig;
 use crate::wslog::WsLogHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
-use crate::PluginInstallErrors;
+use crate::{InstanceIpcPort, PluginInstallErrors};
 
 pub type SessionState = Mutex<Option<SessionHandle>>;
 
@@ -54,13 +54,13 @@ pub fn join_room(
     app: tauri::AppHandle,
     state: State<'_, SessionState>,
     identity: State<'_, PeerIdentity>,
+    instance_port: State<'_, InstanceIpcPort>,
     room: String,
     password: Option<String>,
     display_name: String,
     bpm: Option<f64>,
     bars: Option<u32>,
     quantum: Option<f64>,
-    ipc_port: Option<u16>,
     recording_enabled: Option<bool>,
     recording_directory: Option<String>,
     recording_stems: Option<bool>,
@@ -83,7 +83,7 @@ pub fn join_room(
         bpm,
         bars: bars.unwrap_or(4),
         quantum: quantum.unwrap_or(4.0),
-        ipc_port: ipc_port.unwrap_or(9191),
+        ipc_port: instance_port.0,
         recording: if recording_enabled.unwrap_or(false) {
             Some(RecordingConfig {
                 enabled: true,
@@ -135,6 +135,15 @@ pub fn send_chat(state: State<'_, SessionState>, text: String) -> Result<(), Str
     let session = state.lock().map_err(|e| e.to_string())?;
     if let Some(ref handle) = *session {
         let _ = handle.cmd_tx.send(SessionCommand::SendChat(text));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_test_tone(state: State<'_, SessionState>, stream_index: Option<u16>) -> Result<(), String> {
+    let session = state.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *session {
+        let _ = handle.cmd_tx.send(SessionCommand::SetTestTone(stream_index));
     }
     Ok(())
 }

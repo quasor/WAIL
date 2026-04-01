@@ -19,6 +19,9 @@ use tracing_subscriber::prelude::*;
 
 pub struct PluginInstallErrors(pub Mutex<Vec<String>>);
 
+/// IPC port for this instance (9191 + instance number).
+pub struct InstanceIpcPort(pub u16);
+
 /// CLI arguments for test mode auto-join.
 pub struct TestModeArgs {
     pub room: String,
@@ -51,7 +54,7 @@ pub fn emit_peer_log(
     });
 }
 
-pub fn run(test_args: Option<TestModeArgs>) {
+pub fn run(test_args: Option<TestModeArgs>, instance: u16) {
     hb::init();
     hb::set_panic_hook();
 
@@ -73,10 +76,25 @@ pub fn run(test_args: Option<TestModeArgs>) {
     tauri::Builder::default()
         .manage(SessionState::default())
         .manage(PluginInstallErrors(Mutex::new(Vec::new())))
+        .manage(InstanceIpcPort(9191 + instance))
         .manage(telemetry_handle)
         .manage(ws_log_handle)
         .setup(move |app| {
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = if instance > 0 {
+                let mut dir = app.path().app_data_dir()?;
+                let name = format!("{}-{instance}", dir.file_name().unwrap_or_default().to_string_lossy());
+                dir.set_file_name(name);
+                dir
+            } else {
+                app.path().app_data_dir()?
+            };
+            if instance > 0 {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title(&format!("WAIL (Instance {instance})"));
+                }
+            }
+            let ipc_port_base: u16 = 9191 + instance;
+            std::fs::create_dir_all(&data_dir).ok();
             if let Err(e) = th.set_log_dir(&data_dir.join("logs")) {
                 eprintln!("[filelog] failed to open log file: {e}");
             }
@@ -138,7 +156,7 @@ pub fn run(test_args: Option<TestModeArgs>) {
                     bpm,
                     bars: 4,
                     quantum: 4.0,
-                    ipc_port: 9191,
+                    ipc_port: ipc_port_base,
                     recording: None,
                     stream_count: 1,
                     test_mode: true,
@@ -162,6 +180,7 @@ pub fn run(test_args: Option<TestModeArgs>) {
             commands::disconnect,
             commands::change_bpm,
             commands::send_chat,
+            commands::set_test_tone,
             commands::set_telemetry,
             commands::set_log_sharing,
             commands::list_public_rooms,

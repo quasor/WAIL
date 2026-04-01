@@ -10,10 +10,20 @@ mod common;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use wail_audio::AudioBridge;
+use wail_audio::{AudioDecoder, AudioFrameWire};
 use wail_net::PeerMesh;
 
 use common::*;
+
+/// Decode a received WAIF wire frame and return the RMS energy of the decoded PCM.
+fn decode_waif_rms(data: &[u8]) -> f32 {
+    let frame = AudioFrameWire::decode(data).expect("decode WAIF frame");
+    let sr = if frame.sample_rate > 0 { frame.sample_rate } else { 48000 };
+    let ch = frame.channels;
+    let mut decoder = AudioDecoder::new(sr, ch).expect("create decoder");
+    let samples = decoder.decode_frame(&frame.opus_data).expect("decode Opus frame");
+    rms(&samples)
+}
 
 // ---------------------------------------------------------------
 // Test: Two peers exchange audio intervals over real WebRTC
@@ -46,13 +56,17 @@ async fn two_peers_exchange_audio_over_webrtc() {
     // 3. Pump signaling until WebRTC DataChannels are established
     establish_connection(&mut mesh_a, &mut mesh_b).await;
 
-    // 4. Both peers broadcast audio simultaneously
-    let wire_a = produce_interval(440.0);
-    let wire_b = produce_interval(880.0);
-    mesh_a.broadcast_audio(&wire_a).await;
-    mesh_b.broadcast_audio(&wire_b).await;
+    // 4. Both peers broadcast audio simultaneously (send all WAIF frames)
+    let frames_a = produce_interval(440.0);
+    let frames_b = produce_interval(880.0);
+    for frame in &frames_a {
+        mesh_a.broadcast_audio(frame).await;
+    }
+    for frame in &frames_b {
+        mesh_b.broadcast_audio(frame).await;
+    }
 
-    // 5. Both peers receive audio from the other
+    // 5. Both peers receive audio from the other (at least one WAIF frame)
     let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await
         .expect("Timed out waiting for audio from A")
@@ -68,28 +82,14 @@ async fn two_peers_exchange_audio_over_webrtc() {
     assert!(!received_at_b.is_empty(), "B should receive non-empty wire data from A");
     assert!(!received_at_a.is_empty(), "A should receive non-empty wire data from B");
 
-    // 6. Decode and verify both peers hear real audio
-    let sr = 48000u32;
-    let ch = 2u16;
-    let buf_size = 4096;
-    let silence = vec![0.0f32; buf_size];
-    let mut out = vec![0.0f32; buf_size];
-
-    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    bridge_b.process(&silence, &mut out, 0.0);
-    bridge_b.receive_wire(&from_at_b, &received_at_b);
-    bridge_b.process(&silence, &mut out, 16.0);
-    let energy_at_b = rms(&out);
+    // 6. Decode WAIF frames and verify both peers hear real audio
+    let energy_at_b = decode_waif_rms(&received_at_b);
     assert!(
         energy_at_b > 0.01,
         "Peer B should hear Peer A's audio over WebRTC, RMS={energy_at_b}"
     );
 
-    let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    bridge_a.process(&silence, &mut out, 0.0);
-    bridge_a.receive_wire(&from_at_a, &received_at_a);
-    bridge_a.process(&silence, &mut out, 16.0);
-    let energy_at_a = rms(&out);
+    let energy_at_a = decode_waif_rms(&received_at_a);
     assert!(
         energy_at_a > 0.01,
         "Peer A should hear Peer B's audio over WebRTC, RMS={energy_at_a}"
@@ -134,10 +134,14 @@ async fn audio_dc_reports_open_after_connection() {
     );
 
     // Verify audio actually flows both directions
-    let wire_a = produce_interval(440.0);
-    let wire_b = produce_interval(880.0);
-    mesh_a.broadcast_audio(&wire_a).await;
-    mesh_b.broadcast_audio(&wire_b).await;
+    let frames_a = produce_interval(440.0);
+    let frames_b = produce_interval(880.0);
+    for frame in &frames_a {
+        mesh_a.broadcast_audio(frame).await;
+    }
+    for frame in &frames_b {
+        mesh_b.broadcast_audio(frame).await;
+    }
 
     let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await
@@ -297,10 +301,14 @@ async fn two_peers_exchange_audio_via_turn() {
     eprintln!("[test] WebRTC connected via TURN");
 
     // 5. Both peers broadcast audio simultaneously
-    let wire_a = produce_interval(440.0);
-    let wire_b = produce_interval(880.0);
-    mesh_a.broadcast_audio(&wire_a).await;
-    mesh_b.broadcast_audio(&wire_b).await;
+    let frames_a = produce_interval(440.0);
+    let frames_b = produce_interval(880.0);
+    for frame in &frames_a {
+        mesh_a.broadcast_audio(frame).await;
+    }
+    for frame in &frames_b {
+        mesh_b.broadcast_audio(frame).await;
+    }
 
     // 6. Both peers receive audio from the other
     let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
@@ -318,28 +326,14 @@ async fn two_peers_exchange_audio_via_turn() {
     assert!(!received_at_b.is_empty(), "B should receive non-empty wire data from A");
     assert!(!received_at_a.is_empty(), "A should receive non-empty wire data from B");
 
-    // 7. Decode and verify both peers hear real audio
-    let sr = 48000u32;
-    let ch = 2u16;
-    let buf_size = 4096;
-    let silence = vec![0.0f32; buf_size];
-    let mut out = vec![0.0f32; buf_size];
-
-    let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    bridge_b.process(&silence, &mut out, 0.0);
-    bridge_b.receive_wire(&from_at_b, &received_at_b);
-    bridge_b.process(&silence, &mut out, 16.0);
-    let energy_at_b = rms(&out);
+    // 7. Decode WAIF frames and verify both peers hear real audio
+    let energy_at_b = decode_waif_rms(&received_at_b);
     assert!(
         energy_at_b > 0.01,
         "Peer B should hear Peer A's audio via TURN, RMS={energy_at_b}"
     );
 
-    let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
-    bridge_a.process(&silence, &mut out, 0.0);
-    bridge_a.receive_wire(&from_at_a, &received_at_a);
-    bridge_a.process(&silence, &mut out, 16.0);
-    let energy_at_a = rms(&out);
+    let energy_at_a = decode_waif_rms(&received_at_a);
     assert!(
         energy_at_a > 0.01,
         "Peer A should hear Peer B's audio via TURN, RMS={energy_at_a}"
@@ -436,30 +430,28 @@ async fn metered_turn_relay_live() {
     let freqs_b = [330.0, 494.0, 587.0, 740.0];
     let num_intervals = freqs_a.len();
 
-    let sr = 48000u32;
-    let ch = 2u16;
-    let buf_size = 4096;
-    let silence = vec![0.0f32; buf_size];
-    let mut out = vec![0.0f32; buf_size];
-
     for i in 0..num_intervals {
-        let (wire_a, _) = produce_full_interval(freqs_a[i]);
-        let (wire_b, _) = produce_full_interval(freqs_b[i]);
+        let (frames_a, _) = produce_full_interval(freqs_a[i]);
+        let (frames_b, _) = produce_full_interval(freqs_b[i]);
 
         let interval_beats = (i + 1) as f64 * 16.0; // 16, 32, 48, 64 beats
         let interval_secs = interval_beats / (120.0 / 60.0); // 8, 16, 24, 32 seconds
 
         eprintln!(
-            "[test] Interval {} — sending ~{}KB each direction ({:.0}s at 120bpm)",
+            "[test] Interval {} — sending {} WAIF frames each direction ({:.0}s at 120bpm)",
             i + 1,
-            wire_a.len() / 1024,
+            frames_a.len(),
             interval_secs
         );
 
-        mesh_a.broadcast_audio(&wire_a).await;
-        mesh_b.broadcast_audio(&wire_b).await;
+        for frame in &frames_a {
+            mesh_a.broadcast_audio(frame).await;
+        }
+        for frame in &frames_b {
+            mesh_b.broadcast_audio(frame).await;
+        }
 
-        // Receive from both sides
+        // Receive from both sides (at least one WAIF frame)
         let (from_at_b, received_at_b) = tokio::time::timeout(
             Duration::from_secs(15),
             audio_rx_b.recv(),
@@ -481,23 +473,15 @@ async fn metered_turn_relay_live() {
         assert!(!received_at_b.is_empty(), "Interval {}: B got empty data from A", i + 1);
         assert!(!received_at_a.is_empty(), "Interval {}: A got empty data from B", i + 1);
 
-        // Decode and verify real audio energy
-        let mut bridge_b = AudioBridge::new(sr, ch, 4, 4.0, 128);
-        bridge_b.process(&silence, &mut out, 0.0);
-        bridge_b.receive_wire(&from_at_b, &received_at_b);
-        bridge_b.process(&silence, &mut out, 16.0);
-        let energy_b = rms(&out);
+        // Decode WAIF frames and verify real audio energy
+        let energy_b = decode_waif_rms(&received_at_b);
         assert!(
             energy_b > 0.01,
             "Interval {}: B should hear A's audio via TURN, RMS={energy_b}",
             i + 1
         );
 
-        let mut bridge_a = AudioBridge::new(sr, ch, 4, 4.0, 128);
-        bridge_a.process(&silence, &mut out, 0.0);
-        bridge_a.receive_wire(&from_at_a, &received_at_a);
-        bridge_a.process(&silence, &mut out, 16.0);
-        let energy_a = rms(&out);
+        let energy_a = decode_waif_rms(&received_at_a);
         assert!(
             energy_a > 0.01,
             "Interval {}: A should hear B's audio via TURN, RMS={energy_a}",
@@ -505,10 +489,16 @@ async fn metered_turn_relay_live() {
         );
 
         eprintln!(
-            "[test] Interval {} OK — A→B RMS={energy_b:.4}, B→A RMS={energy_a:.4}, wire={}KB",
+            "[test] Interval {} OK — A→B RMS={energy_b:.4}, B→A RMS={energy_a:.4}, wire={}B",
             i + 1,
-            received_at_b.len() / 1024
+            received_at_b.len()
         );
+
+        // Drain remaining frames from this interval before sending the next
+        for _ in 1..frames_a.len() {
+            let _ = tokio::time::timeout(Duration::from_millis(500), audio_rx_b.recv()).await;
+            let _ = tokio::time::timeout(Duration::from_millis(500), audio_rx_a.recv()).await;
+        }
     }
 
     eprintln!(
@@ -551,7 +541,7 @@ async fn peer_failure_detected_within_timeout() {
     establish_connection(&mut mesh_a, &mut mesh_b).await;
 
     // Verify audio flows before disconnection
-    let wire_a = produce_interval(440.0);
+    let wire_a = produce_single_waif_frame(440.0);
     mesh_a.broadcast_audio(&wire_a).await;
     let (_from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await.expect("Pre-failure audio timed out")
@@ -714,7 +704,7 @@ async fn peer_reconnects_after_close() {
     eprintln!("[test] Initial connection established");
 
     // 2. Verify audio works before failure
-    let wire_a = produce_interval(440.0);
+    let wire_a = produce_single_waif_frame(440.0);
     mesh_a.broadcast_audio(&wire_a).await;
     let (_from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await.expect("Pre-failure audio timed out")
@@ -735,7 +725,7 @@ async fn peer_reconnects_after_close() {
     eprintln!("[test] Reconnected");
 
     // 6. Verify audio works after reconnection
-    let wire_a2 = produce_interval(880.0);
+    let wire_a2 = produce_single_waif_frame(880.0);
     mesh_a.broadcast_audio(&wire_a2).await;
     let (_from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
         .await.expect("Post-reconnect audio timed out")
@@ -783,8 +773,8 @@ async fn new_offer_replaces_stale_connection() {
     eprintln!("[test] New connection established");
 
     // 4. Verify audio flows on the new connection
-    let wire_a = produce_interval(440.0);
-    let wire_b = produce_interval(880.0);
+    let wire_a = produce_single_waif_frame(440.0);
+    let wire_b = produce_single_waif_frame(880.0);
     mesh_a.broadcast_audio(&wire_a).await;
     mesh_b.broadcast_audio(&wire_b).await;
 
@@ -847,7 +837,7 @@ async fn three_peers_exchange_audio() {
     assert_eq!(mesh_c.connected_peers().len(), 2, "C should be connected to A and B");
 
     // A broadcasts — B and C should receive it
-    let wire_a = produce_interval(440.0);
+    let wire_a = produce_single_waif_frame(440.0);
     mesh_a.broadcast_audio(&wire_a).await;
 
     let (from_at_b, data_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
@@ -861,7 +851,7 @@ async fn three_peers_exchange_audio() {
     assert!(!data_c.is_empty(), "C should receive non-empty audio from A");
 
     // B broadcasts — A and C should receive it
-    let wire_b = produce_interval(880.0);
+    let wire_b = produce_single_waif_frame(880.0);
     mesh_b.broadcast_audio(&wire_b).await;
 
     let (from_at_a, data_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
@@ -923,7 +913,7 @@ async fn one_peer_leaves_three_peer_room_others_continue() {
     );
 
     // Audio still flows between A and B
-    let wire_a = produce_interval(440.0);
+    let wire_a = produce_single_waif_frame(440.0);
     mesh_a.broadcast_audio(&wire_a).await;
 
     let (from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
@@ -1068,8 +1058,8 @@ async fn higher_id_re_initiate_does_not_create_offer() {
     eprintln!("[test] Connection restored by lower-ID peer");
 
     // Audio should flow again
-    let wire_a = produce_interval(440.0);
-    let wire_b = produce_interval(880.0);
+    let wire_a = produce_single_waif_frame(440.0);
+    let wire_b = produce_single_waif_frame(880.0);
     mesh_a.broadcast_audio(&wire_a).await;
     mesh_b.broadcast_audio(&wire_b).await;
 

@@ -31,8 +31,6 @@ pub struct PeerState {
     pub total_frames_received: u64,
     /// Cumulative WAIF frames that arrived for already-passed intervals.
     pub late_frames: u64,
-    /// Cumulative Opus decode failures reported by the recv plugin.
-    pub decode_failures: u64,
     pub prev_status: String,
     /// Timestamp of the most recent connection attempt for this peer. Used by the
     /// Hello-completion watchdog to detect peers that are active (receiving audio)
@@ -62,7 +60,6 @@ impl PeerState {
             total_frames_expected: 0,
             total_frames_received: 0,
             late_frames: 0,
-            decode_failures: 0,
             prev_status: String::new(),
             added_at: Instant::now(),
             hello_retry_sent: false,

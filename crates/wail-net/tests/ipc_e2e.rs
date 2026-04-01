@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use wail_audio::{AudioDecoder, AudioFrame, AudioFrameWire, AudioWire, FrameAssembler, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND};
+use wail_audio::{AudioDecoder, AudioFrameWire, FrameAssembler, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND};
 use wail_net::PeerMesh;
 
 use common::*;
@@ -202,38 +202,11 @@ async fn simulated_plugin_receive(
     }
 }
 
-/// Convert an AudioWire (WAIL) blob to a list of WAIF IPC frames (tag 0x05).
-fn wail_to_waif_ipc(wail_bytes: &[u8]) -> Vec<Vec<u8>> {
-    let interval = AudioWire::decode(wail_bytes).expect("wail_to_waif_ipc: AudioWire decode");
-    let data = &interval.opus_data;
-    let frame_count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
-    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(frame_count);
-    let mut offset = 4;
-    while packets.len() < frame_count && offset + 2 <= data.len() {
-        let pkt_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
-        offset += 2;
-        packets.push(data[offset..offset + pkt_len].to_vec());
-        offset += pkt_len;
-    }
-    let total = packets.len();
-    let mut output = Vec::with_capacity(total);
-    for (fn_, packet) in packets.into_iter().enumerate() {
-        let is_final = fn_ + 1 == total;
-        let frame = AudioFrame {
-            interval_index: interval.index,
-            stream_id: interval.stream_id,
-            frame_number: fn_ as u32,
-            channels: interval.channels,
-            opus_data: packet,
-            is_final,
-            sample_rate: if is_final { interval.sample_rate } else { 0 },
-            total_frames: if is_final { total as u32 } else { 0 },
-            bpm: if is_final { interval.bpm } else { 0.0 },
-            quantum: if is_final { interval.quantum } else { 0.0 },
-            bars: if is_final { interval.bars } else { 0 },
-        };
-        let wire_bytes = AudioFrameWire::encode(&frame);
-        let ipc_msg = IpcMessage::encode_audio_frame(&wire_bytes);
+/// Convert a list of WAIF wire frames to WAIF IPC frames (tag 0x05).
+fn waif_to_waif_ipc(waif_frames: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let mut output = Vec::with_capacity(waif_frames.len());
+    for wire_bytes in waif_frames {
+        let ipc_msg = IpcMessage::encode_audio_frame(wire_bytes);
         output.push(IpcFramer::encode_frame(&ipc_msg));
     }
     output
@@ -253,9 +226,9 @@ async fn simulated_plugin_send_full(ipc_port: u16, count: usize) {
         let freq = 440.0 + i as f32 * 110.0; // different freq per interval
         let ipc_frames =
             tokio::task::spawn_blocking(move || {
-                // produce_full_interval returns a WAIL blob; convert to WAIF IPC frames
-                let (wail_bytes, _) = produce_full_interval(freq);
-                wail_to_waif_ipc(&wail_bytes)
+                // produce_full_interval returns WAIF frames; convert to IPC frames
+                let (waif_frames, _) = produce_full_interval(freq);
+                waif_to_waif_ipc(&waif_frames)
             })
             .await
             .expect("produce_full_interval panicked");

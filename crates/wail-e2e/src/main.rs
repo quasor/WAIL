@@ -382,9 +382,11 @@ async fn run_single_audio_exchange(
     mesh: &mut PeerMesh,
     audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
 ) -> Result<String> {
-    let wire_bytes = encode_test_interval(0, 440.0, 120.0, 4, 4.0)?;
-    info!(bytes = wire_bytes.len(), "Sending test audio interval");
-    mesh.broadcast_audio(&wire_bytes).await;
+    let waif_frames = encode_test_interval(0, 440.0, 120.0, 4, 4.0)?;
+    info!(frames = waif_frames.len(), "Sending test audio interval");
+    for frame in &waif_frames {
+        mesh.broadcast_audio(frame).await;
+    }
 
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
     validate_audio_str(&data)
@@ -404,9 +406,11 @@ async fn run_sustained_audio(
 
     for i in 0..num_intervals {
         let freq = if i % 2 == 0 { 440.0 } else { 880.0 };
-        let wire_bytes = encode_test_interval(i as i64, freq, 120.0, 4, 4.0)?;
-        total_bytes_sent += wire_bytes.len();
-        mesh.broadcast_audio(&wire_bytes).await;
+        let waif_frames = encode_test_interval(i as i64, freq, 120.0, 4, 4.0)?;
+        for frame in &waif_frames {
+            total_bytes_sent += frame.len();
+            mesh.broadcast_audio(frame).await;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -510,9 +514,11 @@ async fn run_burst_audio(
 
     for i in 0..num_intervals {
         let freq = if i % 2 == 0 { 440.0 } else { 880.0 };
-        let wire_bytes = encode_test_interval(1000 + i as i64, freq, 120.0, 4, 4.0)?;
-        total_bytes_sent += wire_bytes.len();
-        mesh.broadcast_audio(&wire_bytes).await;
+        let waif_frames = encode_test_interval(1000 + i as i64, freq, 120.0, 4, 4.0)?;
+        for frame in &waif_frames {
+            total_bytes_sent += frame.len();
+            mesh.broadcast_audio(frame).await;
+        }
         // yield to the runtime between sends so the receiver can make progress
         tokio::task::yield_now().await;
     }
@@ -627,8 +633,10 @@ async fn run_reconnect_as_initiator(
 
     // Verify audio
     println!("Verifying audio after reconnect...");
-    let wire_bytes = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
-    mesh.broadcast_audio(&wire_bytes).await;
+    let waif_frames = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
+    for frame in &waif_frames {
+        mesh.broadcast_audio(frame).await;
+    }
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
     let audio_detail = validate_audio_str(&data)?;
     info!(detail = %audio_detail, "Post-reconnect audio OK");
@@ -732,8 +740,10 @@ async fn run_reconnect_as_waiter(
 
     // Verify audio
     println!("Verifying audio after reconnect...");
-    let wire_bytes = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
-    mesh.broadcast_audio(&wire_bytes).await;
+    let waif_frames = encode_test_interval(99, 440.0, 120.0, 4, 4.0)?;
+    for frame in &waif_frames {
+        mesh.broadcast_audio(frame).await;
+    }
     let data = receive_audio(mesh, audio_rx, Duration::from_secs(15)).await?;
     let audio_detail = validate_audio_str(&data)?;
     info!(detail = %audio_detail, "Post-reconnect audio OK");

@@ -13,7 +13,7 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
-const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
+const testToneSelect = document.getElementById('test-tone-select');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
@@ -202,7 +202,7 @@ document.getElementById('generate-room-btn').addEventListener('click', () => {
 
 // State
 let unlisten = [];
-let testToneEnabled = false;
+let testToneStream = null; // null or stream index number
 let roomRefreshTimer = null;
 
 // Rolling stats window state
@@ -256,7 +256,7 @@ function saveRememberEnabled(enabled) {
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'bars', 'quantum', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -408,7 +408,6 @@ async function joinPublicRoom(room) {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    ipcPort: parseInt(document.getElementById('ipc-port').value),
     testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
@@ -504,16 +503,20 @@ const sessionTabSessionBtn = document.getElementById('session-tab-session');
 const sessionTabChatBtn = document.getElementById('session-tab-chat');
 const sessionTabLogsBtn = document.getElementById('session-tab-logs');
 const sessionTabNetworkBtn = document.getElementById('session-tab-network');
+const sessionTabDebugBtn = document.getElementById('session-tab-debug');
 const sessionTabSessionContent = document.getElementById('session-tab-session-content');
 const sessionTabChatContent = document.getElementById('session-tab-chat-content');
 const sessionTabLogsContent = document.getElementById('session-tab-logs-content');
 const sessionTabNetworkContent = document.getElementById('session-tab-network-content');
+const sessionTabDebugContent = document.getElementById('session-tab-debug-content');
+const debugCanvas = document.getElementById('debug-interval-canvas');
 
 const SESSION_TABS = [
   { btn: sessionTabSessionBtn, content: sessionTabSessionContent },
   { btn: sessionTabChatBtn,    content: sessionTabChatContent },
   { btn: sessionTabLogsBtn,    content: sessionTabLogsContent },
   { btn: sessionTabNetworkBtn, content: sessionTabNetworkContent },
+  { btn: sessionTabDebugBtn,   content: sessionTabDebugContent },
 ];
 
 function switchSessionTab(activeBtn) {
@@ -521,12 +524,18 @@ function switchSessionTab(activeBtn) {
     btn.classList.toggle('active', btn === activeBtn);
     content.style.display = btn === activeBtn ? '' : 'none';
   });
+  if (activeBtn !== sessionTabDebugBtn) debugSetActive(false);
 }
 
 sessionTabSessionBtn.addEventListener('click', () => switchSessionTab(sessionTabSessionBtn));
 sessionTabChatBtn.addEventListener('click', () => switchSessionTab(sessionTabChatBtn));
 sessionTabLogsBtn.addEventListener('click', () => switchSessionTab(sessionTabLogsBtn));
 sessionTabNetworkBtn.addEventListener('click', () => switchSessionTab(sessionTabNetworkBtn));
+sessionTabDebugBtn.addEventListener('click', () => {
+  switchSessionTab(sessionTabDebugBtn);
+  debugSetActive(true);
+  requestAnimationFrame(debugRender);
+});
 
 function resetStatsWindow() {
   statusSnapshots = [];
@@ -547,6 +556,7 @@ function showJoin() {
   joinBtn.textContent = 'Join Room';
   switchSessionTab(sessionTabSessionBtn);
   resetStatsWindow();
+  debugReset();
   cleanup();
 }
 
@@ -565,16 +575,13 @@ function showSession(room) {
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-interval').textContent = '-';
-  testToneEnabled = document.getElementById('test-tone').checked;
-  updateTestToneUI();
+  testToneStream = document.getElementById('test-tone').checked ? 0 : null;
   document.getElementById('recording-stat').style.display =
     document.getElementById('recording-enabled').checked ? '' : 'none';
 }
 
 function updateTestToneUI() {
-  document.getElementById('session-test-tone').textContent = testToneEnabled ? 'ON' : 'OFF';
-  document.getElementById('session-test-tone').className = testToneEnabled ? 'status-value connected' : 'status-value';
-  toggleTestToneBtn.textContent = testToneEnabled ? 'Disable' : 'Enable';
+  testToneSelect.value = testToneStream != null ? String(testToneStream) : '';
 }
 
 function showError(el, msg) {
@@ -601,7 +608,6 @@ joinForm.addEventListener('submit', async (e) => {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    ipcPort: parseInt(document.getElementById('ipc-port').value),
     testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
@@ -652,15 +658,16 @@ sessionBpmInput.addEventListener('keydown', (e) => {
 sessionBpmInput.addEventListener('change', applyBpm);
 
 // --- Test Tone Toggle ---
-toggleTestToneBtn.addEventListener('click', async () => {
-  testToneEnabled = !testToneEnabled;
+testToneSelect.addEventListener('change', async () => {
+  const val = testToneSelect.value;
+  const streamIndex = val === '' ? null : parseInt(val, 10);
   try {
-    await invoke('set_test_tone', { enabled: testToneEnabled });
+    await invoke('set_test_tone', { streamIndex });
+    testToneStream = streamIndex;
   } catch (err) {
-    console.error('Test tone toggle error:', err);
-    testToneEnabled = !testToneEnabled; // revert on error
+    console.error('Test tone error:', err);
+    updateTestToneUI(); // revert
   }
-  updateTestToneUI();
 });
 
 // --- Stats mode toggle click handlers ---
@@ -716,7 +723,7 @@ function renderStatus(s) {
     s.plugin_connected ? 'status-value connected' : 'status-value';
 
   // Sync test tone state
-  testToneEnabled = s.test_tone_enabled;
+  testToneStream = s.test_tone_stream;
   updateTestToneUI();
 
   // Update recording status
@@ -806,9 +813,9 @@ function renderNetwork(peers) {
 
     let health = '-';
     let healthClass = '';
-    if (sentRemote > 0) {
-      const pct = audioRecv / sentRemote * 100;
-      health = `${audioRecv}/${sentRemote} (${pct.toFixed(1)}%)`;
+    if (fe > 0) {
+      const pct = fr / fe * 100;
+      health = `${fr}/${fe} (${pct.toFixed(1)}%)`;
       healthClass = pct >= 98 ? 'health-good' : pct >= 90 ? 'health-warn' : 'health-bad';
     }
     return `<tr>
@@ -818,7 +825,7 @@ function renderNetwork(peers) {
       <td class="net-state net-${escapeHtml(p.dc_sync_state)}">${escapeHtml(p.dc_sync_state)}</td>
       <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
       <td>${rtt}</td>
-      <td>${audioRecv}</td>
+      <td>${fr}</td>
       <td class="${healthClass}">${health}</td>
     </tr>`;
   }).join('');
@@ -836,6 +843,13 @@ async function setupListeners() {
       audio_bytes_sent: s.audio_bytes_sent, audio_bytes_recv: s.audio_bytes_recv,
     });
     if (statusSnapshots.length > STATS_WINDOW_SIZE) statusSnapshots.shift();
+    // Compute expected frames per interval for debug viz pre-sizing
+    if (s.bpm > 0 && s.interval_bars > 0) {
+      const quantum = 4.0; // TODO: expose quantum in StatusUpdate if needed
+      const beatsPerInterval = s.interval_bars * quantum;
+      const intervalSec = beatsPerInterval / (s.bpm / 60.0);
+      debugExpectedFrames = Math.round(intervalSec / 0.020); // 20ms per frame
+    }
     renderStatus(s);
   }));
 
@@ -884,6 +898,30 @@ async function setupListeners() {
     networkSnapshots.push(snap);
     if (networkSnapshots.length > STATS_WINDOW_SIZE) networkSnapshots.shift();
     renderNetwork(peers);
+  }));
+
+  unlisten.push(await listen('debug:interval-frame', debugHandleFrame));
+
+  unlisten.push(await listen('debug:link-tick', (event) => {
+    const t = event.payload;
+    debugLinkBeat = t.beat;
+    const linkInfo = document.getElementById('debug-link-info');
+    if (linkInfo && lastStatusPayload) {
+      const s = lastStatusPayload;
+      const beat = t.beat.toFixed(2);
+      const phase = t.phase.toFixed(3);
+      const bar = Math.floor(t.beat / 4) + 1;
+      const beatInBar = (t.beat % 4).toFixed(2);
+      linkInfo.innerHTML =
+        `<b>${t.bpm.toFixed(1)}</b> BPM &nbsp;·&nbsp; ` +
+        `beat <b>${beat}</b> &nbsp;·&nbsp; ` +
+        `bar ${bar}:${beatInBar} &nbsp;·&nbsp; ` +
+        `phase ${phase} &nbsp;·&nbsp; ` +
+        `Link peers: ${s.link_peers} &nbsp;·&nbsp; ` +
+        `interval: ${s.interval_bars} bars`;
+    }
+    // Re-render canvas to update playhead position
+    requestAnimationFrame(debugRender);
   }));
 }
 
@@ -1020,6 +1058,236 @@ function startStreamNameEdit(e) {
   span.replaceWith(input);
   input.focus();
   input.select();
+}
+
+// --- Debug interval visualization ---
+const DEBUG_COL_WIDTH = 200;
+const DEBUG_HEADER_HEIGHT = 28;
+const DEBUG_CELL_LABEL_HEIGHT = 14;
+const DEBUG_CELL_PAD = 4;
+const DEBUG_PIX = 1;
+const DEBUG_PIX_GAP = 1;
+const DEBUG_CELL_GAP = 4;
+const DEBUG_VISIBLE_INTERVALS = 2; // current (PLAY+REC) and previous
+
+// State per peer
+const debugPeers = new Map();
+let debugPeerOrder = [];
+let debugCurrentInterval = new Map(); // peer_id -> highest interval index
+let debugExpectedFrames = 0; // expected frames per interval (from BPM math)
+let debugLinkBeat = 0; // current Link beat position (updated at 20ms)
+
+function debugHandleFrame(ev) {
+  const f = ev.payload;
+  const pid = f.peer_id;
+  if (!debugPeers.has(pid)) {
+    debugPeers.set(pid, { name: f.display_name || pid.slice(0, 6), isLocal: f.is_local, intervals: new Map() });
+    debugPeerOrder = Array.from(debugPeers.keys());
+  }
+  const peer = debugPeers.get(pid);
+  if (f.display_name) peer.name = f.display_name;
+
+  if (!peer.intervals.has(f.interval_index)) {
+    peer.intervals.set(f.interval_index, { frames: new Set(), total: null, offsetMs: f.arrival_offset_ms });
+  }
+  const iv = peer.intervals.get(f.interval_index);
+  iv.frames.add(f.frame_number);
+  if (f.is_final && f.total_frames != null) {
+    iv.total = f.total_frames;
+  }
+  if (iv.frames.size === 1) {
+    iv.offsetMs = f.arrival_offset_ms;
+  }
+
+  // Track current interval (highest seen for this peer)
+  const prev = debugCurrentInterval.get(pid) || 0;
+  if (f.interval_index > prev) {
+    debugCurrentInterval.set(pid, f.interval_index);
+  }
+
+  // Prune: keep only the 3 visible intervals per peer
+  const cur = debugCurrentInterval.get(pid) || 0;
+  const oldest = cur - 2;
+  for (const idx of peer.intervals.keys()) {
+    if (idx < oldest) peer.intervals.delete(idx);
+  }
+
+  requestAnimationFrame(debugRender);
+}
+
+function debugRender() {
+  if (!debugCanvas || debugPeerOrder.length === 0) return;
+  const ctx = debugCanvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = debugCanvas.getBoundingClientRect();
+  const font = getComputedStyle(document.body).fontFamily;
+
+  const numPeers = debugPeerOrder.length;
+  const labelW = 40; // left label area for interval number
+  const colW = Math.min(DEBUG_COL_WIDTH, (rect.width - labelW - 10) / numPeers);
+  const startX = labelW + 6;
+  const step = DEBUG_PIX + DEBUG_PIX_GAP;
+  const innerW = colW - DEBUG_CELL_PAD * 2 - 4;
+  const pixCols = Math.max(1, Math.floor(innerW / step));
+
+  // Global current interval (highest across all peers)
+  let globalCurrent = 0;
+  for (const [, cur] of debugCurrentInterval) {
+    if (cur > globalCurrent) globalCurrent = cur;
+  }
+
+  // 2 visible intervals: current (PLAY+REC) and previous
+  const visibleIndices = [globalCurrent, globalCurrent - 1];
+  const roles = ['PLAY', 'prev'];
+
+  // Compute cell height — pre-sized from BPM math so cells don't grow
+  function cellHeightForInterval() {
+    const total = debugExpectedFrames || 400;
+    const pixRows = Math.ceil(total / pixCols);
+    return DEBUG_CELL_LABEL_HEIGHT + pixRows * step + DEBUG_CELL_PAD;
+  }
+
+  // Pre-compute row positions
+  const rowYs = [];
+  const rowHs = [];
+  let curY = DEBUG_HEADER_HEIGHT;
+  const cellH = cellHeightForInterval();
+  for (let i = 0; i < DEBUG_VISIBLE_INTERVALS; i++) {
+    const h = cellH;
+    rowYs.push(curY);
+    rowHs.push(h);
+    curY += h + DEBUG_CELL_GAP;
+  }
+
+  const totalH = curY + 10;
+  debugCanvas.width = rect.width * dpr;
+  debugCanvas.height = Math.max(rect.height, totalH) * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, rect.width, Math.max(rect.height, totalH));
+
+  // Column headers
+  ctx.font = '11px ' + font;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#8b8b9e';
+  debugPeerOrder.forEach((pid, colIdx) => {
+    const peer = debugPeers.get(pid);
+    const x = startX + colIdx * colW + colW / 2;
+    const label = peer.isLocal ? `${peer.name} (local)` : peer.name;
+    ctx.fillText(label, x, 16);
+  });
+
+  // Draw rows
+  for (let i = 0; i < DEBUG_VISIBLE_INTERVALS; i++) {
+    const idx = visibleIndices[i];
+    const role = roles[i];
+    const cellY = rowYs[i];
+    const cellH = rowHs[i];
+    const isActive = role === 'PLAY';
+
+    // Large interval number label on the left
+    ctx.font = 'bold 18px ' + font;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = isActive ? '#4e9af1' : '#55556a';
+    ctx.fillText(String(idx), labelW, cellY + cellH / 2 + 6);
+    // Role label below number
+    ctx.font = '9px ' + font;
+    ctx.fillStyle = isActive ? '#4e9af180' : '#55556a60';
+    ctx.fillText(role, labelW, cellY + cellH / 2 + 18);
+
+    // Draw cell for each peer
+    debugPeerOrder.forEach((pid, colIdx) => {
+      const peer = debugPeers.get(pid);
+      const iv = peer.intervals.get(idx);
+      const cellX = startX + colIdx * colW + 2;
+      const cw = colW - 4;
+
+      // Cell container
+      ctx.fillStyle = isActive ? '#1e1e28' : '#1c1c21';
+      ctx.fillRect(cellX, cellY, cw, cellH);
+      ctx.strokeStyle = isActive ? '#4e9af1' : '#2a2a33';
+      ctx.lineWidth = isActive ? 1.5 : 1;
+      ctx.strokeRect(cellX + 0.5, cellY + 0.5, cw - 1, cellH - 1);
+
+      if (!iv) return;
+
+      const total = iv.total || debugExpectedFrames || Math.max(iv.frames.size, 1);
+
+      // Stats label inside cell (top-right)
+      ctx.font = '9px ' + font;
+      ctx.textAlign = 'right';
+      const pct = iv.total ? Math.round((iv.frames.size / iv.total) * 100) : null;
+      ctx.fillStyle = isActive ? '#8b8b9e' : pct === null ? '#8b8b9e' : pct >= 95 ? '#34d399' : pct >= 80 ? '#fbbf24' : '#f87171';
+      ctx.fillText(`${iv.frames.size}/${total}`, cellX + cw - 4, cellY + 11);
+
+      // Frame pixel grid
+      const frameY = cellY + DEBUG_CELL_LABEL_HEIGHT;
+      const frameX = cellX + DEBUG_CELL_PAD;
+
+      // Compute playhead from Link beat position.
+      // Local peer: playhead in PLAY row (current interval).
+      // Remote peers: playhead in prev row (NINJAM 1-interval latency).
+      let playheadFrame = -1;
+      const showPlayhead = peer.isLocal ? isActive : !isActive;
+      if (showPlayhead && lastStatusPayload) {
+        const beatsPerInterval = lastStatusPayload.interval_bars * 4.0;
+        // For remote peers, the playhead interval is current-1 (prev row),
+        // but the beat position is still in the current interval.
+        // Map beat position into the prev interval by using the current beat fraction.
+        const playheadIdx = peer.isLocal ? idx : idx + 1;
+        const intervalStartBeat = playheadIdx * beatsPerInterval;
+        const beatInInterval = debugLinkBeat - intervalStartBeat;
+        if (beatInInterval >= 0 && beatInInterval < beatsPerInterval) {
+          const frac = beatInInterval / beatsPerInterval;
+          playheadFrame = Math.floor(frac * total);
+        }
+      }
+
+      for (let fn = 0; fn < total; fn++) {
+        const col = fn % pixCols;
+        const row = Math.floor(fn / pixCols);
+        const px = frameX + col * step;
+        const py = frameY + row * step;
+
+        if (fn === playheadFrame) {
+          ctx.fillStyle = '#ffffff'; // bright white playhead
+        } else if (iv.frames.has(fn)) {
+          ctx.fillStyle = '#34d399'; // green — received
+        } else if (!isActive && iv.total !== null) {
+          ctx.fillStyle = '#f87171'; // red — dropped (only in completed intervals)
+        } else {
+          ctx.fillStyle = '#2a2a30'; // dark — not yet received
+        }
+        ctx.fillRect(px, py, DEBUG_PIX, DEBUG_PIX);
+      }
+    });
+  }
+}
+
+let debugTabActive = false;
+let debugRenderTimer = null;
+
+function debugSetActive(active) {
+  debugTabActive = active;
+  if (active && !debugRenderTimer) {
+    debugRenderTimer = setInterval(() => {
+      if (debugTabActive) debugRender();
+    }, 500);
+  } else if (!active && debugRenderTimer) {
+    clearInterval(debugRenderTimer);
+    debugRenderTimer = null;
+  }
+}
+
+function debugReset() {
+  debugPeers.clear();
+  debugPeerOrder = [];
+  debugCurrentInterval.clear();
+  debugLinkBeat = 0;
+  debugSetActive(false);
+  if (debugCanvas) {
+    const ctx = debugCanvas.getContext('2d');
+    ctx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+  }
 }
 
 // Check if a session was auto-started (e.g. via --test-room CLI flag)

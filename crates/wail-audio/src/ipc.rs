@@ -405,40 +405,6 @@ mod tests {
         assert_eq!(payload, vec![42]);
     }
 
-    // --- Integration with AudioWire ---
-
-    #[test]
-    fn roundtrip_audio_wire_through_ipc_framing() {
-        use crate::{AudioInterval, AudioWire};
-
-        let interval = AudioInterval {
-            index: 7,
-            stream_id: 0,
-            opus_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
-            sample_rate: 48000,
-            channels: 2,
-            num_frames: 960,
-            bpm: 140.0,
-            quantum: 4.0,
-            bars: 4,
-        };
-
-        let wire_bytes = AudioWire::encode(&interval);
-        let ipc_frame = IpcFramer::encode_frame(&wire_bytes);
-
-        let mut recv = IpcRecvBuffer::new();
-        recv.push(&ipc_frame);
-
-        let received_wire = recv.next_frame().unwrap();
-        let decoded = AudioWire::decode(&received_wire).unwrap();
-
-        assert_eq!(decoded.index, 7);
-        assert_eq!(decoded.opus_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-        assert_eq!(decoded.sample_rate, 48000);
-        assert_eq!(decoded.channels, 2);
-        assert!((decoded.bpm - 140.0).abs() < f64::EPSILON);
-    }
-
     // --- IpcMessage ---
 
     #[test]

@@ -16,6 +16,10 @@ struct Args {
     /// Display name for test mode session
     #[arg(long)]
     test_name: Option<String>,
+
+    /// Run as instance N (port = 9191+N, separate data dir). Allows multiple instances on one host.
+    #[arg(long, default_value = "0")]
+    instance: u16,
 }
 
 fn main() {
@@ -29,5 +33,5 @@ fn main() {
     } else {
         None
     };
-    wail_tauri::run(test_args);
+    wail_tauri::run(test_args, args.instance);
 }

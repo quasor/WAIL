@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn, Instrument};
 
 use wail_audio::{ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
 use wail_core::protocol::PeerFrameReport;
-use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
+use wail_core::{ClockSync, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
 use crate::events::*;
@@ -64,6 +64,7 @@ pub enum SessionCommand {
     ChangeBpm(f64),
     SendChat(String),
     StreamNamesChanged(HashMap<u16, String>),
+    SetTestTone(Option<u16>),
     Disconnect,
 }
 
@@ -139,6 +140,134 @@ async fn remove_peer_fully(peers: &mut PeerRegistry, ipc_pool: &mut IpcWriterPoo
     peers.remove(peer_id);
 }
 
+/// Virtual send plugin task — generates and sends WAIF frames at 20ms intervals,
+/// behaving identically to a real WAIL Send plugin but running in-process.
+async fn test_tone_task(
+    stream_index: u16,
+    conn_id: usize,
+    ipc_tx: mpsc::Sender<(usize, Vec<u8>)>,
+    mut boundary_rx: mpsc::Receiver<(i64, f64, u32, f64)>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    use wail_audio::codec::AudioEncoder;
+    use wail_audio::interval::AudioFrame;
+    use wail_audio::wire::AudioFrameWire;
+    use wail_audio::IpcMessage;
+
+    let mut encoder = match AudioEncoder::new(48000, 2, 128) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("Test tone: failed to create encoder: {e}");
+            return;
+        }
+    };
+    let mut phase: f64 = 0.0;
+    let mut current_idx: i64 = -1;
+    let mut current_bpm: f64 = 120.0;
+    let mut current_bars: u32 = 4;
+    let mut current_quantum: f64 = 4.0;
+    let mut frame_number: u32 = 0;
+    let mut total_frames: u32 = 0;
+    let mut interval_start: Option<Instant> = None;
+
+    loop {
+        // Check for cancel
+        if *cancel_rx.borrow() {
+            break;
+        }
+
+        // Check for new interval boundary — switch immediately (like a real DAW callback)
+        let mut new_boundary: Option<(i64, f64, u32, f64)> = None;
+        while let Ok(b) = boundary_rx.try_recv() {
+            new_boundary = Some(b);
+        }
+        if let Some((idx, bpm, bars, quantum)) = new_boundary {
+            // If the previous interval didn't finish, force-send the final frame
+            if current_idx >= 0 && frame_number > 0 && frame_number < total_frames {
+                let final_frame_num = total_frames - 1;
+                let freq = if current_idx % 2 == 0 { 440.0 } else { 880.0 };
+                let samples = wail_audio::test_tone::generate_sine_frame(freq, &mut phase, 48000, 2);
+                if let Ok(opus_data) = encoder.encode_frame(&samples) {
+                    let frame = AudioFrame {
+                        interval_index: current_idx,
+                        stream_id: stream_index,
+                        frame_number: final_frame_num,
+                        channels: 2,
+                        opus_data,
+                        is_final: true,
+                        sample_rate: 48000,
+                        total_frames,
+                        bpm: current_bpm,
+                        quantum: current_quantum,
+                        bars: current_bars,
+                    };
+                    let waif = AudioFrameWire::encode(&frame);
+                    let ipc_msg = IpcMessage::encode_audio_frame(&waif);
+                    let _ = ipc_tx.send((conn_id, ipc_msg)).await;
+                }
+            }
+            current_idx = idx;
+            current_bpm = bpm;
+            current_bars = bars;
+            current_quantum = quantum;
+            frame_number = 0;
+            total_frames = wail_audio::test_tone::frames_per_interval(bpm, bars, quantum);
+            interval_start = Some(Instant::now());
+        }
+
+        if current_idx < 0 || frame_number >= total_frames {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            continue;
+        }
+
+        // Pace frames by wall clock: send all frames that are "due" based on elapsed time
+        if let Some(start) = interval_start {
+            let elapsed_ms = start.elapsed().as_millis() as u32;
+            let due_frame = (elapsed_ms / 20).min(total_frames);
+            if frame_number >= due_frame {
+                // Not time yet for the next frame
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                continue;
+            }
+        }
+
+        // Generate + encode one 20ms frame
+        let freq = if current_idx % 2 == 0 { 440.0 } else { 880.0 };
+        let samples = wail_audio::test_tone::generate_sine_frame(freq, &mut phase, 48000, 2);
+        let opus_data = match encoder.encode_frame(&samples) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Test tone: encode failed: {e}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+        };
+        let is_final = frame_number == total_frames - 1;
+
+        let frame = AudioFrame {
+            interval_index: current_idx,
+            stream_id: stream_index,
+            frame_number,
+            channels: 2,
+            opus_data,
+            is_final,
+            sample_rate: if is_final { 48000 } else { 0 },
+            total_frames: if is_final { total_frames } else { 0 },
+            bpm: if is_final { current_bpm } else { 0.0 },
+            quantum: if is_final { current_quantum } else { 0.0 },
+            bars: if is_final { current_bars } else { 0 },
+        };
+        let waif = AudioFrameWire::encode(&frame);
+        let ipc_msg = IpcMessage::encode_audio_frame(&waif);
+        if ipc_tx.send((conn_id, ipc_msg)).await.is_err() {
+            break; // session ended
+        }
+
+        frame_number += 1;
+        // No fixed sleep — pacing is handled by the wall-clock check above
+    }
+}
+
 async fn session_loop(
     app: AppHandle,
     config: SessionConfig,
@@ -157,8 +286,9 @@ async fn session_loop(
         ipc_port,
         recording: recording_config,
         stream_count,
-        test_mode,
+        test_mode: initial_test_mode,
     } = config;
+    let mut test_mode = initial_test_mode;
 
     ui_info!(&app, "Starting peer {peer_id} as {display_name} in room {room} (BPM {bpm}, {bars} bars, quantum {quantum})");
     if test_mode {
@@ -199,7 +329,22 @@ async fn session_loop(
 
     // Clock sync and interval tracker
     let mut clock = ClockSync::new();
-    let mut interval = IntervalTracker::new(bars, quantum);
+    // Interval tracking: derive index purely from Link beat position.
+    // No separate IntervalTracker — the beat is the single source of truth.
+    let mut last_interval_index: Option<i64> = None;
+    let mut interval_bars = bars;
+    let mut interval_quantum = quantum;
+
+    /// Compute interval index from beat position.
+    fn compute_interval_index(beat: f64, bars: u32, quantum: f64) -> i64 {
+        let beats_per_interval = bars as f64 * quantum;
+        (beat / beats_per_interval).floor() as i64
+    }
+
+    /// Beats per interval.
+    fn beats_per_interval(bars: u32, quantum: f64) -> f64 {
+        bars as f64 * quantum
+    }
     let mut ping_interval =
         tokio::time::interval(Duration::from_millis(ClockSync::ping_interval_ms()));
     let mut status_interval = tokio::time::interval(Duration::from_secs(2));
@@ -223,6 +368,7 @@ async fn session_loop(
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
     let mut initial_beat_synced = false;
+    let mut is_joiner = false;
 
     // One-shot logging flags for audio transmission milestones
     let mut logged_first_frame_sent = false;
@@ -233,6 +379,17 @@ async fn session_loop(
 
     // Test mode: track interval boundary timing
     let mut last_boundary_time: Option<Instant> = None;
+
+    // Virtual test tone send stream — spawned task that behaves like a real plugin.
+    // boundary_tx sends interval info to the task; cancel_tx stops it.
+    let mut test_tone_boundary_tx: Option<mpsc::Sender<(i64, f64, u32, f64)>> = None;
+    let mut test_tone_cancel_tx: Option<tokio::sync::watch::Sender<bool>> = None;
+    let mut test_tone_stream: Option<u16> = None;
+
+    // Debug tick timer: queries Link state every 20ms and emits to frontend.
+    // Separate from the Link poller to avoid congesting the select loop.
+    let mut debug_tick_timer = tokio::time::interval(Duration::from_millis(20));
+    debug_tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Link peer count — updated every status tick; used to gate audio when Link is not running
 
@@ -251,9 +408,9 @@ async fn session_loop(
     let mut interval_bytes_sent: u64 = 0;
     let mut interval_bytes_recv: u64 = 0;
     // Session-level metrics counters
-    let mut ipc_drop_count: u64 = 0;
+    let mut ipc_drop_count: u64;
     let mut boundary_drift_us: Option<i64> = None;
-    let mut recv_plugin_decode_failures: u64 = 0;
+    let mut recv_plugin_decode_failures: u64;
 
     // IPC: listen for plugin connections.
     // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
@@ -317,6 +474,21 @@ async fn session_loop(
     // Up to 3 retries at 250ms intervals for transiently-failed peers.
     let mut audio_retry: Option<(tokio::time::Instant, Vec<String>, Vec<u8>, u32)> = None;
 
+    // Auto-start test tone on Send 0 if --test-room was used
+    if initial_test_mode {
+        let (boundary_tx, boundary_rx) = mpsc::channel::<(i64, f64, u32, f64)>(4);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let ipc_tx = ipc_from_plugin_tx.clone();
+        let conn_id = usize::MAX;
+        tokio::spawn(test_tone_task(0, conn_id, ipc_tx, boundary_rx, cancel_rx));
+        local_send_streams.insert(conn_id, 0);
+        test_tone_boundary_tx = Some(boundary_tx);
+        test_tone_cancel_tx = Some(cancel_tx);
+        test_tone_stream = Some(0);
+        test_mode = true;
+        ui_info!(&app, "[TEST] Auto-started test tone on Send 0");
+    }
+
     ui_info!(&app, "Waiting for peers...");
 
     loop {
@@ -347,6 +519,36 @@ async fn session_loop(
                         local_stream_names = names;
                         let msg = SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) };
                         mesh.broadcast(&msg).await;
+                    }
+                    SessionCommand::SetTestTone(stream_opt) => {
+                        // Stop existing test tone task if any
+                        if let Some(cancel_tx) = test_tone_cancel_tx.take() {
+                            let _ = cancel_tx.send(true);
+                        }
+                        test_tone_boundary_tx = None;
+                        test_tone_stream = None;
+                        test_mode = false;
+
+                        if let Some(stream_index) = stream_opt {
+                            // Spawn a virtual send task on the given stream index
+                            let (boundary_tx, boundary_rx) = mpsc::channel::<(i64, f64, u32, f64)>(4);
+                            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+                            let ipc_tx = ipc_from_plugin_tx.clone();
+                            let conn_id = usize::MAX - stream_index as usize;
+
+                            tokio::spawn(test_tone_task(stream_index, conn_id, ipc_tx, boundary_rx, cancel_rx));
+
+                            // Register in local_send_streams so it's tracked like a real plugin
+                            local_send_streams.insert(conn_id, stream_index);
+
+                            test_tone_boundary_tx = Some(boundary_tx);
+                            test_tone_cancel_tx = Some(cancel_tx);
+                            test_tone_stream = Some(stream_index);
+                            test_mode = true;
+                            ui_info!(&app, "[TEST] Test tone started on Send {stream_index}");
+                        } else {
+                            ui_info!(&app, "[TEST] Test tone stopped");
+                        }
                     }
                     SessionCommand::Disconnect => {
                         ui_info!(&app, "Disconnecting...");
@@ -483,7 +685,7 @@ async fn session_loop(
             Some((conn_id, frame)) = ipc_from_plugin_rx.recv() => {
                 // Streaming audio frames (20ms Opus chunks, tag 0x05)
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
-                    if interval.current_index().is_none() {
+                    if last_interval_index.is_none() {
                         debug!("audio dropped — interval not started yet");
                         continue;
                     }
@@ -496,6 +698,20 @@ async fn session_loop(
                             *stored = stream_id;
                         }
                     }
+                    // Emit debug frame event for visualization
+                    if let Some(header) = wail_audio::peek_waif_header(&wire_data) {
+                        let offset_ms = last_boundary_time.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                        let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
+                            peer_id: peer_id.clone(),
+                            display_name: Some(display_name.clone()),
+                            interval_index: header.interval_index,
+                            frame_number: header.frame_number,
+                            total_frames: if header.is_final { Some(header.total_frames) } else { None },
+                            is_final: header.is_final,
+                            arrival_offset_ms: offset_ms,
+                            is_local: true,
+                        });
+                    }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
                     audio_intervals_sent += 1;
@@ -503,7 +719,7 @@ async fn session_loop(
                     interval_frames_sent += 1;
                     if !logged_first_frame_sent {
                         logged_first_frame_sent = true;
-                        ui_info!(&app, "audio: first WAIF frame sent to peers ({} bytes, interval={:?})", wire_data.len(), interval.current_index());
+                        ui_info!(&app, "audio: first WAIF frame sent to peers ({} bytes, interval={:?})", wire_data.len(), last_interval_index);
                     }
                     if !failed_peers.is_empty() {
                         // Don't retry individual frames — next frame will arrive in 20ms
@@ -544,7 +760,7 @@ async fn session_loop(
                         // (~8s at 120 BPM, 4 bars). Without this, the joining peer's
                         // interval tracker starts at Some(0) and all outbound audio is
                         // dropped until the next natural boundary fires.
-                        if let Some(idx) = interval.current_index() {
+                        if let Some(idx) = last_interval_index {
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                         }
 
@@ -618,6 +834,7 @@ async fn session_loop(
                         // Seed liveness for initial peers so the watchdog can
                         // detect peers that connect but never send any messages.
                         peers.seed_last_seen();
+                        is_joiner = n > 0;
                         ui_info!(&app, "Joined room with {n} peer(s)");
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLogBroadcast { from, level, message, .. })) => {
@@ -888,12 +1105,17 @@ async fn session_loop(
                     SyncMessage::StateSnapshot { bpm: remote_bpm, beat: remote_beat, .. } => {
                         if !initial_beat_synced {
                             initial_beat_synced = true;
-                            ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
-                            let rtt_us = clock.rtt_us(&from);
-                            if link_cmd_tx.send(LinkCommand::ForceBeat { beat: remote_beat, rtt_us }).is_err() {
-                                ui_warn!(&app, "Link bridge stopped — cannot force beat");
+                            if is_joiner {
+                                ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
+                                let rtt_us = clock.rtt_us(&from);
+                                if link_cmd_tx.send(LinkCommand::ForceBeat { beat: remote_beat, rtt_us }).is_err() {
+                                    ui_warn!(&app, "Link bridge stopped — cannot force beat");
+                                }
+                                let new_idx = compute_interval_index(remote_beat, interval_bars, interval_quantum);
+                                last_interval_index = Some(new_idx);
+                            } else {
+                                ui_info!(&app, "Beat sync — we are room owner, skipping ForceBeat");
                             }
-                            interval.set_config(bars, quantum);
                         }
                         if (remote_bpm - last_broadcast_bpm).abs() > 0.01 {
                             last_broadcast_bpm = remote_bpm;
@@ -905,7 +1127,8 @@ async fn session_loop(
 
                     SyncMessage::IntervalConfig { bars: remote_bars, quantum: remote_q } => {
                         ui_info!(&app, "Remote interval config: {remote_bars} bars, quantum {remote_q}");
-                        interval.set_config(remote_bars, remote_q);
+                        interval_bars = remote_bars;
+                        interval_quantum = remote_q;
                     }
 
                     SyncMessage::AudioCapabilities { sample_rates, channel_counts, can_send, can_receive, max_streams } => {
@@ -917,13 +1140,13 @@ async fn session_loop(
                     }
 
                     SyncMessage::IntervalBoundary { index } => {
-                        // No UI log for interval boundaries — too noisy
-                        let local = interval.current_index();
-                        let behind = local.map_or(true, |l| index > l);
-                        if behind {
-                            debug!(local = ?local, remote = index, peer = %from, "Interval index behind — syncing");
-                            interval.sync_to(index);
-                        }
+                        // Log remote boundaries for diagnostics but do not sync_to.
+                        // The local interval tracker derives boundaries from the
+                        // beat clock (synced by Link on LAN or ForceBeat on WAN).
+                        // Calling sync_to here would push the tracker ahead of the
+                        // local beat clock, suppressing future boundary events.
+                        let local = last_interval_index;
+                        debug!(local = ?local, remote = index, peer = %from, "Remote interval boundary (informational)");
                     }
 
                     SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected, .. } => {
@@ -978,7 +1201,7 @@ async fn session_loop(
                             peer.total_frames_expected += header.total_frames as u64;
                         }
                         // Detect late frames: frames for intervals we've already passed
-                        if let Some(current_idx) = interval.current_index() {
+                        if let Some(current_idx) = last_interval_index {
                             if header.interval_index < current_idx - 1 {
                                 peer.late_frames += 1;
                             }
@@ -996,9 +1219,8 @@ async fn session_loop(
                 if test_mode {
                     match wail_audio::test_tone::validate_audio(&data) {
                         Ok(v) => {
-                            if v.rms < 0.001 && v.format == "WAIL" {
-                                ui_warn!(&app, "[TEST] Audio from {from} is SILENT (RMS={:.6}): {}", v.rms, v.detail);
-                            } else {
+                            // Only log final frames to avoid flooding the log tab
+                            if v.detail.contains("final=true") {
                                 ui_info!(&app, "[TEST] Audio from {from}: {}", v.detail);
                             }
                         }
@@ -1016,8 +1238,8 @@ async fn session_loop(
                 // Rewrite remote interval index to match local session tracker.
                 // The send plugin uses the DAW's transport.pos_beats() which is
                 // project-local and not synced between peers on different networks.
-                // The session's IntervalTracker IS synced via IntervalBoundary messages.
-                if let Some(local_idx) = interval.current_index() {
+                // Rewrite remote interval index to match the local session's interval.
+                if let Some(local_idx) = last_interval_index {
                     if let Some(header) = wail_audio::peek_waif_header(&data) {
                         if header.interval_index != local_idx {
                             debug!(
@@ -1029,6 +1251,23 @@ async fn session_loop(
                         }
                     }
                     wail_audio::rewrite_waif_interval_index(&mut data, local_idx);
+                }
+
+                // Emit debug frame event AFTER interval index rewrite so remote
+                // frames use the local interval index (matching the viz rows).
+                if let Some(header) = wail_audio::peek_waif_header(&data) {
+                    let offset_ms = last_boundary_time.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                    let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
+                    let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
+                        peer_id: from.clone(),
+                        display_name: peer_name,
+                        interval_index: header.interval_index,
+                        frame_number: header.frame_number,
+                        total_frames: if header.is_final { Some(header.total_frames) } else { None },
+                        is_final: header.is_final,
+                        arrival_offset_ms: offset_ms,
+                        is_local: false,
+                    });
                 }
 
                 if !ipc_pool.is_empty() {
@@ -1066,7 +1305,9 @@ async fn session_loop(
                             });
                         }
 
-                        if let Some(idx) = interval.update(beat) {
+                        let idx = compute_interval_index(beat, interval_bars, interval_quantum);
+                        if last_interval_index.map_or(true, |last| idx > last) {
+                            last_interval_index = Some(idx);
                             info!(
                                 ">>> INTERVAL {idx} <<< beat={beat:.1} \
                                  sent={interval_frames_sent}({interval_bytes_sent}B) \
@@ -1084,7 +1325,7 @@ async fn session_loop(
                                 }
                                 // Compute boundary drift: actual gap − expected gap
                                 if last_broadcast_bpm > 0.0 {
-                                    let beats = interval.beats_per_interval();
+                                    let beats = beats_per_interval(interval_bars, interval_quantum);
                                     let expected_us = (beats / (last_broadcast_bpm / 60.0) * 1_000_000.0) as i64;
                                     let actual_us = gap.as_micros() as i64;
                                     boundary_drift_us = Some(actual_us - expected_us);
@@ -1093,22 +1334,8 @@ async fn session_loop(
                             last_boundary_time = Some(Instant::now());
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
 
-                            if test_mode {
-                                let freq = if idx % 2 == 0 { 440.0 } else { 880.0 };
-                                match wail_audio::test_tone::encode_test_interval(idx, freq, last_broadcast_bpm, bars, quantum) {
-                                    Ok(wire_bytes) => {
-                                        ui_info!(&app, "[TEST] Broadcasting test tone: interval={idx}, freq={freq}Hz, {} bytes", wire_bytes.len());
-                                        let failed = mesh.broadcast_audio(&wire_bytes).await;
-                                        audio_bytes_sent += wire_bytes.len() as u64;
-                                        audio_intervals_sent += 1;
-                                        if !failed.is_empty() {
-                                            ui_warn!(&app, "[TEST] Broadcast failed for {} peers: {:?}", failed.len(), failed);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        ui_error!(&app, "[TEST] Failed to encode test tone: {e}");
-                                    }
-                                }
+                            if let Some(ref tx) = test_tone_boundary_tx {
+                                let _ = tx.try_send((idx, last_broadcast_bpm, interval_bars, interval_quantum));
                             }
                         }
                     }
@@ -1123,7 +1350,9 @@ async fn session_loop(
                         };
                         mesh.broadcast(&msg).await;
 
-                        if let Some(idx) = interval.update(beat) {
+                        let idx = compute_interval_index(beat, interval_bars, interval_quantum);
+                        if last_interval_index.map_or(true, |last| idx > last) {
+                            last_interval_index = Some(idx);
                             info!(
                                 ">>> INTERVAL {idx} <<< beat={beat:.1} \
                                  sent={interval_frames_sent}({interval_bytes_sent}B) \
@@ -1140,7 +1369,7 @@ async fn session_loop(
                                     ui_info!(&app, "[TEST] Interval boundary {idx}: gap={gap:.2?}");
                                 }
                                 if last_broadcast_bpm > 0.0 {
-                                    let beats = interval.beats_per_interval();
+                                    let beats = beats_per_interval(interval_bars, interval_quantum);
                                     let expected_us = (beats / (last_broadcast_bpm / 60.0) * 1_000_000.0) as i64;
                                     let actual_us = gap.as_micros() as i64;
                                     boundary_drift_us = Some(actual_us - expected_us);
@@ -1149,24 +1378,25 @@ async fn session_loop(
                             last_boundary_time = Some(Instant::now());
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
 
-                            if test_mode {
-                                let freq = if idx % 2 == 0 { 440.0 } else { 880.0 };
-                                match wail_audio::test_tone::encode_test_interval(idx, freq, last_broadcast_bpm, bars, quantum) {
-                                    Ok(wire_bytes) => {
-                                        ui_info!(&app, "[TEST] Broadcasting test tone: interval={idx}, freq={freq}Hz, {} bytes", wire_bytes.len());
-                                        let failed = mesh.broadcast_audio(&wire_bytes).await;
-                                        audio_bytes_sent += wire_bytes.len() as u64;
-                                        audio_intervals_sent += 1;
-                                        if !failed.is_empty() {
-                                            ui_warn!(&app, "[TEST] Broadcast failed for {} peers: {:?}", failed.len(), failed);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        ui_error!(&app, "[TEST] Failed to encode test tone: {e}");
-                                    }
-                                }
+                            if let Some(ref tx) = test_tone_boundary_tx {
+                                let _ = tx.try_send((idx, last_broadcast_bpm, interval_bars, interval_quantum));
                             }
                         }
+                    }
+
+                }
+            }
+
+            // --- Debug Link state tick (20ms) — lightweight, no mesh work ---
+            _ = debug_tick_timer.tick() => {
+                let (state_tx, state_rx) = tokio::sync::oneshot::channel();
+                if link_cmd_tx.send(LinkCommand::GetState(state_tx)).is_ok() {
+                    if let Ok(s) = state_rx.await {
+                        let _ = app.emit("debug:link-tick", serde_json::json!({
+                            "beat": s.beat,
+                            "phase": s.phase,
+                            "bpm": s.bpm,
+                        }));
                     }
                 }
             }
@@ -1376,7 +1606,7 @@ async fn session_loop(
                         peers: peer_infos,
                         slots: slot_infos,
                         local_sends,
-                        interval_bars: interval.bars(),
+                        interval_bars,
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
                         audio_bytes_sent,
@@ -1385,6 +1615,7 @@ async fn session_loop(
                         plugin_connected: !ipc_pool.is_empty() || test_mode,
                         recording: recorder.is_some(),
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
+                        test_tone_stream,
                     });
 
                     // Log audio pipeline status every tick (use RUST_LOG=debug to see)
@@ -1393,7 +1624,7 @@ async fn session_loop(
                          bytes_sent={audio_bytes_sent} bytes_recv={audio_bytes_recv} \
                          dc_open={dc_open} peers={} recv_plugins={} \
                          interval={:?} test_mode={test_mode}",
-                        connected.len(), ipc_pool.len(), interval.current_index(),
+                        connected.len(), ipc_pool.len(), last_interval_index,
                     );
 
                     // Broadcast audio pipeline status to remote peers

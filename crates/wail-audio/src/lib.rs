@@ -11,8 +11,6 @@ pub mod wire;
 pub mod fft_analysis;
 pub mod test_tone;
 
-#[cfg(test)]
-mod pipeline;
 
 pub use bridge::AudioBridge;
 pub use codec::{nearest_opus_rate, AudioDecoder, AudioEncoder};
@@ -21,4 +19,4 @@ pub use interval::{AudioFrame, AudioInterval, IntervalRecorder};
 pub use ipc::{IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND, IPC_TAG_AUDIO_FRAME_PUB, IPC_TAG_AUDIO_PUB, IPC_TAG_METRICS_PUB, IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB, IPC_TAG_PEER_NAME_PUB};
 pub use ring::{CompletedInterval, IntervalRing, PeerSlot, MAX_REMOTE_PEERS};
 pub use slot::{ClientChannelMapping, SlotTable};
-pub use wire::{peek_waif_header, rewrite_waif_interval_index, AudioFrameWire, AudioWire, WaifHeaderPeek};
+pub use wire::{peek_waif_header, rewrite_waif_interval_index, AudioFrameWire, WaifHeaderPeek};

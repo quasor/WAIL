@@ -1064,3 +1064,35 @@ summary:hover {
 .connected {
   color: var(--state-ok);
 }
+
+.small-select {
+  background: var(--bg-hover);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* Debug interval canvas */
+#session-tab-debug-content {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.debug-link-info {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 8px 10px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  line-height: 1.6;
+}
+#debug-interval-canvas {
+  width: 100%;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
