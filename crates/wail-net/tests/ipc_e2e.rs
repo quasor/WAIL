@@ -1,9 +1,9 @@
-//! Integration test: full Plugin IPC → App → WebRTC → App → Plugin IPC path.
+//! Integration test: full Plugin IPC → App → WebSocket relay → App → Plugin IPC path.
 //!
 //! Exercises every encoding/decoding layer in the audio pipeline:
 //!   Plugin A: AudioBridge → Opus encode → AudioWire → IpcMessage → IpcFramer → TCP
 //!     → Mini App A: TCP read → IpcRecvBuffer → IpcMessage decode → PeerMesh.broadcast_audio()
-//!       → WebRTC DataChannel
+//!       → WebSocket relay
 //!     → Mini App B: audio_rx.recv() → IpcMessage encode → IpcFramer → TCP write
 //!   → Plugin B: TCP read → IpcRecvBuffer → IpcMessage decode → AudioWire decode → Opus decode
 //!
@@ -22,7 +22,7 @@ use wail_net::PeerMesh;
 use common::*;
 
 // ---------------------------------------------------------------------------
-// Mini App: lightweight session loop that bridges Plugin IPC ↔ WebRTC audio
+// Mini App: lightweight session loop that bridges Plugin IPC ↔ WebSocket relay audio
 // ---------------------------------------------------------------------------
 
 /// A minimal session loop replicating the audio forwarding logic from
@@ -34,13 +34,13 @@ async fn mini_app_session(
     peer_id: String,
     password: String,
 ) {
-    let ice = wail_net::default_ice_servers();
-    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
+    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_full(
         &signaling_url,
         &room,
         &peer_id,
         Some(password.as_str()),
-        ice,
+        1,
+        None,
     )
     .await
     .expect("Mini app failed to connect to signaling");
@@ -83,17 +83,17 @@ async fn mini_app_session(
                 }
             }
 
-            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to WebRTC peers
+            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to peers
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                 }
             }
 
-            // Signaling (drives WebRTC negotiation)
+            // Signaling (drives WebSocket relay)
             _event = mesh.poll_signaling() => {}
 
-            // WebRTC audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
+            // Audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {
                 if let Some(ref mut writer) = ipc_writer {
                     let msg = IpcMessage::encode_audio(&from, &data);
@@ -309,7 +309,7 @@ async fn simulated_plugin_receive_multi(
 }
 
 // ---------------------------------------------------------------------------
-// Test: Full plugin-to-plugin audio path through IPC + WebRTC
+// Test: Full plugin-to-plugin audio path through IPC + WebSocket relay
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -318,7 +318,7 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
         .with_env_filter("info")
         .try_init();
 
-    // 1. Start in-process HTTP signaling server
+    // 1. Start in-process signaling server
     let server_url = start_test_signaling_server().await;
 
     // 2. Pick random IPC ports for each mini app
@@ -326,7 +326,6 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
     let ipc_port_b = random_port();
 
     // 3. Spawn mini_app_a (peer-a) and mini_app_b (peer-b)
-    //    "peer-a" < "peer-b" lexicographically → peer-a initiates WebRTC
     let url = server_url.clone();
     let app_a = tokio::spawn(mini_app_session(
         ipc_port_a,
@@ -347,9 +346,7 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
         "test".into(),
     ));
 
-    // 4. Wait for WebRTC connection to establish between the two mini apps.
-    //    The mini_apps pump signaling in their select loops, so connection
-    //    should establish within a few seconds on localhost.
+    // 4. Wait for connection to establish between the two mini apps.
     tokio::time::sleep(Duration::from_secs(6)).await;
 
     // 5. Simulated Plugin A: produce 440Hz sine wave, Opus-encode, send via TCP IPC
@@ -373,7 +370,7 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
     let energy = rms(&decoded_samples);
     assert!(
         energy > 0.01,
-        "Plugin B should receive audio with signal energy via full IPC+WebRTC path, RMS={energy}"
+        "Plugin B should receive audio with signal energy via full IPC+relay path, RMS={energy}"
     );
 
     eprintln!(
@@ -388,7 +385,7 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Multiple full-size intervals through IPC + WebRTC
+// Test: Multiple full-size intervals through IPC + WebSocket relay
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -422,7 +419,7 @@ async fn multi_interval_full_size_e2e() {
         "test".into(),
     ));
 
-    // Wait for WebRTC connection
+    // Wait for connection
     tokio::time::sleep(Duration::from_secs(6)).await;
 
     // Send 3 full-size intervals (each ~768k samples → ~128KB Opus → chunked)
@@ -480,7 +477,7 @@ async fn multi_interval_full_size_e2e() {
 // ---------------------------------------------------------------------------
 
 /// Session loop that reads a role byte from each IPC connection and only
-/// forwards received WebRTC audio to connections that identify as RECV.
+/// forwards received audio to connections that identify as RECV.
 async fn mini_app_session_v2(
     ipc_port: u16,
     signaling_url: String,
@@ -488,13 +485,13 @@ async fn mini_app_session_v2(
     peer_id: String,
     password: String,
 ) {
-    let ice = wail_net::default_ice_servers();
-    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
+    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_full(
         &signaling_url,
         &room,
         &peer_id,
         Some(password.as_str()),
-        ice,
+        1,
+        None,
     )
     .await
     .expect("Mini app V2 failed to connect");
@@ -545,7 +542,7 @@ async fn mini_app_session_v2(
                 }
             }
 
-            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to WebRTC peers
+            // IPC from send plugin (tag 0x05 WAIF frame) → broadcast raw WAIF bytes to peers
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
@@ -554,7 +551,7 @@ async fn mini_app_session_v2(
 
             _event = mesh.poll_signaling() => {}
 
-            // WebRTC audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
+            // Audio from peers (raw WAIF bytes) → forward to recv plugin via IPC (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {
                 let msg = IpcMessage::encode_audio(&from, &data);
                 let frame = IpcFramer::encode_frame(&msg);
@@ -604,7 +601,7 @@ async fn dual_plugin_ipc_only_recv_gets_audio() {
         "test".into(),
     ));
 
-    // 4. Wait for WebRTC connection
+    // 4. Wait for connection
     tokio::time::sleep(Duration::from_secs(6)).await;
 
     // 5. Connect simulated SEND plugin to app_b (identifies as SEND role)

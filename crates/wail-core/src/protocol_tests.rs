@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{SignalMessage, SignalPayload, SyncMessage};
+    use crate::protocol::{SignalMessage, SyncMessage};
 
     #[test]
     fn sync_message_ping_roundtrip() {
@@ -143,60 +143,6 @@ mod tests {
                 assert_eq!(room, "jam-session");
                 assert_eq!(peer_id, "peer1");
             }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn signal_payload_offer_roundtrip() {
-        let msg = SignalMessage::Signal {
-            to: "peer2".to_string(),
-            from: "peer1".to_string(),
-            payload: SignalPayload::Offer {
-                sdp: "v=0\r\n...".to_string(),
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: SignalMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            SignalMessage::Signal { to, from, payload } => {
-                assert_eq!(to, "peer2");
-                assert_eq!(from, "peer1");
-                match payload {
-                    SignalPayload::Offer { sdp } => assert_eq!(sdp, "v=0\r\n..."),
-                    _ => panic!("Wrong payload variant"),
-                }
-            }
-            _ => panic!("Wrong variant"),
-        }
-    }
-
-    #[test]
-    fn signal_payload_ice_candidate_roundtrip() {
-        let msg = SignalMessage::Signal {
-            to: "peer2".to_string(),
-            from: "peer1".to_string(),
-            payload: SignalPayload::IceCandidate {
-                candidate: "candidate:1 1 UDP 2122252543 192.168.1.1 12345 typ host".to_string(),
-                sdp_mid: Some("0".to_string()),
-                sdp_mline_index: Some(0),
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: SignalMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            SignalMessage::Signal { payload, .. } => match payload {
-                SignalPayload::IceCandidate {
-                    candidate,
-                    sdp_mid,
-                    sdp_mline_index,
-                } => {
-                    assert!(candidate.contains("candidate:1"));
-                    assert_eq!(sdp_mid, Some("0".to_string()));
-                    assert_eq!(sdp_mline_index, Some(0));
-                }
-                _ => panic!("Wrong payload"),
-            },
             _ => panic!("Wrong variant"),
         }
     }

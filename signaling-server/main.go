@@ -27,7 +27,7 @@ const (
 	pingInterval   = 15 * time.Second
 	pongWait       = 20 * time.Second
 	writeWait      = 10 * time.Second
-	maxMessageSize = 64 * 1024
+	maxMessageSize = 256 * 1024
 	// Keep at most this many completed sessions per room in memory.
 	maxCompletedSessions = 50
 )
@@ -72,12 +72,18 @@ type peerFrameReport struct {
 	DecodeFailures uint64 `json:"decode_failures"`
 }
 
+// wsMessage carries a typed WebSocket frame (text or binary).
+type wsMessage struct {
+	msgType int
+	data    []byte
+}
+
 // conn wraps a single WebSocket connection that has joined a room.
 type conn struct {
 	ws     *websocket.Conn
 	room   string
 	peerID string
-	send   chan []byte
+	send   chan wsMessage
 }
 
 // ---------------------------------------------------------------------------
@@ -488,18 +494,84 @@ func (h *hub) signal(c *conn, msg clientMsg) {
 
 	if roomConns, ok := h.rooms[c.room]; ok {
 		if target, ok := roomConns[msg.To]; ok {
-			// Forward as-is
-			raw, _ := json.Marshal(map[string]any{
+			target.sendJSON(map[string]any{
 				"type":    "signal",
 				"to":      msg.To,
 				"from":    c.peerID,
 				"payload": msg.Payload,
 			})
-			select {
-			case target.send <- raw:
-			default:
-				log.Printf("warn: dropped signal from %s to %s (send buffer full)", c.peerID, msg.To)
-			}
+		}
+	}
+}
+
+// broadcastSync relays a sync message (JSON) to all room peers except the sender.
+func (h *hub) broadcastSync(c *conn, msg clientMsg) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if c.room == "" {
+		return
+	}
+	roomConns, ok := h.rooms[c.room]
+	if !ok {
+		return
+	}
+	for pid, rc := range roomConns {
+		if pid != c.peerID {
+			rc.sendJSON(map[string]any{
+				"type":    "sync",
+				"from":    c.peerID,
+				"payload": msg.Payload,
+			})
+		}
+	}
+}
+
+// syncTo relays a sync message to a specific peer in the room.
+func (h *hub) syncTo(c *conn, msg clientMsg) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if c.room == "" {
+		return
+	}
+	roomConns, ok := h.rooms[c.room]
+	if !ok {
+		return
+	}
+	if target, ok := roomConns[msg.To]; ok {
+		target.sendJSON(map[string]any{
+			"type":    "sync",
+			"from":    c.peerID,
+			"payload": msg.Payload,
+		})
+	}
+}
+
+// broadcastAudioBinary relays a binary audio frame to all room peers except the sender.
+// Prepends a sender header: [1 byte: peer_id_len][peer_id UTF-8 bytes][audio payload].
+func (h *hub) broadcastAudioBinary(c *conn, data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if c.room == "" {
+		return
+	}
+	roomConns, ok := h.rooms[c.room]
+	if !ok {
+		return
+	}
+
+	// Prepend sender header
+	pidBytes := []byte(c.peerID)
+	frame := make([]byte, 1+len(pidBytes)+len(data))
+	frame[0] = byte(len(pidBytes))
+	copy(frame[1:1+len(pidBytes)], pidBytes)
+	copy(frame[1+len(pidBytes):], data)
+
+	for pid, rc := range roomConns {
+		if pid != c.peerID {
+			rc.sendBinary(frame)
 		}
 	}
 }
@@ -512,21 +584,16 @@ func (h *hub) broadcastLog(c *conn, msg clientMsg) {
 		return
 	}
 	if roomConns, ok := h.rooms[c.room]; ok {
-		raw, _ := json.Marshal(map[string]any{
-			"type":         "log",
-			"from":         c.peerID,
-			"level":        msg.Level,
-			"target":       msg.Target,
-			"message":      msg.Message,
-			"timestamp_us": msg.TimestampUs,
-		})
 		for pid, rc := range roomConns {
 			if pid != c.peerID {
-				select {
-				case rc.send <- raw:
-				default:
-					log.Printf("warn: dropped log from %s to %s (send buffer full)", c.peerID, pid)
-				}
+				rc.sendJSON(map[string]any{
+					"type":         "log",
+					"from":         c.peerID,
+					"level":        msg.Level,
+					"target":       msg.Target,
+					"message":      msg.Message,
+					"timestamp_us": msg.TimestampUs,
+				})
 			}
 		}
 	}
@@ -628,9 +695,18 @@ func (c *conn) sendJSON(v any) {
 		return
 	}
 	select {
-	case c.send <- raw:
+	case c.send <- wsMessage{websocket.TextMessage, raw}:
 	default:
 		log.Printf("warn: dropped message to peer %s (send buffer full)", c.peerID)
+	}
+}
+
+func (c *conn) sendBinary(data []byte) {
+	defer func() { recover() }()
+	select {
+	case c.send <- wsMessage{websocket.BinaryMessage, data}:
+	default:
+		log.Printf("warn: dropped binary message to peer %s (send buffer full)", c.peerID)
 	}
 }
 
@@ -649,7 +725,7 @@ func (c *conn) writePump() {
 				c.ws.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			if err := c.ws.WriteMessage(websocket.TextMessage, msg); err != nil {
+			if err := c.ws.WriteMessage(msg.msgType, msg.data); err != nil {
 				return
 			}
 		case <-ticker.C:
@@ -686,9 +762,15 @@ func (c *conn) readPump(h *hub) {
 	})
 
 	for {
-		_, raw, err := c.ws.ReadMessage()
+		msgType, raw, err := c.ws.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		// Binary frames are audio data — relay to room peers
+		if msgType == websocket.BinaryMessage {
+			h.broadcastAudioBinary(c, raw)
+			continue
 		}
 
 		var msg clientMsg
@@ -701,6 +783,10 @@ func (c *conn) readPump(h *hub) {
 			h.join(c, msg)
 		case "signal":
 			h.signal(c, msg)
+		case "sync":
+			h.broadcastSync(c, msg)
+		case "sync_to":
+			h.syncTo(c, msg)
 		case "log":
 			h.broadcastLog(c, msg)
 		case "leave":
@@ -728,7 +814,7 @@ func handleWS(h *hub, w http.ResponseWriter, r *http.Request) {
 
 	c := &conn{
 		ws:   ws,
-		send: make(chan []byte, 64),
+		send: make(chan wsMessage, 256),
 	}
 
 	go c.writePump()

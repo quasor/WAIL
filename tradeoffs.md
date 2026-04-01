@@ -89,6 +89,15 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ---
 
+### WebRTC → WebSocket relay migration
+**Status:** Done
+**Files:** `crates/wail-net/`, `signaling-server/main.go`, `crates/wail-tauri/src/session.rs`
+**Decision:** Replaced all WebRTC DataChannels with server-relayed WebSocket messages. All sync (JSON text) and audio (binary) data now flows through the Go signaling server, which broadcasts to all room peers (SFU-style). Removed `webrtc`/`webrtc-ice` crate dependencies and deleted `peer.rs`.
+**Rationale:** Dramatically simpler architecture — no ICE/STUN/TURN negotiation, no per-peer connection state, no tie-breaking logic. Eliminates Metered TURN dependency and credentials management. Compile times and binary size significantly reduced.
+**Trade-offs:** (1) TCP head-of-line blocking — a lost packet delays all subsequent frames, unlike WebRTC's UDP/SCTP. For audio at ~50 frames/sec this could cause occasional latency spikes. (2) Server bandwidth scales quadratically — N peers × (N−1) streams relayed through the server. At 128kbps Opus with 4 peers: ~1.5 Mbps outbound. (3) One extra network hop (peer→server→peer) vs direct P2P, though for users behind NATs this may be comparable to TURN relay.
+
+---
+
 ### TempoChangeDetector extraction
 **Status:** Done
 **File:** `crates/wail-core/src/link.rs`
@@ -100,7 +109,7 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 | ID | Item | File | Status |
 |----|------|------|--------|
-| I4 | Single STUN server, no TURN (symmetric NATs will fail) | `crates/wail-net/src/peer.rs:60` | Open |
+| I4 | ~~Single STUN server, no TURN~~ | Removed — WebRTC replaced by WebSocket relay | Resolved |
 | I5 | `now_us()` cast u128→i64 overflows after 292 years | `crates/wail-core/src/clock.rs:36` | Open |
 | I6 | Median uses upper-median for even-length arrays | `crates/wail-core/src/clock.rs:87` | Open |
 | I7 | Echo guard 150ms window suppresses legit fast tempo changes | `crates/wail-core/src/link.rs:89-94` | Open |

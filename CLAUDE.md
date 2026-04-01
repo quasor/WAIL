@@ -1,8 +1,8 @@
-# WAIL - WebRTC Audio Interchange for Link
+# WAIL - WebSocket Audio Interchange for Link
 
 ## What is this?
 
-WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataChannels. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. Intervalic audio (NINJAM-style) is captured, Opus-encoded, and transmitted over WebRTC DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture) and WAIL Recv (playback).
+WAIL synchronizes Ableton Link sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. Intervalic audio (NINJAM-style) is captured, Opus-encoded, and transmitted via the signaling server. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture) and WAIL Recv (playback).
 
 ## Project Structure
 
@@ -23,20 +23,19 @@ crates/
 │   ├── frame_assembler.rs FrameAssembler: collects WAIF frames into intervals
 │   ├── bridge.rs         AudioBridge: wraps ring + Opus codec for send/recv
 │   ├── ipc.rs            IPC framing protocol (length-prefixed messages)
-│   └── pipeline.rs       Encode/decode pipeline (interval → wire → DataChannel)
+│   └── pipeline.rs       Encode/decode pipeline (interval → wire → WebSocket relay)
 ├── wail-net/            Networking layer
-│   ├── lib.rs            PeerMesh + ICE server config (Metered TURN)
-│   ├── signaling.rs      WebSocket signaling client
-│   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
+│   ├── lib.rs            PeerMesh (WebSocket relay wrapper)
+│   └── signaling.rs      WebSocket signaling + data relay client
 ├── wail-e2e/            Two-machine end-to-end test binary
-│   └── main.rs           8-phase test: ICE → Signaling → Discovery → WebRTC → Sync → Audio → Sustained → Reconnect
+│   └── main.rs           7-phase test: Signaling → Discovery → Sync → Audio → Sustained → Burst → Reconnect
 ├── wail-tauri/          Tauri desktop app (session orchestration)
 │   ├── main.rs           App entry point
 │   ├── lib.rs            Tauri setup and plugin registration
 │   ├── commands.rs       Tauri IPC commands (join/leave room, etc.)
 │   ├── events.rs         Tauri event types for frontend
 │   ├── peers.rs          PeerRegistry + IpcWriterPool (consolidated peer state)
-│   ├── session.rs        Session state machine (Link + WebRTC + audio)
+│   ├── session.rs        Session state machine (Link + WebSocket relay + audio)
 │   └── recorder.rs       Local session recording
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
 │   ├── lib.rs            Plugin entry point, send-only IPC thread
@@ -68,14 +67,14 @@ cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 cargo xtask build-plugin                  # → target/bundled/wail-plugin-{send,recv}.{clap,vst3}
 cargo xtask install-plugin                # build + install to system plugin dirs
 
-# Tauri app (handles Link + WebRTC + IPC)
+# Tauri app (handles Link + WebSocket relay + IPC)
 cargo tauri dev
 ```
 
 ## Key Dependencies
 
 - `rusty_link` - Ableton Link via C FFI to official SDK
-- `webrtc` v0.11 (webrtc-rs) - Pure Rust WebRTC
+- `tokio-tungstenite` - WebSocket client (signaling + data relay)
 - `audiopus` - Opus audio codec (libopus bindings)
 - `nih_plug` (git) - CLAP/VST3 plugin framework
 - `tokio` - Async runtime
@@ -85,8 +84,8 @@ cargo tauri dev
 ### Sync Flow
 Each WAIL peer:
 1. Joins local Ableton Link session (LAN multicast)
-2. Connects to HTTP signaling server to join a room (public or password-protected)
-3. Establishes WebRTC DataChannels with remote peers (P2P)
+2. Connects to WebSocket signaling server to join a room (public or password-protected)
+3. Sync messages (tempo, phase, clock) are relayed through the server to all room peers
 4. Polls Link at 50Hz, broadcasts tempo/phase changes
 5. Applies remote tempo changes to local Link session
 6. Tracks NINJAM-style interval boundaries
@@ -94,18 +93,18 @@ Each WAIL peer:
 ### Audio Flow (Intervalic)
 NINJAM-style double-buffer pattern with two separate plugins:
 1. **WAIL Send** plugin captures DAW audio into record slot for current interval
-2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebRTC DataChannel
+2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebSocket (binary) → server → all room peers
 3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
 4. Playback slot feeds audio output to DAW (main bus + up to 15 per-slot aux outputs)
 5. Latency = exactly 1 interval (by design, like NINJAM)
 
-Two WebRTC DataChannels per peer:
-- **"sync"**: JSON text messages (tempo, beat, phase, clock sync)
-- **"audio"**: Binary wire-format messages (Opus-encoded intervals)
+Two WebSocket message types via the signaling server:
+- **sync** (text): JSON messages relayed to all room peers (tempo, beat, phase, clock sync)
+- **audio** (binary): WAIF wire-format frames broadcast to all room peers (Opus-encoded intervals)
 
 ```
-DAW A → [WAIL Send] → record → Opus encode → IPC → wail-app → DataChannel → remote peer
-        [WAIL Recv] ← play  ← Opus decode  ← IPC ← wail-app ← DataChannel ← remote peer
+DAW A → [WAIL Send] → record → Opus encode → IPC → wail-app → WS binary → server → all peers
+        [WAIL Recv] ← play  ← Opus decode  ← IPC ← wail-app ← WS binary ← server ← remote peer
 ```
 
 ### Wire Format (AudioWire)
@@ -133,7 +132,7 @@ cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wir
 - Async with tokio, channels for cross-task communication
 - `tracing` for structured logging (set RUST_LOG=debug for verbose)
 - Protocol messages are JSON-serialized serde enums (tagged unions)
-- Audio messages use WAIF streaming wire format (AudioFrameWire) over DataChannels
+- Audio messages use WAIF streaming wire format (AudioFrameWire) over WebSocket relay
 - Echo guard pattern: suppress re-broadcast for 150ms after applying remote changes
 - wail-core has no networking dependencies (reusable from plugin)
 - wail-audio has no networking dependencies (reusable from plugin)
@@ -188,7 +187,6 @@ Releases are fully automated — no manual `knope` commands needed:
 
 - **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-tauri/src/session.rs` select loop
 - **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
-- **Add STUN/TURN servers**: ICE server config in `crates/wail-net/src/lib.rs` (includes dynamic Metered TURN credentials)
 - **Change Opus bitrate**: `AudioBridge::new()` bitrate_kbps param in `crates/wail-audio/src/bridge.rs`
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
 

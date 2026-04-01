@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use rusty_link::{AblLink, SessionState};
 use tokio::time::MissedTickBehavior;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use wail_audio::codec::AudioEncoder;
@@ -18,7 +18,7 @@ use wail_audio::wire::AudioFrameWire;
 use wail_audio::{AudioDecoder, AudioFrame, FrameAssembler};
 use wail_core::protocol::{PeerFrameReport, SyncMessage};
 use wail_core::IntervalTracker;
-use wail_net::{fetch_metered_ice_servers, ice_servers_with_turn, metered_stun_fallback, MeshEvent, PeerMesh};
+use wail_net::{MeshEvent, PeerMesh};
 
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS: u16 = 2;
@@ -89,10 +89,6 @@ struct Args {
     #[arg(long)]
     echo: bool,
 
-    /// Force relay-only (TURN) mode
-    #[arg(long)]
-    relay_only: bool,
-
     /// Enable debug-level logging
     #[arg(long)]
     verbose: bool,
@@ -108,18 +104,6 @@ struct Args {
     /// Timeout in seconds for validation mode (default 120)
     #[arg(long, default_value = "120")]
     validate_timeout: u64,
-
-    /// TURN server URL (e.g. turn:coturn:3478). When set, skips Metered API fetch.
-    #[arg(long)]
-    turn_url: Option<String>,
-
-    /// TURN username
-    #[arg(long)]
-    turn_user: Option<String>,
-
-    /// TURN credential
-    #[arg(long)]
-    turn_credential: Option<String>,
 
     /// Scripted note pattern: 'freq:bars,...' (e.g. '220:4,440:2,silence:1,330:4').
     /// Replaces the default pentatonic scale. Loops when exhausted.
@@ -229,34 +213,13 @@ async fn main() -> Result<()> {
     let mut session_state = SessionState::new();
     println!("Ableton Link enabled at {} BPM", args.bpm);
 
-    // --- ICE servers ---
-    let ice_servers = if let (Some(url), Some(user), Some(cred)) =
-        (&args.turn_url, &args.turn_user, &args.turn_credential)
-    {
-        info!("Using local TURN server: {url}");
-        ice_servers_with_turn(url, user, cred)
-    } else {
-        match fetch_metered_ice_servers().await {
-            Ok(servers) => {
-                info!(count = servers.len(), "Fetched ICE servers from Metered");
-                servers
-            }
-            Err(e) => {
-                warn!("Metered API failed ({e}), using STUN fallback");
-                metered_stun_fallback()
-            }
-        }
-    };
-
-    // --- Connect to signaling + WebRTC ---
+    // --- Connect to signaling ---
     let password = args.password.as_deref();
     let (mesh, sync_rx, audio_rx) = PeerMesh::connect_full(
         &args.server,
         &args.room,
         &peer_id,
         password,
-        ice_servers,
-        args.relay_only,
         if args.echo { 2 } else { 1 }, // stream 0 = tone, stream 1 = echo (if enabled)
         Some(&args.name),
     )
@@ -368,17 +331,8 @@ async fn main() -> Result<()> {
                 chaos::ChaosAction::Rejoin => {
                     if mesh_opt.is_none() {
                         println!("[chaos] Reconnecting...");
-                        let ice = if let (Some(url), Some(user), Some(cred)) = (&args.turn_url, &args.turn_user, &args.turn_credential) {
-                            ice_servers_with_turn(url, user, cred)
-                        } else {
-                            match fetch_metered_ice_servers().await {
-                                Ok(s) => s,
-                                Err(_) => metered_stun_fallback(),
-                            }
-                        };
                         let (new_mesh, new_sync_rx, new_audio_rx) = PeerMesh::connect_full(
                             &args.server, &args.room, &peer_id, password,
-                            ice, args.relay_only,
                             if args.echo { 2 } else { 1 },
                             Some(&args.name),
                         ).await?;
@@ -803,9 +757,6 @@ async fn main() -> Result<()> {
                     }
                     Some(MeshEvent::PeerLeft(pid)) => {
                         println!("Peer left: {pid}");
-                    }
-                    Some(MeshEvent::PeerFailed(pid)) => {
-                        println!("Peer connection failed: {pid}");
                     }
                     _ => {}
                 }

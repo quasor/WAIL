@@ -147,11 +147,18 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     };
 
     // Spawn writer from send_rx
+    // The channel carries either JSON text or binary audio frames (prefixed with \0 marker).
     let (mut ws_tx, ws_rx) = socket.split();
     let write_handle = tokio::spawn(async move {
         let mut send_rx = send_rx;
         while let Some(msg) = send_rx.recv().await {
-            if ws_tx.send(Message::Text(msg)).await.is_err() {
+            let ws_msg = if msg.starts_with('\0') {
+                // Binary audio frame: strip the \0 marker and send as binary
+                Message::Binary(msg.into_bytes()[1..].to_vec())
+            } else {
+                Message::Text(msg)
+            };
+            if ws_tx.send(ws_msg).await.is_err() {
                 break;
             }
         }
@@ -368,34 +375,87 @@ async fn relay_messages(
     state: &SharedState,
     room: &str,
     peer_id: &str,
-    send_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    _send_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
     while let Some(Ok(msg)) = ws_rx.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
+        match msg {
+            Message::Binary(data) => {
+                // Binary audio frame: prepend sender header and broadcast to room peers
+                let pid_bytes = peer_id.as_bytes();
+                let mut frame = Vec::with_capacity(1 + pid_bytes.len() + data.len());
+                frame.push(pid_bytes.len() as u8);
+                frame.extend_from_slice(pid_bytes);
+                frame.extend_from_slice(&data);
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+                // Use \0 prefix to signal binary to the write task
+                let mut marker = vec![0u8]; // \0 marker
+                marker.extend_from_slice(&frame);
+                let relay_str = unsafe { String::from_utf8_unchecked(marker) };
 
-        let msg_type = parsed["type"].as_str().unwrap_or("");
-
-        match msg_type {
-            "signal" => {
-                let to = parsed["to"].as_str().unwrap_or("").to_string();
                 let s = state.lock().await;
                 if let Some(room_senders) = s.peer_senders.get(room) {
-                    if let Some(tx) = room_senders.get(&to) {
-                        let _ = tx.send(text.clone());
+                    for (id, tx) in room_senders {
+                        if id != peer_id {
+                            let _ = tx.send(relay_str.clone());
+                        }
                     }
                 }
             }
-            "leave" => break,
-            _ => {}
+            Message::Text(text) => {
+                let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let msg_type = parsed["type"].as_str().unwrap_or("");
+
+                match msg_type {
+                    "signal" => {
+                        let to = parsed["to"].as_str().unwrap_or("").to_string();
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            if let Some(tx) = room_senders.get(&to) {
+                                let _ = tx.send(text.clone());
+                            }
+                        }
+                    }
+                    "sync" => {
+                        // Broadcast sync to all room peers except sender
+                        let relay = serde_json::json!({
+                            "type": "sync",
+                            "from": peer_id,
+                            "payload": parsed["payload"],
+                        }).to_string();
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            for (id, tx) in room_senders {
+                                if id != peer_id {
+                                    let _ = tx.send(relay.clone());
+                                }
+                            }
+                        }
+                    }
+                    "sync_to" => {
+                        // Targeted sync to a specific peer
+                        let to = parsed["to"].as_str().unwrap_or("").to_string();
+                        let relay = serde_json::json!({
+                            "type": "sync",
+                            "from": peer_id,
+                            "payload": parsed["payload"],
+                        }).to_string();
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            if let Some(tx) = room_senders.get(&to) {
+                                let _ = tx.send(relay);
+                            }
+                        }
+                    }
+                    "leave" => break,
+                    _ => {}
+                }
+            }
+            Message::Close(_) => break,
+            _ => continue,
         }
     }
 }
@@ -627,7 +687,8 @@ pub fn produce_interval_waif_ipc(freq_hz: f32) -> Vec<Vec<u8>> {
     output
 }
 
-/// Pump signaling for both meshes until they see each other, then wait for DataChannels.
+/// Pump signaling for both meshes until they see each other.
+/// With WebSocket relay, connection is immediate once both peers join.
 pub async fn establish_connection(mesh_a: &mut PeerMesh, mesh_b: &mut PeerMesh) {
     establish_connection_timeout(mesh_a, mesh_b, 15).await;
 }
@@ -651,20 +712,16 @@ pub async fn establish_connection_timeout(
                     eprintln!("[test] mesh_b poll error: {e}");
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let both_open = mesh_a.any_audio_dc_open() && mesh_b.any_audio_dc_open();
-                if both_open {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if !mesh_a.connected_peers().is_empty() && !mesh_b.connected_peers().is_empty() {
                     return;
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
                 panic!(
-                    "WebRTC connection timed out. Peers: A={:?}, B={:?}, DCs: A={}, B={}",
+                    "Connection timed out. Peers: A={:?}, B={:?}",
                     mesh_a.connected_peers(),
                     mesh_b.connected_peers(),
-                    mesh_a.any_audio_dc_open(),
-                    mesh_b.any_audio_dc_open(),
                 );
             }
         }
@@ -680,22 +737,16 @@ async fn poll_one(mesh: &mut PeerMesh) -> bool {
     )
 }
 
-/// Pump signaling for three meshes until all six directed DataChannel paths are open.
-///
-/// Uses explicit round-robin polling to ensure all meshes get fair scheduling.
-/// With WebSocket signaling, messages arrive instantly and tokio::select! can
-/// starve lower-priority meshes when one mesh has a flood of ICE candidates.
+/// Pump signaling for three meshes until all see each other.
 pub async fn establish_three_way_connection(
     mesh_a: &mut PeerMesh,
     mesh_b: &mut PeerMesh,
     mesh_c: &mut PeerMesh,
     ids: (&str, &str, &str),
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
 
     loop {
-        // Process one message from each mesh in strict round-robin.
-        // Repeat while any mesh had work, to drain queued messages quickly.
         let mut any_progress = true;
         while any_progress {
             any_progress = false;
@@ -704,18 +755,17 @@ pub async fn establish_three_way_connection(
             any_progress |= poll_one(mesh_c).await;
         }
 
-        let all_open =
+        let all_connected =
             mesh_a.is_peer_audio_dc_open(ids.1) && mesh_a.is_peer_audio_dc_open(ids.2)
             && mesh_b.is_peer_audio_dc_open(ids.0) && mesh_b.is_peer_audio_dc_open(ids.2)
             && mesh_c.is_peer_audio_dc_open(ids.0) && mesh_c.is_peer_audio_dc_open(ids.1);
-        if all_open {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if all_connected {
             return;
         }
 
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "3-way WebRTC connection timed out. \
+                "3-way connection timed out. \
                  A→B={} A→C={} B→A={} B→C={} C→A={} C→B={}",
                 mesh_a.is_peer_audio_dc_open(ids.1),
                 mesh_a.is_peer_audio_dc_open(ids.2),
@@ -726,7 +776,6 @@ pub async fn establish_three_way_connection(
             );
         }
 
-        // Yield to let WebSocket I/O and ICE background tasks make progress
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

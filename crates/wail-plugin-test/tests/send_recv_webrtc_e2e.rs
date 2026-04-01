@@ -1,15 +1,15 @@
-//! End-to-end test: real WAIL Send plugin → WebRTC → real WAIL Recv plugin.
+//! End-to-end test: real WAIL Send plugin → WebSocket relay → real WAIL Recv plugin.
 //!
 //! This is the most faithful "client A to client B" test: both ends use actual
 //! compiled CLAP plugin binaries. Audio flows through the full stack:
 //!
 //!   [Real Send .clap]
 //!     audio thread → IPC (WAIF frames) → mini_app_a
-//!       → WebRTC DataChannel → mini_app_b
+//!       → WebSocket relay → mini_app_b
 //!         → IPC (tag 0x01) → [Real Recv .clap]
 //!           → FrameAssembler → Opus decode → ring buffer → DAW output
 //!
-//! No external services or DAW required: in-process signaling, localhost WebRTC.
+//! No external services or DAW required: in-process signaling, localhost relay.
 //!
 //! **Must run with `--test-threads=1`**: all tests mutate the process-global
 //! `WAIL_IPC_ADDR` env var and leak plugin instances to prevent dylib unload.
@@ -230,7 +230,7 @@ fn realtime_paced_no_dropout_e2e() {
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
-    // 2. Start signaling + both mini_apps; wait for WebRTC to establish.
+    // 2. Start signaling + both mini_apps; wait for relay to establish.
     rt.block_on(async {
         let signaling_url = common::start_test_signaling_server().await;
 
@@ -569,7 +569,7 @@ fn realtime_paced_no_dropout_e2e() {
 /// Timeline:
 ///   t=0      — peer-a joins, send-a + recv-a plugins active
 ///   t≈0..15s — peer-a sends ~200 callbacks of audio (≥2 full intervals)
-///   t≈15s    — peer-b joins the room, WebRTC establishes (~8s)
+///   t≈15s    — peer-b joins the room, relay establishes (~8s)
 ///   t≈23s    — send-b + recv-b plugins active, both sides driving audio
 ///   t≈23..83s — 750 callbacks driven; both recv plugins must produce non-silent output
 ///
@@ -645,7 +645,7 @@ fn late_join_bidirectional_e2e() {
         drive_recv(&mut recv_a_proc, buf_size, steady_time); // silent — no remote peer yet
     }
 
-    // 5. peer-b joins the room; wait ~8s for WebRTC DataChannels to establish.
+    // 5. peer-b joins the room; wait ~8s for relay to establish.
     rt.block_on(async {
         tokio::spawn(common::mini_app_session(
             port_b,
@@ -783,7 +783,7 @@ fn late_join_bidirectional_e2e() {
 /// Verify that the recv plugin returns to silence after the remote peer disconnects.
 ///
 /// Timeline:
-///   Phase 1 — Normal audio flow: send-a → WebRTC → recv-b (confirm audio is playing)
+///   Phase 1 — Normal audio flow: send-a → relay → recv-b (confirm audio is playing)
 ///   Phase 2 — Kill send-side mini_app (simulates peer crash / app quit)
 ///   Phase 3 — Continue driving recv-b; verify output goes silent within 2 intervals
 ///
@@ -890,8 +890,8 @@ fn peer_disconnect_silence_e2e() {
          got only {phase1_non_silent}/{phase1_callbacks} non-silent buffers"
     );
 
-    // 4. Kill the send-side mini_app. This drops WebRTC connections, causing
-    //    the recv-side mini_app to detect PeerLeft/PeerFailed and send PeerLeft IPC.
+    // 4. Kill the send-side mini_app. This drops connections, causing
+    //    the recv-side mini_app to detect PeerLeft and send PeerLeft IPC.
     rt.block_on(async {
         send_app_handle.abort();
         // Give the recv-side mini_app time to detect the disconnection and

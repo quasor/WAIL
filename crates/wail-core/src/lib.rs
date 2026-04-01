@@ -6,7 +6,7 @@ pub mod protocol;
 pub use clock::ClockSync;
 pub use interval::IntervalTracker;
 pub use link::{LinkBridge, LinkCommand, LinkEvent, LinkState};
-pub use protocol::{PeerFrameReport, SignalMessage, SignalPayload, SyncMessage};
+pub use protocol::{PeerFrameReport, SignalMessage, SyncMessage};
 
 #[cfg(test)]
 mod clock_tests;
