@@ -228,8 +228,9 @@ jobs:
 
       - name: Zip platform artifacts
         run: |
-          cd wail-release-windows && zip -r ../wail-windows-x64.zip . && cd ..
-          cd wail-release-linux && zip -r ../wail-linux-x64.zip . && cd ..
+          VERSION="${{ steps.tag.outputs.version }}"
+          cd wail-release-windows && zip -r ../wail-windows-x64-${VERSION}.zip . && cd ..
+          cd wail-release-linux && zip -r ../wail-linux-x64-${VERSION}.zip . && cd ..
 
       - name: Find individual installers
         id: files
@@ -242,8 +243,8 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
-            wail-windows-x64.zip
-            wail-linux-x64.zip
+            wail-windows-x64-${{ steps.tag.outputs.version }}.zip
+            wail-linux-x64-${{ steps.tag.outputs.version }}.zip
             ${{ steps.files.outputs.appimage }}
             ${{ steps.files.outputs.deb }}
             ${{ steps.files.outputs.src_tarball }}
