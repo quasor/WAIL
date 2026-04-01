@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.25.0 (2026-04-01)
+
+### Features
+
+- reserve stream index 0 for test tone and auto-name it (#253)
+- debug tab shows column per send stream (#256)
+
+### Fixes
+
+- use linear crossfade at interval boundaries to prevent amplitude bump (#255)
+
 ## 1.24.0 (2026-04-01)
 
 ### Features
