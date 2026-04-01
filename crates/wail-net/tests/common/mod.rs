@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use wail_audio::{AudioBridge, AudioFrame, AudioFrameWire, AudioWire, IpcFramer, IpcMessage};
+use wail_audio::{AudioBridge, AudioEncoder, AudioFrame, AudioFrameWire, IpcFramer, IpcMessage};
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------------------
@@ -516,8 +516,12 @@ pub fn rms(samples: &[f32]) -> f32 {
     (sum / samples.len() as f32).sqrt()
 }
 
-/// Produce an encoded audio interval from an AudioBridge.
-pub fn produce_interval(freq_hz: f32) -> Vec<u8> {
+/// Produce encoded WAIF audio frames from an AudioBridge (one interval).
+///
+/// Returns a list of WAIF-encoded frames (one per 20ms Opus packet).
+/// Callers that need a single blob for `broadcast_audio` should send each frame
+/// individually, or use `produce_interval_single_frame` for a final-only frame.
+pub fn produce_interval(freq_hz: f32) -> Vec<Vec<u8>> {
     let sr = 48000u32;
     let ch = 2u16;
     let buf_size = 4096;
@@ -526,11 +530,86 @@ pub fn produce_interval(freq_hz: f32) -> Vec<u8> {
     let mut out = vec![0.0f32; buf_size];
 
     for beat in [0.0, 4.0, 8.0, 12.0] {
-        bridge.process(&signal, &mut out, beat);
+        bridge.process_rt(&signal, &mut out, beat);
     }
-    let wire_msgs = bridge.process(&signal, &mut out, 16.0);
-    assert_eq!(wire_msgs.len(), 1, "Should produce exactly 1 interval");
-    wire_msgs.into_iter().next().unwrap()
+    let completed = bridge.process_rt(&signal, &mut out, 16.0);
+    assert_eq!(completed.len(), 1, "Should produce exactly 1 interval");
+
+    let interval = completed.into_iter().next().unwrap();
+    encode_completed_to_waif(interval.index, &interval.samples, sr, ch)
+}
+
+/// Encode raw PCM samples into WAIF wire frames (Opus-encoded, 20ms chunks).
+fn encode_completed_to_waif(index: i64, samples: &[f32], sample_rate: u32, channels: u16) -> Vec<Vec<u8>> {
+    let mut encoder = AudioEncoder::new(sample_rate, channels, 128).expect("create encoder");
+    let frame_size = 960 * channels as usize; // 20ms at 48kHz
+    let chunks: Vec<&[f32]> = samples.chunks(frame_size).collect();
+    let total_frames = chunks.len() as u32;
+    let mut waif_frames = Vec::with_capacity(chunks.len());
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Pad last chunk if needed
+        let mut padded;
+        let input = if chunk.len() < frame_size {
+            padded = vec![0.0f32; frame_size];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            &padded
+        } else {
+            *chunk
+        };
+
+        let opus_data = encoder.encode_frame(input).expect("encode frame");
+        let is_final = i as u32 == total_frames - 1;
+
+        let frame = AudioFrame {
+            interval_index: index,
+            stream_id: 0,
+            frame_number: i as u32,
+            channels,
+            opus_data,
+            is_final,
+            sample_rate: if is_final { sample_rate } else { 0 },
+            total_frames: if is_final { total_frames } else { 0 },
+            bpm: if is_final { 120.0 } else { 0.0 },
+            quantum: if is_final { 4.0 } else { 0.0 },
+            bars: if is_final { 4 } else { 0 },
+        };
+        waif_frames.push(AudioFrameWire::encode(&frame));
+    }
+    waif_frames
+}
+
+/// Produce a single WAIF frame containing real audio (for simple send/receive tests).
+///
+/// This is a convenience wrapper that produces a single final WAIF frame with
+/// one 20ms Opus packet. Useful for tests that just need to verify data flows
+/// through WebRTC without sending hundreds of frames.
+pub fn produce_single_waif_frame(freq_hz: f32) -> Vec<u8> {
+    let sr = 48000u32;
+    let ch = 2u16;
+    let mut encoder = AudioEncoder::new(sr, ch, 128).expect("create encoder");
+    let samples_per_frame = 960usize;
+    let mut samples = vec![0.0f32; samples_per_frame * ch as usize];
+    for i in 0..samples_per_frame {
+        let val = (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sr as f32).sin() * 0.5;
+        samples[i * 2] = val;
+        samples[i * 2 + 1] = val;
+    }
+    let opus_data = encoder.encode_frame(&samples).expect("encode frame");
+    let frame = AudioFrame {
+        interval_index: 0,
+        stream_id: 0,
+        frame_number: 0,
+        channels: ch,
+        opus_data,
+        is_final: true,
+        sample_rate: sr,
+        total_frames: 1,
+        bpm: 120.0,
+        quantum: 4.0,
+        bars: 4,
+    };
+    AudioFrameWire::encode(&frame)
 }
 
 /// Encode an interval as WAIF IPC frames (tag 0x05), matching the real send plugin output.
@@ -538,39 +617,10 @@ pub fn produce_interval(freq_hz: f32) -> Vec<u8> {
 /// Returns a list of complete IPC frames ready to write to a TCP stream.
 /// This mirrors how `wail-plugin-send` streams 20ms Opus packets to wail-app.
 pub fn produce_interval_waif_ipc(freq_hz: f32) -> Vec<Vec<u8>> {
-    let wail_bytes = produce_interval(freq_hz);
-    let interval = AudioWire::decode(&wail_bytes).expect("produce_interval_waif_ipc: AudioWire decode");
+    let waif_frames = produce_interval(freq_hz);
 
-    // Parse the length-prefixed opus blob: [u32 count][u16 len][bytes]...
-    let data = &interval.opus_data;
-    let frame_count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
-    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(frame_count);
-    let mut offset = 4;
-    while packets.len() < frame_count && offset + 2 <= data.len() {
-        let pkt_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
-        offset += 2;
-        packets.push(data[offset..offset + pkt_len].to_vec());
-        offset += pkt_len;
-    }
-
-    let total = packets.len();
-    let mut output = Vec::with_capacity(total);
-    for (fn_, packet) in packets.into_iter().enumerate() {
-        let is_final = fn_ + 1 == total;
-        let frame = AudioFrame {
-            interval_index: interval.index,
-            stream_id: interval.stream_id,
-            frame_number: fn_ as u32,
-            channels: interval.channels,
-            opus_data: packet,
-            is_final,
-            sample_rate: if is_final { interval.sample_rate } else { 0 },
-            total_frames: if is_final { total as u32 } else { 0 },
-            bpm: if is_final { interval.bpm } else { 0.0 },
-            quantum: if is_final { interval.quantum } else { 0.0 },
-            bars: if is_final { interval.bars } else { 0 },
-        };
-        let wire_bytes = AudioFrameWire::encode(&frame);
+    let mut output = Vec::with_capacity(waif_frames.len());
+    for wire_bytes in waif_frames {
         let ipc_msg = IpcMessage::encode_audio_frame(&wire_bytes);
         output.push(IpcFramer::encode_frame(&ipc_msg));
     }
@@ -681,8 +731,10 @@ pub async fn establish_three_way_connection(
     }
 }
 
-/// Produce a realistically-sized encoded audio interval from an AudioBridge.
-pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
+/// Produce realistically-sized encoded WAIF frames from an AudioBridge.
+///
+/// Returns (list of WAIF frames, expected sample count).
+pub fn produce_full_interval(freq_hz: f32) -> (Vec<Vec<u8>>, usize) {
     let sr = 48000u32;
     let ch = 2u16;
     let bpm = 120.0_f64;
@@ -698,15 +750,17 @@ pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
     let mut beat = 0.0_f64;
 
     while beat < 16.0 {
-        bridge.process(&signal, &mut out, beat);
+        bridge.process_rt(&signal, &mut out, beat);
         beat += beats_per_callback;
     }
 
-    let wire_msgs = bridge.process(&signal, &mut out, beat);
-    assert_eq!(wire_msgs.len(), 1, "Should produce exactly 1 interval");
+    let completed = bridge.process_rt(&signal, &mut out, beat);
+    assert_eq!(completed.len(), 1, "Should produce exactly 1 interval");
 
+    let interval = completed.into_iter().next().unwrap();
     let expected_samples = (sr as f64 * ch as f64 * 16.0 / (bpm / 60.0)) as usize;
-    (wire_msgs.into_iter().next().unwrap(), expected_samples)
+    let waif_frames = encode_completed_to_waif(interval.index, &interval.samples, sr, ch);
+    (waif_frames, expected_samples)
 }
 
 /// Find a random available port by binding to :0.
