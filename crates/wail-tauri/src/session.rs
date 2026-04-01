@@ -177,7 +177,35 @@ async fn test_tone_task(
         }
 
         // Check for new interval boundary — switch immediately (like a real DAW callback)
-        while let Ok((idx, bpm, bars, quantum)) = boundary_rx.try_recv() {
+        let mut new_boundary: Option<(i64, f64, u32, f64)> = None;
+        while let Ok(b) = boundary_rx.try_recv() {
+            new_boundary = Some(b);
+        }
+        if let Some((idx, bpm, bars, quantum)) = new_boundary {
+            // If the previous interval didn't finish, force-send the final frame
+            if current_idx >= 0 && frame_number > 0 && frame_number < total_frames {
+                let final_frame_num = total_frames - 1;
+                let freq = if current_idx % 2 == 0 { 440.0 } else { 880.0 };
+                let samples = wail_audio::test_tone::generate_sine_frame(freq, &mut phase, 48000, 2);
+                if let Ok(opus_data) = encoder.encode_frame(&samples) {
+                    let frame = AudioFrame {
+                        interval_index: current_idx,
+                        stream_id: stream_index,
+                        frame_number: final_frame_num,
+                        channels: 2,
+                        opus_data,
+                        is_final: true,
+                        sample_rate: 48000,
+                        total_frames,
+                        bpm: current_bpm,
+                        quantum: current_quantum,
+                        bars: current_bars,
+                    };
+                    let waif = AudioFrameWire::encode(&frame);
+                    let ipc_msg = IpcMessage::encode_audio_frame(&waif);
+                    let _ = ipc_tx.send((conn_id, ipc_msg)).await;
+                }
+            }
             current_idx = idx;
             current_bpm = bpm;
             current_bars = bars;
@@ -1204,7 +1232,10 @@ async fn session_loop(
                 if test_mode {
                     match wail_audio::test_tone::validate_audio(&data) {
                         Ok(v) => {
-                            ui_info!(&app, "[TEST] Audio from {from}: {}", v.detail);
+                            // Only log final frames to avoid flooding the log tab
+                            if v.detail.contains("final=true") {
+                                ui_info!(&app, "[TEST] Audio from {from}: {}", v.detail);
+                            }
                         }
                         Err(e) => {
                             ui_warn!(&app, "[TEST] Audio validation failed for {from} ({} bytes): {e}", data.len());
