@@ -200,14 +200,20 @@ impl PeerMesh {
 
     /// Reconnect the signaling WebSocket.
     ///
-    /// Returns the initial peer display names from the new `join_ok` response.
+    /// Returns the initial peer display names plus new sync and audio receivers.
+    /// The caller **must** replace its existing `sync_rx` and `audio_rx` with the
+    /// returned ones — the old receivers are dead after reconnection.
     pub async fn reconnect_signaling(
         &mut self,
         server_url: &str,
         room: &str,
         password: Option<&str>,
         display_name: Option<&str>,
-    ) -> Result<HashMap<String, Option<String>>> {
+    ) -> Result<(
+        HashMap<String, Option<String>>,
+        mpsc::UnboundedReceiver<(String, SyncMessage)>,
+        mpsc::Receiver<(String, Vec<u8>)>,
+    )> {
         // Suppress the automatic `leave` on the old WebSocket
         self.signaling.suppress_leave_on_close();
 
@@ -237,7 +243,7 @@ impl PeerMesh {
             }
         }
 
-        Ok(initial_peer_names)
+        Ok((initial_peer_names, channels.sync_rx, channels.audio_rx))
     }
 }
 

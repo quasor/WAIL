@@ -2,7 +2,7 @@
 
 ## Overview
 
-WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer DataChannels. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted over binary DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 15 per-slot auxiliary outputs).
+WAIL bridges Ableton Link sessions across the internet via a WebSocket relay server. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted as binary WebSocket frames through the server. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 15 per-slot auxiliary outputs).
 
 ## System Diagram
 
@@ -17,8 +17,8 @@ WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer D
 │  │          [WAIL Recv]         │    │                    │    │          [WAIL Recv]         │  │
 │  └──────────┬───────────────────┘    │                    │    └──────────┬───────────────────┘  │
 │             │ IPC (TCP :9191)        │                    │               │ IPC (TCP :9191)      │
-│  ┌──────────┴───────────────────┐    │  WebRTC P2P        │    ┌──────────┴───────────────────┐  │
-│  │  WAIL App                    │◄───┼──── DataChannels ──┼───►│  WAIL App                    │  │
+│  ┌──────────┴───────────────────┐    │                    │    ┌──────────┴───────────────────┐  │
+│  │  WAIL App                    │◄───┼─── WS Relay ───────┼───►│  WAIL App                    │  │
 │  │  ├─ Link bridge (50Hz poll)  │    │  "sync" (JSON)     │    │  ├─ Link bridge (50Hz poll)  │  │
 │  │  └─ Audio relay              │    │  "audio" (binary)  │    │  └─ Audio relay              │  │
 │  └──────────┬───────────────────┘    │                    │    └──────────┬───────────────────┘  │
@@ -45,7 +45,7 @@ wail-tauri (Tauri desktop app — session orchestration, IPC, recording)
 │   └── audiopus (Opus codec via libopus)
 └── wail-net (library)
     ├── wail-core
-    └── webrtc (pure Rust WebRTC)
+    └── tokio-tungstenite (WebSocket client)
 
 wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-14)
 ├── wail-core
@@ -119,7 +119,7 @@ DAW Track A
   → Opus encode each 20ms frame (960 samples)
   → AudioFrameWire.encode() — WAIF streaming frame (21-byte header + Opus data)
   → IPC TCP frame (length-prefixed, tag 0x05) to WAIL App A
-  → WebRTC binary DataChannel "audio" to Peer B
+  → WebSocket binary frame to signaling server → relayed to Peer B
   → WAIL App B receives
   → IPC TCP frame (tag 0x01 with peer_id) to Recv Plugin B
   → FrameAssembler collects WAIF frames, assembles on final frame
@@ -201,27 +201,21 @@ App→Recv Plugin: AudioInterval (tag 0x01) with peer_id identifying the remote 
 3. WAIL App A Link bridge detects change (50Hz poll)
 4. Echo guard check: was this our own recent remote-applied change?
 5. If genuine local change → serialize as SyncMessage::TempoChange
-6. Broadcast via PeerMesh to all "sync" DataChannels (JSON)
+6. Broadcast via PeerMesh → WebSocket relay server → all room peers (JSON)
 7. Remote peers receive, parse, apply to their local Link via set_tempo()
 8. Echo guard activated on remote to prevent re-broadcast loop
 9. Remote DAWs see tempo change via Link
 ```
 
-## WebRTC Connection Establishment
+## Connection Establishment
 
 ```
-1. Peer A fetches ICE servers (Metered TURN credentials via API)
-2. Peer A connects to WebSocket signaling server, sends join (with room password, stream_count, client_version)
+1. Peer connects to WebSocket signaling server, sends join (with room password, stream_count, client_version)
    - Server rejects outdated clients with join_error code "version_outdated"
-3. Server replies with join_ok containing list of existing peers
-4. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
-5. Offer relayed through signaling server (WebSocket push — instant delivery)
-6. Peer B creates Answer, relayed back
-7. ICE candidates exchanged via signaling server
-8. Two DataChannels established per peer:
-   - "sync": ordered, text mode (JSON SyncMessages)
-   - "audio": unordered, binary mode (WAIF streaming frames)
-9. Signaling server exits the data path
+2. Server replies with join_ok containing list of existing peers
+3. All sync and audio data flows through the server (no direct P2P connections)
+   - Sync: JSON text frames relayed via "sync" / "sync_to" message types
+   - Audio: binary WebSocket frames relayed with sender header prepended by server
 ```
 
 ## Interval Boundaries
@@ -267,7 +261,8 @@ Two independent time domains exist in the system:
 | `PeerList` | Server → Client | Current room members |
 | `PeerJoined` | Server → Client | New peer notification |
 | `PeerLeft` | Server → Client | Peer disconnect notification |
-| `Signal` | Client ↔ Server ↔ Client | Relay SDP/ICE between peers |
+| `Sync` | Client → Server → Room | Relay sync message to all room peers |
+| `SyncTo` | Client → Server → Client | Relay sync message to a specific peer |
 | `LogBroadcast` (`log`) | Client → Server → Room | Broadcast structured log entry to all room peers (opt-in) |
 | `MetricsReport` | Client → Server | Per-peer audio frame counts + pipeline state (consumed server-side, not relayed) |
 
@@ -275,7 +270,7 @@ Two independent time domains exist in the system:
 
 1. **NINJAM over real-time**: 1-interval latency makes WAN jams possible without sub-20ms RTT. Musicians adapt to the delay.
 
-2. **Binary DataChannel for audio**: Separate from the JSON "sync" channel. Avoids base64 overhead and JSON parsing for large audio payloads.
+2. **Binary WebSocket frames for audio**: Separate from the JSON "sync" text frames. Avoids base64 overhead and JSON parsing for large audio payloads.
 
 3. **Opus codec**: Designed for interactive audio. 48kHz, configurable bitrate (64-128 kbps). Frame size = 960 samples (20ms).
 
@@ -283,9 +278,9 @@ Two independent time domains exist in the system:
 
 5. **Echo guard** (150ms): Prevents infinite tempo change ping-pong when applying remote changes to local Link.
 
-6. **Deterministic WebRTC initiator**: Lower peer_id always creates the offer, preventing simultaneous offer collision.
+6. **Server-relayed architecture**: All data flows through the signaling server (no direct P2P). This eliminates ICE/STUN/TURN negotiation complexity at the cost of an extra hop and server bandwidth scaling quadratically with room size.
 
-7. **wail-core and wail-audio have no network deps**: Reusable from the CLAP/VST3 plugin without pulling in webrtc/tokio-tungstenite.
+7. **wail-core and wail-audio have no network deps**: Reusable from the CLAP/VST3 plugin without pulling in tokio-tungstenite.
 
 8. **IPC over TCP** (not shared memory): Simpler, cross-platform, reliable. Latency is negligible compared to the 1-interval NINJAM delay.
 
@@ -299,13 +294,13 @@ Two independent time domains exist in the system:
 
 ## Session Metrics and Live Dashboard
 
-The signaling server tracks aggregate session metrics to monitor whether clients are establishing DataChannels and whether audio is flowing between peers.
+The signaling server tracks aggregate session metrics to monitor whether audio is flowing between peers.
 
 ### Session model
 
 A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when the count drops below 2. Sessions have two phases:
 
-1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures ICE negotiation, DataChannel establishment, and plugin attachment.
+1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures connection establishment and plugin attachment.
 2. **Playing** — steady-state audio flow after all peers are fully connected.
 
 ### Per-direction metrics
@@ -318,7 +313,7 @@ For each unique direction (e.g., `peer1→peer2`), the server tracks metrics ind
 **Network health metrics (per direction):**
 - `rtt_us` — median RTT to the peer (µs), from `ClockSync` Ping/Pong
 - `jitter_us` — mean absolute deviation from median RTT (µs), the key signal for intermittent issues
-- `dc_drops` — DataChannel backpressure drops (audio receiver channel full in peer.rs)
+- `dc_drops` — WebSocket backpressure drops (audio channel full)
 - `late_frames` — WAIF frames that arrived for already-passed intervals (detected in session.rs)
 - `decode_failures` — Opus decode failures reported by the recv plugin via `IPC_TAG_METRICS` (0x06)
 

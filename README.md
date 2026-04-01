@@ -1,6 +1,6 @@
-# WAIL — WebRTC Audio Interchange for Link
+# WAIL — WebSocket Audio Interchange for Link
 
-WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using WebRTC. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted peer-to-peer.
+WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
 ## Install
 
@@ -49,7 +49,7 @@ Then rescan plugins in your DAW. Note: the Homebrew install provides the `wail` 
 
 WAIL has three components that work together:
 
-- **WAIL app** — The desktop app that handles networking. It connects to the signaling server, establishes WebRTC peer connections, and bridges audio and sync data between the DAW plugins and remote peers.
+- **WAIL app** — The desktop app that handles networking. It connects to the signaling server, which relays sync and audio data between the DAW plugins and remote peers.
 
 - **WAIL Send** (CLAP/VST3 plugin) — Place this on a track or bus in your DAW to capture audio. At each interval boundary, the recorded audio is Opus-encoded and sent to all connected peers via the WAIL app. You can load multiple instances with different Stream Index values to send separate audio streams (e.g., drums and synth independently).
 
@@ -80,7 +80,6 @@ WAIL's intervalic audio model is directly inspired by [NINJAM](https://www.ninja
 
 Built on the shoulders of great open-source projects:
 [Ableton Link](https://www.ableton.com/link/) (tempo/phase sync),
-[webrtc-rs](https://github.com/webrtc-rs/webrtc) (pure Rust WebRTC),
 [nih-plug](https://github.com/robbert-vdh/nih-plug) (CLAP/VST3 plugin framework),
 [Opus](https://opus-codec.org/) (audio codec),
 [Tauri](https://tauri.app/) (desktop app framework).

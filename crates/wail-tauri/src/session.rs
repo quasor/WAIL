@@ -840,8 +840,10 @@ async fn session_loop(
                 match mesh.reconnect_signaling(
                     &server, &room, password.as_deref(), Some(&display_name),
                 ).await {
-                    Ok(new_peer_names) => {
+                    Ok((new_peer_names, new_sync_rx, new_audio_rx)) => {
                         peers.seed_names(new_peer_names);
+                        sync_rx = new_sync_rx;
+                        audio_rx = new_audio_rx;
                         signaling_reconnect = None;
                         ui_info!(&app, "Signaling reconnected (attempt {attempt})");
                         let _ = app.emit("session:reconnected", ());

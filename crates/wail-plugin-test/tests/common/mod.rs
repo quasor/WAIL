@@ -34,11 +34,18 @@ use wail_net::PeerMesh;
 #[derive(Default)]
 struct SignalingState {
     rooms: HashMap<String, Vec<String>>,
-    peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsRelay>>>,
     evicted_peers: HashSet<String>,
 }
 
 type SharedState = Arc<Mutex<SignalingState>>;
+
+/// Message type for the per-peer relay channel, avoiding unsafe String↔binary coercion.
+#[derive(Clone)]
+enum WsRelay {
+    Text(String),
+    Binary(Vec<u8>),
+}
 
 async fn handle_ws(ws: WebSocketUpgrade, State(state): State<SharedState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -55,10 +62,9 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     let write_handle = tokio::spawn(async move {
         let mut send_rx = send_rx;
         while let Some(msg) = send_rx.recv().await {
-            let ws_msg = if msg.starts_with('\0') {
-                Message::Binary(msg.into_bytes()[1..].to_vec())
-            } else {
-                Message::Text(msg)
+            let ws_msg = match msg {
+                WsRelay::Text(text) => Message::Text(text),
+                WsRelay::Binary(data) => Message::Binary(data),
             };
             if ws_tx.send(ws_msg).await.is_err() {
                 break;
@@ -78,8 +84,8 @@ async fn handle_join_phase(
 ) -> Option<(
     String,
     String,
-    tokio::sync::mpsc::UnboundedSender<String>,
-    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedSender<WsRelay>,
+    tokio::sync::mpsc::UnboundedReceiver<WsRelay>,
 )> {
     loop {
         let msg = match socket.recv().await {
@@ -112,7 +118,7 @@ async fn handle_join_phase(
             peers_in_room.push(peer_id.clone());
         }
 
-        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel::<WsRelay>();
         s.peer_senders
             .entry(room.clone())
             .or_default()
@@ -122,14 +128,14 @@ async fn handle_join_phase(
         if let Some(room_senders) = s.peer_senders.get(&room) {
             for (id, tx) in room_senders {
                 if id != &peer_id {
-                    let _ = tx.send(
+                    let _ = tx.send(WsRelay::Text(
                         serde_json::json!({
                             "type": "peer_joined",
                             "peer_id": peer_id,
                             "display_name": display_name,
                         })
                         .to_string(),
-                    );
+                    ));
                 }
             }
         }
@@ -168,15 +174,12 @@ async fn relay_messages(
                 frame.extend_from_slice(pid_bytes);
                 frame.extend_from_slice(&data);
 
-                let mut marker = vec![0u8];
-                marker.extend_from_slice(&frame);
-                let relay_str = unsafe { String::from_utf8_unchecked(marker) };
-
+                let relay = WsRelay::Binary(frame);
                 let s = state.lock().await;
                 if let Some(room_senders) = s.peer_senders.get(room) {
                     for (id, tx) in room_senders {
                         if id != peer_id {
-                            let _ = tx.send(relay_str.clone());
+                            let _ = tx.send(relay.clone());
                         }
                     }
                 }
@@ -193,16 +196,16 @@ async fn relay_messages(
                         let s = state.lock().await;
                         if let Some(room_senders) = s.peer_senders.get(room) {
                             if let Some(tx) = room_senders.get(&to) {
-                                let _ = tx.send(text.clone());
+                                let _ = tx.send(WsRelay::Text(text.clone()));
                             }
                         }
                     }
                     "sync" => {
-                        let relay = serde_json::json!({
+                        let relay = WsRelay::Text(serde_json::json!({
                             "type": "sync",
                             "from": peer_id,
                             "payload": parsed["payload"],
-                        }).to_string();
+                        }).to_string());
                         let s = state.lock().await;
                         if let Some(room_senders) = s.peer_senders.get(room) {
                             for (id, tx) in room_senders {
@@ -214,11 +217,11 @@ async fn relay_messages(
                     }
                     "sync_to" => {
                         let to = parsed["to"].as_str().unwrap_or("").to_string();
-                        let relay = serde_json::json!({
+                        let relay = WsRelay::Text(serde_json::json!({
                             "type": "sync",
                             "from": peer_id,
                             "payload": parsed["payload"],
-                        }).to_string();
+                        }).to_string());
                         let s = state.lock().await;
                         if let Some(room_senders) = s.peer_senders.get(room) {
                             if let Some(tx) = room_senders.get(&to) {
@@ -249,13 +252,13 @@ async fn cleanup_peer(state: &SharedState, room: &str, peer_id: &str) {
     if let Some(room_senders) = s.peer_senders.get(room) {
         for (id, tx) in room_senders {
             if id != peer_id {
-                let _ = tx.send(
+                let _ = tx.send(WsRelay::Text(
                     serde_json::json!({
                         "type": "peer_left",
                         "peer_id": peer_id,
                     })
                     .to_string(),
-                );
+                ));
             }
         }
     }

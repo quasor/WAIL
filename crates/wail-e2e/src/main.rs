@@ -520,7 +520,10 @@ async fn run_reconnect_as_initiator(
     println!("Reconnecting signaling...");
 
     let reconnect_start = Instant::now();
-    mesh.reconnect_signaling(server_url, room, None, Some("e2e-test")).await?;
+    let (_new_peer_names, new_sync_rx, new_audio_rx) =
+        mesh.reconnect_signaling(server_url, room, None, Some("e2e-test")).await?;
+    *sync_rx = new_sync_rx;
+    *audio_rx = new_audio_rx;
     let reconnect_elapsed = reconnect_start.elapsed();
     info!(elapsed = ?reconnect_elapsed, "Signaling reconnected");
 

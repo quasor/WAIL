@@ -215,4 +215,4 @@ Ableton Link 4.0.0 beta (vendored at `vendor/link`) introduces Link Audio — na
 - `LinkAudioSource`: subscribe to remote audio channels
 - Channel discovery via `channels()` and `setChannelsChangedCallback()`
 
-This could replace the custom Opus+DataChannel pipeline for LAN scenarios, while WAIL continues to bridge audio over the internet via WebRTC.
+This could replace the custom Opus pipeline for LAN scenarios, while WAIL continues to bridge audio over the internet via the WebSocket relay server.
