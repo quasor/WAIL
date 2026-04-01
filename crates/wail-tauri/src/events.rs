@@ -60,6 +60,9 @@ pub struct LocalSendInfo {
     /// User-chosen name for this stream (e.g. "Bass"), if set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_name: Option<String>,
+    /// True if this send is the virtual test tone generator (stream index 0).
+    #[serde(default)]
+    pub is_test_tone: bool,
 }
 
 /// Slot-centric view: one entry per occupied DAW aux output slot.

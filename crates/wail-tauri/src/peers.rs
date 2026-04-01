@@ -29,6 +29,9 @@ pub struct PeerState {
     pub total_frames_expected: u64,
     /// Cumulative frames actually received (non-gap) across all assembled intervals.
     pub total_frames_received: u64,
+    /// Per-interval high-water mark for expected frame count, so we can incrementally
+    /// update `total_frames_expected` as non-final frames arrive (not just on the final).
+    pub interval_frames_expected: HashMap<i64, u64>,
     /// Cumulative WAIF frames that arrived for already-passed intervals.
     pub late_frames: u64,
     pub prev_status: String,
@@ -59,6 +62,7 @@ impl PeerState {
             remote_intervals_sent: 0,
             total_frames_expected: 0,
             total_frames_received: 0,
+            interval_frames_expected: HashMap::new(),
             late_frames: 0,
             prev_status: String::new(),
             added_at: Instant::now(),

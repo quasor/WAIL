@@ -482,6 +482,12 @@ async fn session_loop(
         let conn_id = usize::MAX;
         tokio::spawn(test_tone_task(0, conn_id, ipc_tx, boundary_rx, cancel_rx));
         local_send_streams.insert(conn_id, 0);
+        let tone_name = if display_name.is_empty() {
+            "Test Tone".to_string()
+        } else {
+            format!("{}'s Test Tone", display_name)
+        };
+        local_stream_names.insert(0, tone_name);
         test_tone_boundary_tx = Some(boundary_tx);
         test_tone_cancel_tx = Some(cancel_tx);
         test_tone_stream = Some(0);
@@ -525,6 +531,10 @@ async fn session_loop(
                         if let Some(cancel_tx) = test_tone_cancel_tx.take() {
                             let _ = cancel_tx.send(true);
                         }
+                        // Clean up previous test tone stream name
+                        if let Some(prev_idx) = test_tone_stream {
+                            local_stream_names.remove(&prev_idx);
+                        }
                         test_tone_boundary_tx = None;
                         test_tone_stream = None;
                         test_mode = false;
@@ -541,6 +551,14 @@ async fn session_loop(
                             // Register in local_send_streams so it's tracked like a real plugin
                             local_send_streams.insert(conn_id, stream_index);
 
+                            // Auto-name the test tone stream
+                            let tone_name = if display_name.is_empty() {
+                                "Test Tone".to_string()
+                            } else {
+                                format!("{}'s Test Tone", display_name)
+                            };
+                            local_stream_names.insert(stream_index, tone_name);
+
                             test_tone_boundary_tx = Some(boundary_tx);
                             test_tone_cancel_tx = Some(cancel_tx);
                             test_tone_stream = Some(stream_index);
@@ -549,6 +567,9 @@ async fn session_loop(
                         } else {
                             ui_info!(&app, "[TEST] Test tone stopped");
                         }
+                        // Broadcast updated stream names to peers
+                        let msg = SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) };
+                        mesh.broadcast(&msg).await;
                     }
                     SessionCommand::Disconnect => {
                         ui_info!(&app, "Disconnecting...");
@@ -1197,8 +1218,27 @@ async fn session_loop(
                 if let Some(header) = wail_audio::peek_waif_header(&data) {
                     if let Some(peer) = peers.get_mut(&from) {
                         peer.total_frames_received += 1;
+                        // Use frame_number (0-based) to infer expected count:
+                        // each frame tells us at least frame_number+1 frames exist
+                        // for this interval. The final frame carries the authoritative
+                        // total_frames count. Track per-interval high-water mark to
+                        // avoid double-counting across intervals.
+                        let interval_expected = if header.is_final {
+                            header.total_frames as u64
+                        } else {
+                            header.frame_number as u64 + 1
+                        };
+                        let prev = peer.interval_frames_expected
+                            .entry(header.interval_index)
+                            .or_insert(0);
+                        if interval_expected > *prev {
+                            peer.total_frames_expected += interval_expected - *prev;
+                            *prev = interval_expected;
+                        }
+                        // Clean up: once the final frame arrives the count is
+                        // authoritative, so remove the entry to bound map growth.
                         if header.is_final {
-                            peer.total_frames_expected += header.total_frames as u64;
+                            peer.interval_frames_expected.remove(&header.interval_index);
                         }
                         // Detect late frames: frames for intervals we've already passed
                         if let Some(current_idx) = last_interval_index {
@@ -1591,6 +1631,7 @@ async fn session_loop(
                             stream_index,
                             is_sending: local_send_active.contains(&stream_index),
                             stream_name: local_stream_names.get(&stream_index).cloned(),
+                            is_test_tone: test_tone_stream == Some(stream_index),
                         })
                         .collect();
                     local_sends.sort_by_key(|ls| ls.stream_index);

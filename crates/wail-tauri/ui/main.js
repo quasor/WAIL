@@ -735,7 +735,8 @@ function renderStatus(s) {
 
   // Update slot list (local sends first, then remote slots)
   const slotList = document.getElementById('peer-list');
-  const localSends = s.local_sends || [];
+  // Filter out test tone entries that aren't actively sending
+  const localSends = (s.local_sends || []).filter(ls => !ls.is_test_tone || ls.is_sending);
   const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
   if (localSends.length === 0 && slots.length === 0) {
     slotList.innerHTML = '<span class="empty">No peers connected</span>';
