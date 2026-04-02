@@ -201,6 +201,19 @@ impl PeerRegistry {
         self.slots.rekey_client(peer_id, identity);
     }
 
+    /// Atomically set peer identity and rekey slots in one operation.
+    /// Eliminates the race window where `assign_slot()` could observe identity
+    /// set but slots not yet rekeyed.
+    pub fn update_peer_identity(&mut self, peer_id: &str, identity: &str) -> bool {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.identity = Some(identity.to_string());
+            self.slots.rekey_client(peer_id, identity);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Find the peer_id of a peer with the given identity, if any.
     pub fn find_by_identity(&self, identity: &str) -> Option<String> {
         self.peers
@@ -456,6 +469,23 @@ mod tests {
 
         // find_by_identity should now resolve the peer
         assert_eq!(reg.find_by_identity("uuid-alice"), Some("peer1".to_string()));
+    }
+
+    #[test]
+    fn update_peer_identity_atomic_rekey() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), None);
+        // Audio arrives before Hello — slot assigned under peer_id
+        let slot = reg.assign_slot("peer1", 0).unwrap();
+        assert_eq!(slot, 0);
+
+        // Atomic identity + rekey
+        assert!(reg.update_peer_identity("peer1", "uuid-alice"));
+        assert_eq!(reg.find_by_identity("uuid-alice"), Some("peer1".to_string()));
+        assert_eq!(reg.get("peer1").unwrap().identity.as_deref(), Some("uuid-alice"));
+
+        // Unknown peer returns false
+        assert!(!reg.update_peer_identity("ghost", "uuid-ghost"));
     }
 
     #[test]
