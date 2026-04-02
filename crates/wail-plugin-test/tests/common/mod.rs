@@ -1,7 +1,7 @@
 //! Shared test helpers for wail-plugin-test integration tests.
 //!
 //! Contains an in-process WebSocket signaling server and a role-aware mini_app
-//! session loop that bridges plugin IPC ↔ WebRTC, mirroring the audio forwarding
+//! session loop that bridges plugin IPC ↔ WebSocket relay, mirroring the audio forwarding
 //! logic in wail-tauri/src/session.rs without Tauri, Link, or clock sync.
 //!
 //! The signaling server and `mini_app_session_v2` are derived from
@@ -34,11 +34,18 @@ use wail_net::PeerMesh;
 #[derive(Default)]
 struct SignalingState {
     rooms: HashMap<String, Vec<String>>,
-    peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsRelay>>>,
     evicted_peers: HashSet<String>,
 }
 
 type SharedState = Arc<Mutex<SignalingState>>;
+
+/// Message type for the per-peer relay channel, avoiding unsafe String↔binary coercion.
+#[derive(Clone)]
+enum WsRelay {
+    Text(String),
+    Binary(Vec<u8>),
+}
 
 async fn handle_ws(ws: WebSocketUpgrade, State(state): State<SharedState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -55,7 +62,11 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
     let write_handle = tokio::spawn(async move {
         let mut send_rx = send_rx;
         while let Some(msg) = send_rx.recv().await {
-            if ws_tx.send(Message::Text(msg)).await.is_err() {
+            let ws_msg = match msg {
+                WsRelay::Text(text) => Message::Text(text),
+                WsRelay::Binary(data) => Message::Binary(data),
+            };
+            if ws_tx.send(ws_msg).await.is_err() {
                 break;
             }
         }
@@ -73,8 +84,8 @@ async fn handle_join_phase(
 ) -> Option<(
     String,
     String,
-    tokio::sync::mpsc::UnboundedSender<String>,
-    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedSender<WsRelay>,
+    tokio::sync::mpsc::UnboundedReceiver<WsRelay>,
 )> {
     loop {
         let msg = match socket.recv().await {
@@ -107,7 +118,7 @@ async fn handle_join_phase(
             peers_in_room.push(peer_id.clone());
         }
 
-        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel::<WsRelay>();
         s.peer_senders
             .entry(room.clone())
             .or_default()
@@ -117,14 +128,14 @@ async fn handle_join_phase(
         if let Some(room_senders) = s.peer_senders.get(&room) {
             for (id, tx) in room_senders {
                 if id != &peer_id {
-                    let _ = tx.send(
+                    let _ = tx.send(WsRelay::Text(
                         serde_json::json!({
                             "type": "peer_joined",
                             "peer_id": peer_id,
                             "display_name": display_name,
                         })
                         .to_string(),
-                    );
+                    ));
                 }
             }
         }
@@ -151,32 +162,79 @@ async fn relay_messages(
     mut ws_rx: futures_util::stream::SplitStream<WebSocket>,
     state: &SharedState,
     room: &str,
-    _peer_id: &str,
+    peer_id: &str,
 ) {
     while let Some(Ok(msg)) = ws_rx.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
+        match msg {
+            Message::Binary(data) => {
+                // Binary audio frame: prepend sender header and broadcast to room peers
+                let pid_bytes = peer_id.as_bytes();
+                let mut frame = Vec::with_capacity(1 + pid_bytes.len() + data.len());
+                frame.push(pid_bytes.len() as u8);
+                frame.extend_from_slice(pid_bytes);
+                frame.extend_from_slice(&data);
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        match parsed["type"].as_str().unwrap_or("") {
-            "signal" => {
-                let to = parsed["to"].as_str().unwrap_or("").to_string();
+                let relay = WsRelay::Binary(frame);
                 let s = state.lock().await;
                 if let Some(room_senders) = s.peer_senders.get(room) {
-                    if let Some(tx) = room_senders.get(&to) {
-                        let _ = tx.send(text.clone());
+                    for (id, tx) in room_senders {
+                        if id != peer_id {
+                            let _ = tx.send(relay.clone());
+                        }
                     }
                 }
             }
-            "leave" => break,
-            _ => {}
+            Message::Text(text) => {
+                let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match parsed["type"].as_str().unwrap_or("") {
+                    "signal" => {
+                        let to = parsed["to"].as_str().unwrap_or("").to_string();
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            if let Some(tx) = room_senders.get(&to) {
+                                let _ = tx.send(WsRelay::Text(text.clone()));
+                            }
+                        }
+                    }
+                    "sync" => {
+                        let relay = WsRelay::Text(serde_json::json!({
+                            "type": "sync",
+                            "from": peer_id,
+                            "payload": parsed["payload"],
+                        }).to_string());
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            for (id, tx) in room_senders {
+                                if id != peer_id {
+                                    let _ = tx.send(relay.clone());
+                                }
+                            }
+                        }
+                    }
+                    "sync_to" => {
+                        let to = parsed["to"].as_str().unwrap_or("").to_string();
+                        let relay = WsRelay::Text(serde_json::json!({
+                            "type": "sync",
+                            "from": peer_id,
+                            "payload": parsed["payload"],
+                        }).to_string());
+                        let s = state.lock().await;
+                        if let Some(room_senders) = s.peer_senders.get(room) {
+                            if let Some(tx) = room_senders.get(&to) {
+                                let _ = tx.send(relay);
+                            }
+                        }
+                    }
+                    "leave" => break,
+                    _ => {}
+                }
+            }
+            Message::Close(_) => break,
+            _ => continue,
         }
     }
 }
@@ -194,13 +252,13 @@ async fn cleanup_peer(state: &SharedState, room: &str, peer_id: &str) {
     if let Some(room_senders) = s.peer_senders.get(room) {
         for (id, tx) in room_senders {
             if id != peer_id {
-                let _ = tx.send(
+                let _ = tx.send(WsRelay::Text(
                     serde_json::json!({
                         "type": "peer_left",
                         "peer_id": peer_id,
                     })
                     .to_string(),
-                );
+                ));
             }
         }
     }
@@ -230,8 +288,8 @@ pub async fn start_test_signaling_server() -> String {
 
 /// A minimal session loop replicating the audio forwarding logic from session.rs.
 ///
-/// - Forwards incoming WAIF frames (tag 0x05) from send plugins to all WebRTC peers.
-/// - Forwards incoming WebRTC audio to RECV-role plugin IPC connections (tag 0x01).
+/// - Forwards incoming WAIF frames (tag 0x05) from send plugins to all remote peers.
+/// - Forwards incoming remote audio to RECV-role plugin IPC connections (tag 0x01).
 /// - Exchanges Hello sync messages and sends PeerJoined/PeerLeft IPC to recv plugins
 ///   (for slot affinity — ensures peers get the same aux output after reconnect).
 /// - No audio gate; no link_peers guard — audio flows unconditionally.
@@ -261,13 +319,13 @@ pub async fn mini_app_session_with_identity(
     password: String,
     identity: String,
 ) {
-    let ice = wail_net::default_ice_servers();
-    let (mut mesh, mut sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
+    let (mut mesh, mut sync_rx, mut audio_rx) = PeerMesh::connect_full(
         &signaling_url,
         &room,
         &peer_id,
         Some(password.as_str()),
-        ice,
+        1, // stream_count
+        None, // display_name
     )
     .await
     .expect("mini_app: failed to connect to signaling");
@@ -326,14 +384,14 @@ pub async fn mini_app_session_with_identity(
                 }
             }
 
-            // WAIF frame from send plugin (tag 0x05) → broadcast raw bytes over WebRTC
+            // WAIF frame from send plugin (tag 0x05) → broadcast raw bytes to peers
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                 }
             }
 
-            // Pump WebRTC/signaling negotiation; handle peer join/leave events
+            // Pump signaling; handle peer join/leave events
             event = mesh.poll_signaling() => {
                 match event {
                     Ok(Some(wail_net::MeshEvent::PeerJoined { peer_id: pid, .. })) => {
@@ -346,8 +404,7 @@ pub async fn mini_app_session_with_identity(
                         mesh.broadcast(&hello).await;
                         let _ = pid; // used above for logging context
                     }
-                    Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) |
-                    Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
+                    Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         // Notify recv plugins so they clear the peer's ring buffer slot
                         let msg = IpcMessage::encode_peer_left(&pid);
                         let frame = IpcFramer::encode_frame(&msg);
@@ -371,7 +428,7 @@ pub async fn mini_app_session_with_identity(
                 }
             }
 
-            // WebRTC audio from remote peer → forward to all RECV plugin connections (tag 0x01)
+            // Audio from remote peer → forward to all RECV plugin connections (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {
                 let msg = IpcMessage::encode_audio(&from, &data);
                 let frame = IpcFramer::encode_frame(&msg);

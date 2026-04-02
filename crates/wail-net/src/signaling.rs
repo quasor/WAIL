@@ -6,16 +6,28 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use wail_core::protocol::SignalMessage;
+use wail_core::protocol::{SignalMessage, SyncMessage};
 
 /// WebSocket signaling client that connects to the WAIL signaling server,
-/// joins a room, and relays WebRTC signaling messages in real time.
+/// joins a room, and relays sync messages and audio data.
+///
+/// Owns the outgoing channels; incoming channels are returned separately
+/// from `connect_with_options` so they can be consumed independently.
 pub struct SignalingClient {
-    pub incoming_rx: mpsc::UnboundedReceiver<SignalMessage>,
+    /// Outgoing control-plane messages (log, metrics).
     pub outgoing_tx: mpsc::UnboundedSender<SignalMessage>,
+    /// Outgoing sync messages (broadcast or targeted).
+    sync_outgoing_tx: mpsc::UnboundedSender<SyncOutgoing>,
+    /// Outgoing binary audio frames.
+    audio_outgoing_tx: mpsc::Sender<Vec<u8>>,
     /// When set, the write task suppresses the automatic `leave` message on close.
-    /// Used by `reconnect_signaling` to avoid broadcasting PeerLeft to remote peers.
     suppress_leave_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+/// Internal enum for outgoing sync messages.
+enum SyncOutgoing {
+    Broadcast(SyncMessage),
+    To { peer_id: String, msg: SyncMessage },
 }
 
 impl SignalingClient {
@@ -25,6 +37,24 @@ impl SignalingClient {
         if let Some(ref tx) = self.suppress_leave_tx {
             let _ = tx.send(true);
         }
+    }
+
+    /// Broadcast a sync message to all peers in the room via the server.
+    pub fn broadcast_sync(&self, msg: &SyncMessage) {
+        let _ = self.sync_outgoing_tx.send(SyncOutgoing::Broadcast(msg.clone()));
+    }
+
+    /// Send a sync message to a specific peer via the server.
+    pub fn send_sync_to(&self, peer_id: &str, msg: &SyncMessage) {
+        let _ = self.sync_outgoing_tx.send(SyncOutgoing::To {
+            peer_id: peer_id.to_string(),
+            msg: msg.clone(),
+        });
+    }
+
+    /// Send a binary audio frame to all peers in the room via the server.
+    pub fn send_audio(&self, data: &[u8]) {
+        let _ = self.audio_outgoing_tx.try_send(data.to_vec());
     }
 }
 
@@ -48,7 +78,6 @@ struct ListResponse {
 ///
 /// Uses the HTTP `/rooms` endpoint (not WebSocket).
 pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
-    // Convert ws(s):// to http(s):// for the REST endpoint
     let http_url = base_url
         .replace("wss://", "https://")
         .replace("ws://", "http://");
@@ -62,7 +91,7 @@ pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
     Ok(list.rooms)
 }
 
-/// Server response to a join request.
+/// Server response messages (tagged JSON).
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 enum ServerMsg {
@@ -89,9 +118,20 @@ enum ServerMsg {
     PeerLeft {
         peer_id: String,
     },
+    /// Legacy WebRTC signaling — kept for backward compatibility but ignored.
     #[serde(rename = "signal")]
+    #[allow(dead_code)]
     Signal {
+        #[serde(default)]
         to: String,
+        #[serde(default)]
+        from: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    /// Sync message relayed by the server from another peer.
+    #[serde(rename = "sync")]
+    Sync {
         from: String,
         payload: serde_json::Value,
     },
@@ -107,6 +147,16 @@ enum ServerMsg {
     },
 }
 
+/// Channels returned by `SignalingClient::connect_with_options` for incoming data.
+pub struct SignalingChannels {
+    /// Control-plane messages from the server (PeerJoined, PeerLeft, LogBroadcast, etc.)
+    pub incoming_rx: mpsc::UnboundedReceiver<SignalMessage>,
+    /// Sync messages relayed from remote peers via the server.
+    pub sync_rx: mpsc::UnboundedReceiver<(String, SyncMessage)>,
+    /// Binary audio frames relayed from remote peers via the server.
+    pub audio_rx: mpsc::Receiver<(String, Vec<u8>)>,
+}
+
 impl SignalingClient {
     /// Connect to the WebSocket signaling server and join a room.
     pub async fn connect(
@@ -114,11 +164,14 @@ impl SignalingClient {
         room: &str,
         peer_id: &str,
         password: Option<&str>,
-    ) -> Result<(Self, HashMap<String, Option<String>>)> {
+    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>)> {
         Self::connect_with_options(server_url, room, peer_id, password, 1, None).await
     }
 
     /// Connect with full options including stream count and display name.
+    ///
+    /// Returns the client (for sending), incoming channels (for receiving),
+    /// and initial peer display names from the join response.
     pub async fn connect_with_options(
         server_url: &str,
         room: &str,
@@ -126,8 +179,7 @@ impl SignalingClient {
         password: Option<&str>,
         stream_count: u16,
         display_name: Option<&str>,
-    ) -> Result<(Self, HashMap<String, Option<String>>)> {
-        // Build WebSocket URL
+    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>)> {
         let ws_url = format!("{}/ws", server_url.trim_end_matches('/'));
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
@@ -163,7 +215,7 @@ impl SignalingClient {
                 Some(Err(e)) => {
                     anyhow::bail!("WebSocket error waiting for join response: {e}");
                 }
-                _ => continue, // skip ping/pong/binary
+                _ => continue,
             }
         };
 
@@ -204,46 +256,82 @@ impl SignalingClient {
             "Joined signaling room via WebSocket"
         );
 
+        // Control-plane channel
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        // Sync messages from remote peers
+        let (sync_incoming_tx, sync_rx) = mpsc::unbounded_channel();
+        // Audio frames from remote peers
+        let (audio_incoming_tx, audio_rx) = mpsc::channel(1024);
+        // Outgoing control-plane
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SignalMessage>();
+        // Outgoing sync
+        let (sync_outgoing_tx, mut sync_outgoing_rx) = mpsc::unbounded_channel::<SyncOutgoing>();
+        // Outgoing audio
+        let (audio_outgoing_tx, mut audio_outgoing_rx) = mpsc::channel::<Vec<u8>>(256);
+
         let (suppress_leave_tx, suppress_leave_rx) = tokio::sync::watch::channel(false);
 
         // Push PeerList so PeerMesh sees existing peers
         if incoming_tx
-            .send(SignalMessage::PeerList {
-                peers,
-            })
+            .send(SignalMessage::PeerList { peers })
             .is_err()
         {
             anyhow::bail!("incoming channel closed immediately");
         }
 
-        // Spawn read task: server → incoming channel
-        let incoming_tx2 = incoming_tx.clone();
+        // Spawn read task: server → incoming channels
         tokio::spawn(async move {
             while let Some(msg_result) = ws_read.next().await {
                 match msg_result {
+                    Ok(Message::Binary(data)) => {
+                        // Binary frame: [1 byte: peer_id_len][peer_id][audio_payload]
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let pid_len = data[0] as usize;
+                        if data.len() < 1 + pid_len {
+                            warn!("Binary frame too short for sender header");
+                            continue;
+                        }
+                        let peer_id = match std::str::from_utf8(&data[1..1 + pid_len]) {
+                            Ok(s) => s.to_string(),
+                            Err(_) => {
+                                warn!("Invalid UTF-8 in binary sender header");
+                                continue;
+                            }
+                        };
+                        let audio_data = data[1 + pid_len..].to_vec();
+                        if audio_incoming_tx.send((peer_id, audio_data)).await.is_err() {
+                            info!("Audio incoming channel closed, stopping WS read");
+                            return;
+                        }
+                    }
                     Ok(Message::Text(text)) => {
                         match serde_json::from_str::<ServerMsg>(&text) {
                             Ok(server_msg) => {
-                                let signal = match server_msg {
+                                match server_msg {
                                     ServerMsg::PeerJoined {
                                         peer_id,
                                         display_name,
-                                    } => SignalMessage::PeerJoined {
-                                        peer_id,
-                                        display_name,
-                                    },
-                                    ServerMsg::PeerLeft { peer_id } => {
-                                        SignalMessage::PeerLeft { peer_id }
+                                    } => {
+                                        let _ = incoming_tx.send(SignalMessage::PeerJoined {
+                                            peer_id,
+                                            display_name,
+                                        });
                                     }
-                                    ServerMsg::Signal { to, from, payload } => {
-                                        // Reconstruct SignalPayload from the raw JSON
-                                        match serde_json::from_value(payload) {
-                                            Ok(p) => SignalMessage::Signal { to, from, payload: p },
+                                    ServerMsg::PeerLeft { peer_id } => {
+                                        let _ = incoming_tx.send(SignalMessage::PeerLeft { peer_id });
+                                    }
+                                    ServerMsg::Sync { from, payload } => {
+                                        match serde_json::from_value::<SyncMessage>(payload) {
+                                            Ok(msg) => {
+                                                if sync_incoming_tx.send((from, msg)).is_err() {
+                                                    info!("Sync incoming channel closed, stopping WS read");
+                                                    return;
+                                                }
+                                            }
                                             Err(e) => {
-                                                warn!(error = %e, "Failed to parse signal payload");
-                                                continue;
+                                                warn!(error = %e, "Failed to parse relayed sync payload");
                                             }
                                         }
                                     }
@@ -252,14 +340,12 @@ impl SignalingClient {
                                         return;
                                     }
                                     ServerMsg::Log { from, level, target, message, timestamp_us } => {
-                                        SignalMessage::LogBroadcast { from, level, target, message, timestamp_us }
+                                        let _ = incoming_tx.send(SignalMessage::LogBroadcast { from, level, target, message, timestamp_us });
                                     }
-                                    _ => continue,
-                                };
-                                debug!(?signal, "WS received");
-                                if incoming_tx2.send(signal).is_err() {
-                                    info!("Incoming channel closed, stopping WS read");
-                                    return;
+                                    ServerMsg::Signal { .. } => {
+                                        debug!("Ignoring legacy signal message");
+                                    }
+                                    _ => {}
                                 }
                             }
                             Err(e) => {
@@ -281,57 +367,71 @@ impl SignalingClient {
             info!("WebSocket stream ended");
         });
 
-        // Spawn write task: outgoing channel → server
+        // Spawn write task: outgoing channels → server
         tokio::spawn(async move {
-            while let Some(msg) = outgoing_rx.recv().await {
-                debug!(?msg, "Sending signal via WS");
-                let raw = match &msg {
-                    SignalMessage::LogBroadcast { level, target, message, timestamp_us, .. } => {
-                        serde_json::json!({
-                            "type": "log",
-                            "level": level,
-                            "target": target,
-                            "message": message,
-                            "timestamp_us": timestamp_us,
-                        })
+            loop {
+                tokio::select! {
+                    msg = outgoing_rx.recv() => {
+                        let Some(msg) = msg else { break };
+                        let raw = match &msg {
+                            SignalMessage::LogBroadcast { level, target, message, timestamp_us, .. } => {
+                                serde_json::json!({
+                                    "type": "log",
+                                    "level": level,
+                                    "target": target,
+                                    "message": message,
+                                    "timestamp_us": timestamp_us,
+                                })
+                            }
+                            SignalMessage::MetricsReport { dc_open, plugin_connected, per_peer, ipc_drops, boundary_drift_us } => {
+                                serde_json::json!({
+                                    "type": "metrics_report",
+                                    "dc_open": dc_open,
+                                    "plugin_connected": plugin_connected,
+                                    "per_peer": per_peer,
+                                    "ipc_drops": ipc_drops,
+                                    "boundary_drift_us": boundary_drift_us,
+                                })
+                            }
+                            _ => continue,
+                        };
+                        if ws_write.send(Message::Text(raw.to_string())).await.is_err() {
+                            warn!("WebSocket write failed — connection lost");
+                            return;
+                        }
                     }
-                    SignalMessage::MetricsReport { dc_open, plugin_connected, per_peer, ipc_drops, boundary_drift_us } => {
-                        serde_json::json!({
-                            "type": "metrics_report",
-                            "dc_open": dc_open,
-                            "plugin_connected": plugin_connected,
-                            "per_peer": per_peer,
-                            "ipc_drops": ipc_drops,
-                            "boundary_drift_us": boundary_drift_us,
-                        })
+                    sync_msg = sync_outgoing_rx.recv() => {
+                        let Some(sync_msg) = sync_msg else { break };
+                        let raw = match sync_msg {
+                            SyncOutgoing::Broadcast(msg) => {
+                                serde_json::json!({
+                                    "type": "sync",
+                                    "payload": serde_json::to_value(&msg).unwrap_or_default(),
+                                })
+                            }
+                            SyncOutgoing::To { peer_id, msg } => {
+                                serde_json::json!({
+                                    "type": "sync_to",
+                                    "to": peer_id,
+                                    "payload": serde_json::to_value(&msg).unwrap_or_default(),
+                                })
+                            }
+                        };
+                        if ws_write.send(Message::Text(raw.to_string())).await.is_err() {
+                            warn!("WebSocket write failed — connection lost");
+                            return;
+                        }
                     }
-                    _ => serde_json::json!({
-                    "type": "signal",
-                    "to": match &msg {
-                        SignalMessage::Signal { to, .. } => to.as_str(),
-                        _ => "",
-                    },
-                    "from": match &msg {
-                        SignalMessage::Signal { from, .. } => from.as_str(),
-                        _ => "",
-                    },
-                    "payload": match &msg {
-                        SignalMessage::Signal { payload, .. } => serde_json::to_value(payload).unwrap_or_default(),
-                        _ => serde_json::Value::Null,
-                    },
-                }),
-                };
-                if ws_write
-                    .send(Message::Text(raw.to_string()))
-                    .await
-                    .is_err()
-                {
-                    warn!("WebSocket write failed — connection lost");
-                    return;
+                    audio_data = audio_outgoing_rx.recv() => {
+                        let Some(data) = audio_data else { break };
+                        if ws_write.send(Message::Binary(data)).await.is_err() {
+                            warn!("WebSocket write failed (audio) — connection lost");
+                            return;
+                        }
+                    }
                 }
             }
-            // Outgoing channel closed — only send leave if not suppressed
-            // (suppressed during signaling reconnect to avoid broadcasting PeerLeft)
+            // All outgoing channels closed — only send leave if not suppressed
             if *suppress_leave_rx.borrow() {
                 info!("Outgoing channel closed, leave suppressed (reconnecting)");
             } else {
@@ -345,12 +445,20 @@ impl SignalingClient {
             let _ = ws_write.close().await;
         });
 
+        let channels = SignalingChannels {
+            incoming_rx,
+            sync_rx,
+            audio_rx,
+        };
+
         Ok((
             Self {
-                incoming_rx,
                 outgoing_tx,
+                sync_outgoing_tx,
+                audio_outgoing_tx,
                 suppress_leave_tx: Some(suppress_leave_tx),
             },
+            channels,
             initial_peer_names,
         ))
     }

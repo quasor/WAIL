@@ -14,13 +14,7 @@ pub struct PeerState {
     pub hello_sent: bool,
     pub last_seen: Instant,
     /// True once any sync or audio message has been received from this peer.
-    /// The liveness watchdog only fires for peers where this is true — pre-connect
-    /// peers (ICE still negotiating) are handled by the PeerFailed reconnection path.
     pub ever_received_message: bool,
-    pub reconnect_attempts: u32,
-    /// True while a reconnect timer is scheduled — prevents duplicate PeerFailed events
-    /// from spawning multiple concurrent timers and inflating the attempt counter.
-    pub reconnect_pending: bool,
     pub audio_recv_count: u64,
     pub audio_recv_prev: u64,
     /// Last `intervals_sent` value from this peer's AudioStatus message.
@@ -55,8 +49,6 @@ impl PeerState {
             hello_sent: false,
             last_seen: Instant::now(),
             ever_received_message: false,
-            reconnect_attempts: 0,
-            reconnect_pending: false,
             audio_recv_count: 0,
             audio_recv_prev: 0,
             remote_intervals_sent: 0,
@@ -160,24 +152,12 @@ impl PeerRegistry {
     }
 
     /// Return peer IDs that have previously communicated and whose last_seen is older than `timeout`.
-    /// Peers that have never sent a message (ICE still negotiating) are excluded — they are
-    /// handled by the PeerFailed reconnection path or by `stale_preconnect_peers`.
+    /// Peers that have never sent a message are excluded.
     pub fn timed_out_peers(&self, timeout: Duration) -> Vec<String> {
         let now = Instant::now();
         self.peers
             .iter()
             .filter(|(_, p)| p.ever_received_message && now.duration_since(p.last_seen) > timeout)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    /// Return peer IDs that have never sent any message and whose last_seen is older than `timeout`.
-    /// Safety net for peers whose ICE hangs indefinitely without firing a Failed state.
-    pub fn stale_preconnect_peers(&self, timeout: Duration) -> Vec<String> {
-        let now = Instant::now();
-        self.peers
-            .iter()
-            .filter(|(_, p)| !p.ever_received_message && now.duration_since(p.last_seen) > timeout)
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -246,8 +226,6 @@ impl PeerRegistry {
     ///   re-send Hello to prompt the remote to reply
     /// - `hard`: elapsed since `added_at` >= `hard_timeout` → force reconnect
     ///
-    /// Peers with `reconnect_pending = true` are excluded from both buckets to
-    /// avoid interfering with an in-progress reconnect timer.
     pub fn no_identity_active_peers(
         &self,
         soft_timeout: Duration,
@@ -257,7 +235,7 @@ impl PeerRegistry {
         let mut soft = Vec::new();
         let mut hard = Vec::new();
         for (id, p) in &self.peers {
-            if !p.ever_received_message || p.identity.is_some() || p.reconnect_pending {
+            if !p.ever_received_message || p.identity.is_some() {
                 continue;
             }
             let elapsed = now.duration_since(p.added_at);
@@ -287,9 +265,7 @@ impl PeerRegistry {
             Some(p) => p,
             None => return "connecting",
         };
-        if peer.reconnect_attempts > 0 {
-            "reconnecting"
-        } else if peer.display_name.is_none() {
+        if peer.display_name.is_none() {
             "connecting"
         } else {
             "connected"
@@ -363,7 +339,6 @@ mod tests {
         let peer = reg.get("peer1").unwrap();
         assert_eq!(peer.display_name.as_deref(), Some("Alice"));
         assert!(!peer.hello_sent);
-        assert_eq!(peer.reconnect_attempts, 0);
     }
 
     #[test]
@@ -441,17 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_preconnect_detects_stuck_peers() {
-        let mut reg = PeerRegistry::new();
-        reg.add("peer1".to_string(), None);
-        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(16);
-        // Must appear in stale_preconnect_peers (never connected, 16s old)
-        assert!(reg.stale_preconnect_peers(Duration::from_secs(15)).contains(&"peer1".to_string()));
-        // Must NOT appear in timed_out_peers (has never received a message)
-        assert!(reg.timed_out_peers(Duration::from_secs(30)).is_empty());
-    }
-
-    #[test]
     fn timed_out_fires_for_connected_then_silent_peer() {
         let mut reg = PeerRegistry::new();
         reg.add("peer1".to_string(), None);
@@ -468,12 +432,6 @@ mod tests {
         assert_eq!(reg.derive_status("peer1"), "connecting");
 
         reg.get_mut("peer1").unwrap().display_name = Some("Alice".to_string());
-        assert_eq!(reg.derive_status("peer1"), "connected");
-
-        reg.get_mut("peer1").unwrap().reconnect_attempts = 1;
-        assert_eq!(reg.derive_status("peer1"), "reconnecting");
-
-        reg.get_mut("peer1").unwrap().reconnect_attempts = 0;
         assert_eq!(reg.derive_status("peer1"), "connected");
 
         assert_eq!(reg.derive_status("unknown"), "connecting");
@@ -551,23 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn no_identity_active_peers_excludes_reconnecting() {
-        let mut reg = PeerRegistry::new();
-        reg.add("peer1".to_string(), Some("Alice".to_string()));
-        let peer = reg.get_mut("peer1").unwrap();
-        peer.ever_received_message = true;
-        peer.added_at = Instant::now() - Duration::from_secs(20);
-        peer.reconnect_pending = true;
-
-        let (soft, hard) = reg.no_identity_active_peers(
-            Duration::from_secs(5),
-            Duration::from_secs(15),
-        );
-        assert!(soft.is_empty(), "reconnecting peer must be excluded from soft");
-        assert!(hard.is_empty(), "reconnecting peer must be excluded from hard");
-    }
-
-    #[test]
     fn no_identity_active_peers_excludes_identified() {
         let mut reg = PeerRegistry::new();
         reg.add("peer1".to_string(), Some("Alice".to_string()));
@@ -599,43 +540,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reconnect_pending_prevents_counter_inflation() {
-        let mut reg = PeerRegistry::new();
-        reg.add("peer-x".to_string(), Some("Alice".to_string()));
-
-        // Initial state: not pending, zero attempts
-        let peer = reg.get("peer-x").unwrap();
-        assert!(!peer.reconnect_pending);
-        assert_eq!(peer.reconnect_attempts, 0);
-
-        // First failure: increment + set pending (simulates session PeerFailed handler)
-        let peer = reg.get_mut("peer-x").unwrap();
-        peer.reconnect_attempts += 1;
-        peer.reconnect_pending = true;
-
-        // While pending: session should skip duplicate events — counter stays at 1
-        let peer = reg.get("peer-x").unwrap();
-        assert!(peer.reconnect_pending);
-        assert_eq!(peer.reconnect_attempts, 1);
-
-        // Timer fires: clear pending
-        let peer = reg.get_mut("peer-x").unwrap();
-        peer.reconnect_pending = false;
-
-        // Next real failure (from new connection): processed normally
-        let peer = reg.get("peer-x").unwrap();
-        assert!(!peer.reconnect_pending);
-        let peer = reg.get_mut("peer-x").unwrap();
-        peer.reconnect_attempts += 1;
-        peer.reconnect_pending = true;
-        assert_eq!(peer.reconnect_attempts, 2);
-
-        // Successful reconnection: both cleared
-        let peer = reg.get_mut("peer-x").unwrap();
-        peer.reconnect_attempts = 0;
-        peer.reconnect_pending = false;
-        assert_eq!(peer.reconnect_attempts, 0);
-        assert!(!peer.reconnect_pending);
-    }
 }

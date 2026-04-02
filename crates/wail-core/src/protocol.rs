@@ -122,12 +122,6 @@ pub enum SignalMessage {
     PeerLeft {
         peer_id: String,
     },
-    /// Bidirectional: relay WebRTC signaling between peers
-    Signal {
-        to: String,
-        from: String,
-        payload: SignalPayload,
-    },
     /// Peer log broadcast: structured log entry relayed via the signaling server
     LogBroadcast {
         from: String,
@@ -174,14 +168,6 @@ pub struct PeerFrameReport {
     pub decode_failures: u64,
 }
 
-/// WebRTC signaling payloads relayed through the signaling server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum SignalPayload {
-    Offer { sdp: String },
-    Answer { sdp: String },
-    IceCandidate { candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16> },
-}
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use wail_audio::test_tone::{encode_test_interval, validate_audio};
 use wail_core::protocol::SyncMessage;
-use wail_net::{fetch_metered_ice_servers, metered_stun_fallback, MeshEvent, PeerMesh};
+use wail_net::{MeshEvent, PeerMesh};
 
 #[derive(Parser)]
 #[command(name = "wail-e2e", about = "Two-machine end-to-end test for WAIL")]
@@ -104,30 +104,7 @@ async fn main() -> Result<()> {
 async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, num_intervals: u32, burst_intervals: u32) -> Result<()> {
     let mut results: Vec<TestResult> = Vec::new();
 
-    // --- Phase 1: ICE servers ---
-    let t = Instant::now();
-    let ice_servers = match fetch_metered_ice_servers().await {
-        Ok(servers) => {
-            results.push(TestResult::pass(
-                "ICE",
-                format!("fetched {} servers from Metered", servers.len()),
-                t.elapsed(),
-            ));
-            servers
-        }
-        Err(e) => {
-            warn!("Metered API failed ({e}), using STUN fallback");
-            results.push(TestResult::pass(
-                "ICE",
-                "Metered unreachable, using STUN fallback".into(),
-                t.elapsed(),
-            ));
-            metered_stun_fallback()
-        }
-    };
-    print_result(results.last().unwrap());
-
-    // --- Phase 2: Signaling connection ---
+    // --- Phase 1: Signaling connection ---
     let t = Instant::now();
     let (mut mesh, mut sync_rx, mut audio_rx) = match timeout(
         Duration::from_secs(10),
@@ -136,8 +113,6 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
             room,
             peer_id,
             None,
-            ice_servers,
-            false,
             1,
             Some("e2e-test"),
         ),
@@ -165,7 +140,7 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
     };
     print_result(results.last().unwrap());
 
-    // --- Phase 3: Peer discovery ---
+    // --- Phase 2: Peer discovery ---
     println!("\nWaiting for peer to join room \"{room}\"...");
     println!("  Run on the other machine:");
     println!("  cargo run -p wail-e2e --release -- --room {room} --server {server_url}");
@@ -180,13 +155,7 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
     ));
     print_result(results.last().unwrap());
 
-    // --- Phase 4: Wait for DataChannels to open ---
-    let t = Instant::now();
-    wait_for_datachannel(&mut mesh, &remote_peer_id, Duration::from_secs(30)).await?;
-    results.push(TestResult::pass("WebRTC", "DataChannels open".into(), t.elapsed()));
-    print_result(results.last().unwrap());
-
-    // --- Phase 5: Sync message exchange (Hello + Ping/Pong) ---
+    // --- Phase 3: Sync message exchange (Hello + Ping/Pong) ---
     let t = Instant::now();
     let rtt_ms = run_sync_exchange(&mut mesh, &mut sync_rx, peer_id, identity).await?;
     results.push(TestResult::pass(
@@ -196,13 +165,13 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
     ));
     print_result(results.last().unwrap());
 
-    // --- Phase 6: Single audio interval exchange ---
+    // --- Phase 4: Single audio interval exchange ---
     let t = Instant::now();
     let detail = run_single_audio_exchange(&mut mesh, &mut audio_rx).await?;
     results.push(TestResult::pass("Audio", detail, t.elapsed()));
     print_result(results.last().unwrap());
 
-    // --- Phase 7: Sustained multi-interval audio ---
+    // --- Phase 5: Sustained multi-interval audio ---
     let t = Instant::now();
     let detail = run_sustained_audio(
         &mut mesh, &mut audio_rx, &mut sync_rx, num_intervals,
@@ -210,7 +179,7 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
     results.push(TestResult::pass("Sustained", detail, t.elapsed()));
     print_result(results.last().unwrap());
 
-    // --- Phase 7b: Burst audio (zero-delay flood to validate buffer headroom) ---
+    // --- Phase 6: Burst audio (zero-delay flood to validate buffer headroom) ---
     let t = Instant::now();
     let detail = run_burst_audio(
         &mut mesh, &mut audio_rx, &mut sync_rx, burst_intervals,
@@ -218,8 +187,7 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, n
     results.push(TestResult::pass("Burst", detail, t.elapsed()));
     print_result(results.last().unwrap());
 
-    // --- Phase 8: Reconnection ---
-    // Lower peer ID reconnects, higher peer ID waits.
+    // --- Phase 7: Reconnection ---
     let we_reconnect = peer_id < remote_peer_id.as_str();
     let role = if we_reconnect { "reconnector" } else { "waiter" };
     println!("\nReconnection test: we are the {role} (us={peer_id}, them={remote_peer_id})");
@@ -264,47 +232,16 @@ async fn wait_for_peer(mesh: &mut PeerMesh) -> Result<String> {
                 info!(peer = %rid, name = ?display_name, "Peer joined");
                 return Ok(rid);
             }
+            Ok(Ok(Some(MeshEvent::PeerListReceived(_)))) => {
+                // After join, check if any peers were already in the room
+                if let Some(rid) = mesh.connected_peers().into_iter().next() {
+                    return Ok(rid);
+                }
+            }
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => bail!("Signaling channel closed"),
             Ok(Err(e)) => bail!("Signaling error: {e}"),
             Err(_) => {} // 1s poll timeout
-        }
-        // Responder case: the offer arrives as SignalingProcessed (not PeerJoined),
-        // which inserts the peer into the mesh map. Check after every event.
-        if let Some(rid) = mesh.connected_peers().into_iter().next() {
-            return Ok(rid);
-        }
-    }
-}
-
-async fn wait_for_datachannel(mesh: &mut PeerMesh, remote_peer_id: &str, dc_timeout: Duration) -> Result<()> {
-    let result = timeout(dc_timeout, async {
-        loop {
-            if mesh.any_audio_dc_open() {
-                return Ok::<(), anyhow::Error>(());
-            }
-            match timeout(Duration::from_secs(1), mesh.poll_signaling()).await {
-                Ok(Ok(Some(_))) => {}
-                Ok(Ok(None)) => bail!("Signaling closed during negotiation"),
-                Ok(Err(e)) => bail!("Signaling error during negotiation: {e}"),
-                Err(_) => {}
-            }
-        }
-    })
-    .await;
-
-    match result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => bail!("WebRTC negotiation failed: {e}"),
-        Err(_) => {
-            let state = mesh.peer_network_state(remote_peer_id);
-            let msg = match state {
-                Some((ice, sync_dc, audio_dc)) => {
-                    format!("timeout ({dc_timeout:.0?}) -- ICE={ice}, sync_dc={sync_dc}, audio_dc={audio_dc}")
-                }
-                None => format!("timeout ({dc_timeout:.0?}) -- peer not in mesh"),
-            };
-            bail!("WebRTC negotiation failed: {msg}");
         }
     }
 }
@@ -392,7 +329,7 @@ async fn run_single_audio_exchange(
     validate_audio_str(&data)
 }
 
-/// Phase 7: Send N intervals back-to-back, receive N, measure throughput and gaps.
+/// Send N intervals back-to-back, receive N, measure throughput and gaps.
 async fn run_sustained_audio(
     mesh: &mut PeerMesh,
     audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
@@ -496,11 +433,7 @@ async fn run_sustained_audio(
     ))
 }
 
-/// Phase 7b: Send N intervals with no delay between sends, validate all arrive.
-///
-/// This stresses the receive-side channel (capacity 256) to confirm there is
-/// enough buffer headroom for bursty traffic and that no frames are silently
-/// dropped.
+/// Send N intervals with no delay between sends, validate all arrive.
 async fn run_burst_audio(
     mesh: &mut PeerMesh,
     audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
@@ -519,7 +452,6 @@ async fn run_burst_audio(
             total_bytes_sent += frame.len();
             mesh.broadcast_audio(frame).await;
         }
-        // yield to the runtime between sends so the receiver can make progress
         tokio::task::yield_now().await;
     }
 
@@ -531,7 +463,6 @@ async fn run_burst_audio(
         "Burst send complete"
     );
 
-    // Receive all intervals; fail if any are missing within the timeout.
     let recv_start = Instant::now();
     let mut received: u32 = 0;
     let mut total_bytes_recv: usize = 0;
@@ -575,7 +506,7 @@ async fn run_burst_audio(
     ))
 }
 
-/// Phase 8 (initiator): We disconnect and reconnect. The remote peer waits.
+/// Phase 7 (initiator): We disconnect and reconnect signaling. The remote peer waits.
 async fn run_reconnect_as_initiator(
     mesh: &mut PeerMesh,
     sync_rx: &mut mpsc::UnboundedReceiver<(String, SyncMessage)>,
@@ -584,47 +515,20 @@ async fn run_reconnect_as_initiator(
     room: &str,
     peer_id: &str,
     identity: &str,
-    remote_peer_id: &str,
+    _remote_peer_id: &str,
 ) -> Result<String> {
-    println!("Closing WebRTC connection...");
-
-    // Close the WebRTC peer connection (but the remote peer stays in the room)
-    mesh.close_peer(remote_peer_id).await;
-    // Remove the dead peer from our mesh so re_initiate starts fresh
-    mesh.remove_peer(remote_peer_id).await;
-
-    // Brief pause for the close to propagate
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // Drain stale events
-    drain_events(mesh, sync_rx, audio_rx, Duration::from_millis(500)).await;
-
     println!("Reconnecting signaling...");
 
-    // Fetch fresh ICE servers
-    let fresh_ice = fetch_metered_ice_servers().await.unwrap_or_else(|_| metered_stun_fallback());
-
-    // Reconnect signaling — this also initiates WebRTC connections for peers
-    // in the room that aren't in our mesh (which includes remote_peer_id since
-    // we called remove_peer above). No separate re_initiate needed.
     let reconnect_start = Instant::now();
-    mesh.reconnect_signaling(
-        server_url,
-        room,
-        None,
-        Some("e2e-test"),
-        fresh_ice,
-    )
-    .await?;
+    let (_new_peer_names, new_sync_rx, new_audio_rx) =
+        mesh.reconnect_signaling(server_url, room, None, Some("e2e-test")).await?;
+    *sync_rx = new_sync_rx;
+    *audio_rx = new_audio_rx;
     let reconnect_elapsed = reconnect_start.elapsed();
     info!(elapsed = ?reconnect_elapsed, "Signaling reconnected");
 
-    // Wait for DataChannels to reopen
-    println!("Waiting for DataChannels to reopen...");
-    let dc_start = Instant::now();
-    wait_for_datachannel(mesh, remote_peer_id, Duration::from_secs(30)).await?;
-    let dc_elapsed = dc_start.elapsed();
-    info!(elapsed = ?dc_elapsed, "DataChannels reopened");
+    // Drain stale events
+    drain_events(mesh, sync_rx, audio_rx, Duration::from_millis(500)).await;
 
     // Verify sync
     println!("Verifying sync after reconnect...");
@@ -642,12 +546,11 @@ async fn run_reconnect_as_initiator(
     info!(detail = %audio_detail, "Post-reconnect audio OK");
 
     Ok(format!(
-        "role=initiator, signaling={reconnect_elapsed:.1?}, datachannel={dc_elapsed:.1?}, \
-         RTT={rtt_ms:.1}ms, audio={audio_detail}"
+        "role=initiator, signaling={reconnect_elapsed:.1?}, RTT={rtt_ms:.1}ms, audio={audio_detail}"
     ))
 }
 
-/// Phase 8 (waiter): The remote peer disconnects and reconnects. We stay and wait.
+/// Phase 7 (waiter): The remote peer disconnects and reconnects. We stay and wait.
 async fn run_reconnect_as_waiter(
     mesh: &mut PeerMesh,
     sync_rx: &mut mpsc::UnboundedReceiver<(String, SyncMessage)>,
@@ -658,7 +561,7 @@ async fn run_reconnect_as_waiter(
 ) -> Result<String> {
     println!("Waiting for remote peer to disconnect and reconnect...");
 
-    // Wait for PeerFailed or PeerLeft (the initiator is closing their connection)
+    // Wait for PeerLeft (the initiator reconnects signaling, server sends PeerLeft then PeerJoined)
     let disconnect_start = Instant::now();
     let got_disconnect = timeout(Duration::from_secs(15), async {
         loop {
@@ -669,13 +572,9 @@ async fn run_reconnect_as_waiter(
                 _ = audio_rx.recv() => {}
                 result = mesh.poll_signaling() => {
                     match result? {
-                        Some(MeshEvent::PeerFailed(ref pid)) if pid == remote_peer_id => {
-                            info!("Remote peer connection failed (expected)");
-                            return Ok::<&str, anyhow::Error>("PeerFailed");
-                        }
                         Some(MeshEvent::PeerLeft(ref pid)) if pid == remote_peer_id => {
-                            info!("Remote peer left (expected)");
-                            return Ok("PeerLeft");
+                            info!("Remote peer left (expected — reconnecting)");
+                            return Ok::<&str, anyhow::Error>("PeerLeft");
                         }
                         _ => {}
                     }
@@ -694,24 +593,16 @@ async fn run_reconnect_as_waiter(
         Err(_) => bail!("Timed out waiting for remote peer to disconnect"),
     };
 
-    // Clean up the dead peer connection
-    mesh.remove_peer(remote_peer_id).await;
-
-    // Now wait for the remote peer to rejoin and re-establish WebRTC
+    // Now wait for the remote peer to rejoin
     println!("Waiting for remote peer to rejoin...");
     let rejoin_start = Instant::now();
 
-    // Wait for PeerJoined (the initiator reconnects signaling and re-joins)
     let rejoin_result = timeout(Duration::from_secs(30), async {
         loop {
             match mesh.poll_signaling().await? {
                 Some(MeshEvent::PeerJoined { peer_id: rid, .. }) if rid == remote_peer_id => {
                     info!("Remote peer rejoined");
                     return Ok::<(), anyhow::Error>(());
-                }
-                Some(MeshEvent::PeerListReceived(_)) => {
-                    // After their reconnect_signaling, they get a peer list and may
-                    // initiate a connection to us. Just keep polling.
                 }
                 _ => {}
             }
@@ -725,13 +616,6 @@ async fn run_reconnect_as_waiter(
         Err(_) => bail!("Timed out waiting for remote peer to rejoin"),
     }
     let rejoin_elapsed = rejoin_start.elapsed();
-
-    // Wait for DataChannels to reopen
-    println!("Waiting for DataChannels to reopen...");
-    let dc_start = Instant::now();
-    wait_for_datachannel(mesh, remote_peer_id, Duration::from_secs(30)).await?;
-    let dc_elapsed = dc_start.elapsed();
-    info!(elapsed = ?dc_elapsed, "DataChannels reopened");
 
     // Verify sync
     println!("Verifying sync after reconnect...");
@@ -750,7 +634,7 @@ async fn run_reconnect_as_waiter(
 
     Ok(format!(
         "role=waiter, disconnect={disconnect_event}, rejoin={rejoin_elapsed:.1?}, \
-         datachannel={dc_elapsed:.1?}, RTT={rtt_ms:.1}ms, audio={audio_detail}"
+         RTT={rtt_ms:.1}ms, audio={audio_detail}"
     ))
 }
 

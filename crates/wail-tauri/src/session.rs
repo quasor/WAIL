@@ -301,21 +301,9 @@ async fn session_loop(
     let (link_cmd_tx, mut link_event_rx) = link.spawn_poller();
     ui_info!(&app, "Ableton Link enabled");
 
-    // Fetch ICE servers (STUN + TURN) from Metered; fall back to STUN-only on failure.
-    let ice_servers = match wail_net::fetch_metered_ice_servers().await {
-        Ok(servers) => {
-            ui_info!(&app, "Fetched {} ICE servers from Metered", servers.len());
-            servers
-        }
-        Err(e) => {
-            ui_warn!(&app, "Metered ICE fetch failed ({e}), using STUN fallback");
-            wail_net::metered_stun_fallback()
-        }
-    };
-
-    // Connect to signaling server
+    // Connect to signaling server (all data relayed via WebSocket)
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, false, stream_count, Some(&display_name)).await?;
+        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), stream_count, Some(&display_name)).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(
@@ -455,10 +443,6 @@ async fn session_loop(
     let mut liveness_interval = tokio::time::interval(Duration::from_secs(5));
     const PEER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
 
-    // Peer reconnection channels
-    let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<String>(16);
-    const MAX_PEER_RECONNECT_ATTEMPTS: u32 = 6;
-    const PEER_RECONNECT_SCHEDULE_MS: [u64; 6] = [500, 1000, 2000, 3000, 4000, 5000];
     const SIGNALING_RECONNECT_BASE_MS: u64 = 1000;
     const SIGNALING_RECONNECT_MAX_MS: u64 = 30_000;
     const SIGNALING_RECONNECT_STALE_ATTEMPT: u32 = 10;
@@ -472,7 +456,6 @@ async fn session_loop(
 
     // Pending audio retry: (deadline, failed_peer_ids, wire_data, retries_remaining)
     // Up to 3 retries at 250ms intervals for transiently-failed peers.
-    let mut audio_retry: Option<(tokio::time::Instant, Vec<String>, Vec<u8>, u32)> = None;
 
     // Auto-start test tone on Send 0 if --test-room was used
     if initial_test_mode {
@@ -807,52 +790,6 @@ async fn session_loop(
                         remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
-                    Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
-                        // Skip duplicate failure events while a reconnect timer is pending.
-                        // A single connection failure fires multiple fail_tx sends (DC on_close
-                        // for each channel + PeerConnectionState::Failed). Without this guard,
-                        // each event would spawn its own timer and inflate reconnect_attempts.
-                        if peers.get(&pid).is_some_and(|p| p.reconnect_pending) {
-                            continue;
-                        }
-
-                        let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
-                        let attempt = if let Some(peer) = peers.get_mut(&pid) {
-                            peer.reconnect_attempts += 1;
-                            peer.reconnect_attempts
-                        } else {
-                            1
-                        };
-
-                        if attempt > MAX_PEER_RECONNECT_ATTEMPTS {
-                            ui_error!(&app, "Peer {name} reconnection failed after {MAX_PEER_RECONNECT_ATTEMPTS} attempts — giving up");
-                            peer_audio_status.remove(pid.as_str());
-                            remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
-                            mesh.remove_peer(&pid).await;
-                            let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
-                        } else {
-                            if let Some(peer) = peers.get_mut(&pid) {
-                                peer.reconnect_pending = true;
-                            }
-                            let backoff_ms = PEER_RECONNECT_SCHEDULE_MS[(attempt as usize - 1).min(PEER_RECONNECT_SCHEDULE_MS.len() - 1)];
-                            let slot_tag = peers.slot_for(&pid, 0)
-                                .map(|s| format!("slot={} ", s + 1))
-                                .unwrap_or_default();
-                            ui_warn!(&app, "{slot_tag}{name} connection failed — reconnecting in {backoff_ms}ms (attempt {attempt}/{MAX_PEER_RECONNECT_ATTEMPTS})");
-                            let _ = app.emit("peer:reconnecting", PeerReconnectingEvent {
-                                peer_id: pid.clone(),
-                                attempt,
-                                max_attempts: MAX_PEER_RECONNECT_ATTEMPTS,
-                            });
-
-                            let tx = reconnect_tx.clone();
-                            let pid_clone = pid.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                                let _ = tx.send(pid_clone).await;
-                            });
-                        }
-                    }
                     Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
                         // Seed liveness for initial peers so the watchdog can
                         // detect peers that connect but never send any messages.
@@ -882,45 +819,6 @@ async fn session_loop(
                 }
             }
 
-            // --- Pending peer reconnection ---
-            Some(pid) = reconnect_rx.recv() => {
-                // Clear the pending flag so failures from the NEW connection are detected.
-                if let Some(peer) = peers.get_mut(&pid) {
-                    peer.reconnect_pending = false;
-                }
-                if peers.get(&pid).is_some_and(|p| p.reconnect_attempts > 0) {
-                    let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
-                    ui_info!(&app, "Attempting reconnection to {name}...");
-                    match mesh.re_initiate(&pid).await {
-                        Ok(()) => {
-                            ui_info!(&app, "Reconnection offer sent to {name}");
-                            if let Some(peer) = peers.get_mut(&pid) {
-                                peer.last_seen = Instant::now();
-                                peer.hello_sent = false;
-                            }
-                            // Reset the Hello-completion clock so the watchdog gives
-                            // this reconnect attempt a fresh window before triggering again.
-                            peers.reset_added_at(&pid);
-                            let hello = SyncMessage::Hello {
-                                peer_id: peer_id.clone(),
-                                display_name: Some(display_name.clone()),
-                                identity: Some(identity.clone()),
-                            };
-                            mesh.broadcast(&hello).await;
-                            for p in mesh.connected_peers() {
-                                peers.mark_hello_sent(&p);
-                            }
-                            if !local_stream_names.is_empty() {
-                                mesh.broadcast(&SyncMessage::StreamNames { names: stream_names_to_wire(&local_stream_names) }).await;
-                            }
-                        }
-                        Err(e) => {
-                            ui_warn!(&app, "Reconnection to {name} failed: {e}");
-                        }
-                    }
-                }
-            }
-
             // --- Signaling reconnection state machine (non-blocking) ---
             _ = async {
                 if let Some(ref sr) = signaling_reconnect {
@@ -939,22 +837,15 @@ async fn session_loop(
 
                 ui_info!(&app, "Signaling reconnect attempt {attempt}...");
 
-                // Re-fetch ICE servers (TURN credentials may have expired)
-                let ice = match wail_net::fetch_metered_ice_servers().await {
-                    Ok(s) => s,
-                    Err(_) => wail_net::metered_stun_fallback(),
-                };
-
                 match mesh.reconnect_signaling(
-                    &server, &room, password.as_deref(), Some(&display_name), ice,
+                    &server, &room, password.as_deref(), Some(&display_name),
                 ).await {
-                    Ok(new_peer_names) => {
-                        // Seed any genuinely new peers from the fresh join_ok.
-                        // Existing peers remain connected — their WebRTC DataChannels
-                        // are unaffected by the signaling reconnect.
+                    Ok((new_peer_names, new_sync_rx, new_audio_rx)) => {
                         peers.seed_names(new_peer_names);
+                        sync_rx = new_sync_rx;
+                        audio_rx = new_audio_rx;
                         signaling_reconnect = None;
-                        ui_info!(&app, "Signaling reconnected (attempt {attempt}) — existing WebRTC connections preserved");
+                        ui_info!(&app, "Signaling reconnected (attempt {attempt})");
                         let _ = app.emit("session:reconnected", ());
                     }
                     Err(e) => {
@@ -966,35 +857,6 @@ async fn session_loop(
                         sr.attempt = next_attempt;
                         sr.next_try = tokio::time::Instant::now()
                             + Duration::from_millis(backoff_ms);
-                    }
-                }
-            }
-
-            // --- Audio retry (up to 3 attempts, 250ms apart) for transiently-failed peers ---
-            _ = async {
-                if let Some((deadline, _, _, _)) = &audio_retry {
-                    tokio::time::sleep_until(*deadline).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            }, if audio_retry.is_some() => {
-                if let Some((_, failed_peers, wire_data, retries_remaining)) = audio_retry.take() {
-                    let mut still_failed = Vec::new();
-                    for pid in &failed_peers {
-                        if let Err(e) = mesh.send_audio_to(pid, &wire_data).await {
-                            warn!(peer = %pid, error = %e, retries_remaining, "Audio retry failed");
-                            still_failed.push(pid.clone());
-                        } else {
-                            debug!(peer = %pid, "Audio retry succeeded");
-                        }
-                    }
-                    if !still_failed.is_empty() && retries_remaining > 1 {
-                        audio_retry = Some((
-                            tokio::time::Instant::now() + Duration::from_millis(250),
-                            still_failed,
-                            wire_data,
-                            retries_remaining - 1,
-                        ));
                     }
                 }
             }
@@ -1065,15 +927,6 @@ async fn session_loop(
                                     let name_frame = IpcFramer::encode_frame(&name_msg);
                                     ipc_pool.broadcast(&name_frame).await;
                                 }
-                            }
-                        }
-
-                        // Clear reconnect tracking — peer is alive
-                        if let Some(peer) = peers.get_mut(&pid) {
-                            if peer.reconnect_attempts > 0 {
-                                peer.reconnect_attempts = 0;
-                                peer.reconnect_pending = false;
-                                ui_info!(&app, "Peer {name_display} reconnected successfully");
                             }
                         }
 
@@ -1459,21 +1312,6 @@ async fn session_loop(
                     mesh.remove_peer(&dead_id).await;
                     let _ = app.emit("peer:left", PeerLeftEvent { peer_id: dead_id });
                 }
-                // Safety net: peers whose ICE never connected and are stuck beyond the timeout.
-                // close_peer sends to failure_tx directly (pc.close() → Closed, not Failed,
-                // so the state-change callback does not fire it). The PeerFailed handler then
-                // schedules a reconnect timer with backoff.
-                const PRE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-                let stale_peers = peers.stale_preconnect_peers(PRE_CONNECT_TIMEOUT);
-                for stale_id in stale_peers {
-                    // Skip peers already being reconnected — their timer will update last_seen.
-                    if peers.get(&stale_id).is_some_and(|p| p.reconnect_pending) {
-                        continue;
-                    }
-                    let name = peers.get(&stale_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&stale_id).to_string();
-                    ui_warn!(&app, "Peer {name} stuck in pre-connect — forcing reconnection after {PRE_CONNECT_TIMEOUT:?}");
-                    mesh.close_peer(&stale_id).await;
-                }
                 // Active peers (audio flowing) whose Hello handshake hasn't completed —
                 // identity unknown means no slot is assigned and the session tab stays empty.
                 // Two-tier response: re-send Hello first (soft), then force reconnect (hard).
@@ -1496,8 +1334,11 @@ async fn session_loop(
                 }
                 for pid in hello_reconnect_peers {
                     let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
-                    ui_warn!(&app, "Peer {name} active but no identity after {HELLO_RECONNECT_TIMEOUT:?} — forcing reconnect");
-                    mesh.close_peer(&pid).await;
+                    ui_warn!(&app, "Peer {name} active but no identity after {HELLO_RECONNECT_TIMEOUT:?} — removing peer");
+                    peer_audio_status.remove(pid.as_str());
+                    remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
+                    mesh.remove_peer(&pid).await;
+                    let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                 }
             }
 
