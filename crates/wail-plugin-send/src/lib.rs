@@ -531,7 +531,27 @@ fn ipc_thread_send(
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "IPC send: failed to encode frame");
+                                tracing::warn!(error = %e, "IPC send: encode failed, sending empty frame for receiver PLC");
+                                let audio_frame = AudioFrame {
+                                    interval_index: raw_frame.interval_index,
+                                    stream_id: raw_frame.stream_id,
+                                    frame_number: raw_frame.frame_number,
+                                    channels: raw_frame.channels,
+                                    opus_data: vec![],
+                                    is_final: raw_frame.is_final,
+                                    sample_rate: raw_frame.sample_rate,
+                                    total_frames: raw_frame.total_frames,
+                                    bpm: raw_frame.bpm,
+                                    quantum: raw_frame.quantum,
+                                    bars: raw_frame.bars,
+                                };
+                                let wire_data = AudioFrameWire::encode(&audio_frame);
+                                let msg = IpcMessage::encode_audio_frame(&wire_data);
+                                let frame = IpcFramer::encode_frame(&msg);
+                                if stream.write_all(&frame).is_err() {
+                                    tracing::warn!("WAIL Send IPC write error — reconnecting");
+                                    write_failed = true;
+                                }
                             }
                         }
                     }
