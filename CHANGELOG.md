@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.1 (2026-04-02)
+
+### Fixes
+
+- preserve completed sessions when room empties (#257)
+
 ## 1.25.0 (2026-04-01)
 
 ### Features
