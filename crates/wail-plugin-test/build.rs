@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-/// On macOS, a valid plugin bundle is a directory (e.g. foo.clap/Contents/MacOS/…).
-/// A 0-byte file or missing path is not valid.
+/// On macOS, a valid plugin bundle is a directory with Contents/MacOS/ inside.
+/// An empty directory left over from a stale build is not valid.
 /// On Linux/Windows, a valid bundle is a non-empty file.
 fn bundle_is_valid(path: &PathBuf) -> bool {
     #[cfg(target_os = "macos")]
-    return path.is_dir();
+    return path.join("Contents/MacOS").is_dir();
     #[cfg(not(target_os = "macos"))]
     return path.is_file() && path.metadata().map(|m| m.len() > 0).unwrap_or(false);
 }

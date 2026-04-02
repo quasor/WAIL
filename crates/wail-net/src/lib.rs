@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 use wail_core::protocol::{PeerFrameReport, SignalMessage, SyncMessage};
@@ -238,20 +239,24 @@ impl PeerMesh {
         self.initial_peer_names = initial_peer_names.clone();
 
         // The SignalingClient pushed a PeerList as its first message.
-        // Consume it here to update our peers set.
-        match self.incoming_rx.recv().await {
-            Some(SignalMessage::PeerList { peers }) => {
+        // Consume it here to update our peers set, with a timeout to avoid
+        // hanging forever if the server misbehaves.
+        match timeout(Duration::from_secs(10), self.incoming_rx.recv()).await {
+            Ok(Some(SignalMessage::PeerList { peers })) => {
                 for remote_id in peers {
                     if remote_id != self.peer_id {
                         self.peers.insert(remote_id);
                     }
                 }
             }
-            other => {
+            Ok(other) => {
                 warn!(
                     "reconnect_signaling: expected PeerList as first message, got {:?}",
                     other.as_ref().map(std::mem::discriminant)
                 );
+            }
+            Err(_) => {
+                bail!("Timed out waiting for PeerList from server after reconnect");
             }
         }
 

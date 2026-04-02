@@ -176,7 +176,7 @@ Legacy send plugins that omit `stream_index` default to stream 0 (the app uses a
 After the handshake, length-prefixed binary framing:
 
 ```
-[4 bytes]  payload_length: u32 LE
+[4 bytes]  payload_length: u32 LE  (max 16 MB — frames exceeding MAX_IPC_FRAME_SIZE are rejected)
 [N bytes]  payload (tagged message, see below)
 ```
 
