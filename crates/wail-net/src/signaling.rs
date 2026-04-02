@@ -53,8 +53,15 @@ impl SignalingClient {
     }
 
     /// Send a binary audio frame to all peers in the room via the server.
-    pub fn send_audio(&self, data: &[u8]) {
-        let _ = self.audio_outgoing_tx.try_send(data.to_vec());
+    /// Returns `true` if the frame was queued, `false` if the channel was full (frame dropped).
+    pub fn send_audio(&self, data: &[u8]) -> bool {
+        match self.audio_outgoing_tx.try_send(data.to_vec()) {
+            Ok(()) => true,
+            Err(_) => {
+                warn!("Audio outgoing channel full — frame dropped");
+                false
+            }
+        }
     }
 }
 
