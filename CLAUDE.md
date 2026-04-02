@@ -239,6 +239,11 @@ When encountering code quality trade-offs, follow these principles (derived from
 ### Trade-off log
 All deferred decisions and remaining code quality items are tracked in `tradeoffs.md` at the repo root. When making a trade-off decision during development, record it there with the rationale.
 
+## Known Limitations
+
+### Wails v3 Window Icon (alpha.74)
+The `application.WebviewWindowOptions` struct does not expose an `Icon` field in Wails v3.0.0-alpha.74. macOS shows a generic terminal icon in the dock instead of the WAIL logo. Check regularly if this is added in stable releases. Workaround: embed the icon in the platform-specific app bundle or use native platform hooks during the build.
+
 ## Future: Link Audio Integration
 
 Ableton Link 4.0.0 beta (vendored at `vendor/link`) introduces Link Audio — native audio streaming between Link peers on a LAN. The Link Audio API (LinkAudio.hpp) provides:
