@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SessionConfig holds configuration for a session.
@@ -78,15 +80,7 @@ func SpawnSession(emitter EventEmitter, config SessionConfig) (*SessionHandle, e
 }
 
 func generateShortID() string {
-	// Simple 8-char hex ID
-	b := make([]byte, 4)
-	// Use time-based seed for uniqueness
-	t := time.Now().UnixNano()
-	b[0] = byte(t)
-	b[1] = byte(t >> 8)
-	b[2] = byte(t >> 16)
-	b[3] = byte(t >> 24)
-	return fmt.Sprintf("%x", b)
+	return uuid.New().String()[:8]
 }
 
 func computeIntervalIndex(beat float64, bars uint32, quantum float64) int64 {

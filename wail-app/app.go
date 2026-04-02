@@ -5,7 +5,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 const signalingURL = "wss://wail-signal.fly.dev"
@@ -21,15 +24,19 @@ type App struct {
 	dataDir      string
 }
 
-// NewApp creates a new App instance.
-func NewApp() *App {
+// NewApp creates a new App instance. Pass instance=0 for the default instance.
+func NewApp(instance int) *App {
 	dataDir := defaultDataDir()
+	if instance > 0 {
+		dataDir = fmt.Sprintf("%s-%d", dataDir, instance)
+	}
 	os.MkdirAll(dataDir, 0o755)
 	identity := getOrCreateIdentity(dataDir)
+	streamNames := LoadStreamNames(dataDir)
 
 	return &App{
-		ipcPort:     9191,
-		streamNames: make(map[uint16]string),
+		ipcPort:     uint16(9191 + instance),
+		streamNames: streamNames,
 		dataDir:     dataDir,
 		identity:    identity,
 	}
@@ -247,6 +254,7 @@ func (a *App) RenameStream(streamIndex uint16, name string) error {
 	} else {
 		a.streamNames[streamIndex] = trimmed
 	}
+	SaveStreamNames(a.dataDir, a.streamNames)
 
 	if a.session != nil {
 		snapshot := make(map[uint16]string, len(a.streamNames))
@@ -262,25 +270,29 @@ func (a *App) RenameStream(streamIndex uint16, name string) error {
 
 func getOrCreateIdentity(dataDir string) string {
 	idPath := filepath.Join(dataDir, "identity")
-	data, err := os.ReadFile(idPath)
-	if err == nil && len(data) > 0 {
-		return string(data)
+	if data, err := os.ReadFile(idPath); err == nil {
+		trimmed := strings.TrimSpace(string(data))
+		if trimmed != "" {
+			// Validate it looks like a UUID; if not, regenerate
+			if _, err := uuid.Parse(trimmed); err == nil {
+				log.Printf("[identity] Loaded persistent identity: %s", trimmed)
+				return trimmed
+			}
+			log.Printf("[identity] Existing identity is not a valid UUID, regenerating")
+		}
 	}
-	// Generate a new identity
-	id := fmt.Sprintf("%x", generateIdentityBytes())
-	os.WriteFile(idPath, []byte(id), 0o644)
-	return id
-}
 
-func generateIdentityBytes() [16]byte {
-	var b [16]byte
-	t := uint64(0)
-	// Simple time-based UUID-ish
-	for i := range b {
-		t = t*6364136223846793005 + 1442695040888963407
-		b[i] = byte(t >> 32)
+	id := uuid.New().String()
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		log.Printf("[identity] Failed to create data dir: %v — using ephemeral identity", err)
+		return id
 	}
-	return b
+	if err := os.WriteFile(idPath, []byte(id), 0o644); err != nil {
+		log.Printf("[identity] Failed to persist identity: %v — using ephemeral identity", err)
+	} else {
+		log.Printf("[identity] Created new persistent identity: %s", id)
+	}
+	return id
 }
 
 func defaultDataDir() string {

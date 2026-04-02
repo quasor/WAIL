@@ -2,16 +2,15 @@ package main
 
 import (
 	"context"
-	"log"
 	"math"
 	"sync"
 	"time"
 )
 
 const (
-	tempoChangeThreshold = 0.01  // BPM
-	echoGuardDuration    = 150 * time.Millisecond
-	linkPollInterval     = 20 * time.Millisecond  // 50 Hz
+	tempoChangeThreshold  = 0.01 // BPM
+	echoGuardDuration     = 150 * time.Millisecond
+	linkPollInterval      = 20 * time.Millisecond // 50 Hz
 	snapshotIntervalTicks = 10                     // ~200ms at 50Hz
 )
 
@@ -105,92 +104,8 @@ func (d *TempoChangeDetector) SetLastTempo(bpm float64) {
 	d.lastTempo = bpm
 }
 
-// LinkBridge wraps the Ableton Link session (via abletonlink-go CGo).
-// For the evaluation build, this uses a stub implementation that simulates
-// Link behavior without the C++ SDK dependency.
-type LinkBridge struct {
-	mu       sync.Mutex
-	bpm      float64
-	quantum  float64
-	beat     float64
-	enabled  bool
-	startTime time.Time
-	detector *TempoChangeDetector
-}
-
-// NewLinkBridge creates a new Link bridge.
-func NewLinkBridge(initialBPM, quantum float64) *LinkBridge {
-	return &LinkBridge{
-		bpm:       initialBPM,
-		quantum:   quantum,
-		startTime: time.Now(),
-		detector:  NewTempoChangeDetector(initialBPM),
-	}
-}
-
-// Enable activates the Link session.
-func (lb *LinkBridge) Enable() {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	lb.enabled = true
-	log.Printf("[link] Ableton Link enabled at %.1f BPM", lb.bpm)
-}
-
-// Disable deactivates the Link session.
-func (lb *LinkBridge) Disable() {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	lb.enabled = false
-	log.Printf("[link] Ableton Link disabled")
-}
-
-// SetTempo applies a remote tempo change.
-func (lb *LinkBridge) SetTempo(bpm float64) {
-	lb.mu.Lock()
-	lb.bpm = bpm
-	lb.mu.Unlock()
-	lb.detector.SetLastTempo(bpm)
-	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
-}
-
-// ForceBeat snaps the local beat clock to the given position.
-// rttUs is used to compensate for one-way network transit time.
-func (lb *LinkBridge) ForceBeat(beat float64, rttUs *int64) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	var compensation float64
-	if rttUs != nil {
-		compensation = float64(*rttUs) / 2_000_000.0 * lb.bpm / 60.0
-	}
-	lb.beat = beat + compensation
-	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
-	log.Printf("[link] Forced beat to %.2f (compensated=%.2f, rtt=%v)", beat, lb.beat, rttUs)
-}
-
-// State returns the current Link state.
-func (lb *LinkBridge) State() LinkState {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	elapsed := time.Since(lb.startTime).Seconds()
-	beatsElapsed := elapsed * lb.bpm / 60.0
-	beat := lb.beat + beatsElapsed
-	phase := math.Mod(beat, lb.quantum)
-	if phase < 0 {
-		phase += lb.quantum
-	}
-	return LinkState{
-		BPM:         lb.bpm,
-		Beat:        beat,
-		Phase:       phase,
-		Quantum:     lb.quantum,
-		TimestampUs: time.Since(lb.startTime).Microseconds(),
-		NumPeers:    0,
-	}
-}
-
-// SpawnPoller starts a polling goroutine that monitors the Link session.
-// Returns command and event channels.
-func (lb *LinkBridge) SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent) {
+// SpawnLinkPoller starts a polling goroutine shared by both stub and real implementations.
+func SpawnLinkPoller(ctx context.Context, lb LinkBridgeInterface) (chan<- LinkCommand, <-chan LinkEvent) {
 	cmdCh := make(chan LinkCommand, 64)
 	eventCh := make(chan LinkEvent, 64)
 
@@ -215,32 +130,25 @@ func (lb *LinkBridge) SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-ch
 					}
 				}
 			case <-ticker.C:
-				// Check for tempo change
 				state := lb.State()
-				if bpm, changed := lb.detector.Check(state.BPM, time.Now()); changed {
+				if bpm, changed := lb.Detector().Check(state.BPM, time.Now()); changed {
 					select {
 					case eventCh <- LinkEvent{
-						Type:        "TempoChanged",
-						BPM:         bpm,
-						Beat:        state.Beat,
-						TimestampUs: state.TimestampUs,
+						Type: "TempoChanged", BPM: bpm,
+						Beat: state.Beat, TimestampUs: state.TimestampUs,
 					}:
 					default:
 					}
 				}
 
-				// Periodic state snapshot
 				snapshotCounter++
 				if snapshotCounter >= snapshotIntervalTicks {
 					snapshotCounter = 0
 					select {
 					case eventCh <- LinkEvent{
-						Type:        "StateUpdate",
-						BPM:         state.BPM,
-						Beat:        state.Beat,
-						Phase:       state.Phase,
-						Quantum:     state.Quantum,
-						TimestampUs: state.TimestampUs,
+						Type: "StateUpdate", BPM: state.BPM,
+						Beat: state.Beat, Phase: state.Phase,
+						Quantum: state.Quantum, TimestampUs: state.TimestampUs,
 					}:
 					default:
 					}
@@ -250,4 +158,15 @@ func (lb *LinkBridge) SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-ch
 	}()
 
 	return cmdCh, eventCh
+}
+
+// LinkBridgeInterface defines the methods needed by the poller.
+type LinkBridgeInterface interface {
+	Enable()
+	Disable()
+	SetTempo(bpm float64)
+	ForceBeat(beat float64, rttUs *int64)
+	State() LinkState
+	Detector() *TempoChangeDetector
+	SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent)
 }
