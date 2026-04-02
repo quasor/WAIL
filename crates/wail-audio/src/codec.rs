@@ -257,6 +257,10 @@ impl AudioDecoder {
     pub fn channels(&self) -> u16 {
         self.channels
     }
+
+    pub fn frame_size(&self) -> usize {
+        self.frame_size
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +430,47 @@ mod tests {
         let decoded = decoder.decode_frame(&[]).unwrap();
         // PLC should produce one frame worth of samples
         assert_eq!(decoded.len(), 960 * 2);
+    }
+
+    #[test]
+    fn plc_after_real_decode_produces_audio() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        let frame_size = encoder.frame_size();
+        let frame_samples = frame_size * channels as usize;
+
+        // Feed a real sine tone so the decoder has state to extrapolate from
+        let samples: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / channels as usize) as f32 / sample_rate as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        let _ = decoder.decode_frame(&opus_bytes).unwrap();
+
+        // Now trigger PLC — Opus should extrapolate from previous frame
+        let plc = decoder.decode_frame(&[]).unwrap();
+        assert_eq!(plc.len(), frame_samples);
+        let energy: f32 = plc.iter().map(|s| s * s).sum();
+        assert!(energy > 0.0, "PLC after real decode should have non-zero energy");
+    }
+
+    #[test]
+    fn plc_fallback_after_corrupt_data() {
+        let mut decoder = AudioDecoder::new(48000, 2).unwrap();
+        let frame_samples = 960 * 2;
+
+        // Feed corrupt data — decode should fail
+        let corrupt = vec![0xFF, 0x00, 0x42];
+        assert!(decoder.decode_frame(&corrupt).is_err());
+
+        // PLC should still work after a failed decode
+        let plc = decoder.decode_frame(&[]).unwrap();
+        assert_eq!(plc.len(), frame_samples);
     }
 
     #[test]

@@ -624,8 +624,35 @@ fn ipc_thread_recv(
                                                     Err(e) => {
                                                         tracing::warn!(
                                                             error = %e,
-                                                            "IPC recv: failed to decode Opus frame"
+                                                            "IPC recv: Opus decode failed, attempting PLC"
                                                         );
+                                                        let samples = match dec.decode_frame(&[]) {
+                                                            Ok(plc_samples) => {
+                                                                tracing::debug!(
+                                                                    len = plc_samples.len(),
+                                                                    "IPC recv: PLC generated samples"
+                                                                );
+                                                                plc_samples
+                                                            }
+                                                            Err(plc_err) => {
+                                                                tracing::warn!(
+                                                                    error = %plc_err,
+                                                                    "IPC recv: PLC also failed, inserting silence"
+                                                                );
+                                                                vec![0.0f32; dec.frame_size() * dec.channels() as usize]
+                                                            }
+                                                        };
+                                                        if let Err(e) = incoming_tx.try_send((
+                                                            peer_id.clone(),
+                                                            frame.stream_id,
+                                                            frame.interval_index,
+                                                            samples,
+                                                        )) {
+                                                            tracing::warn!(
+                                                                error = %e,
+                                                                "IPC recv: failed to send PLC frame to audio thread (channel full)"
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }

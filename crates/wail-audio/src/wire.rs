@@ -414,4 +414,33 @@ mod tests {
         data[0..4].copy_from_slice(b"NOPE");
         assert!(!rewrite_waif_interval_index(&mut data, 42));
     }
+
+    #[test]
+    fn frame_wire_empty_opus_data_roundtrip() {
+        let frame = crate::AudioFrame {
+            interval_index: 5,
+            stream_id: 1,
+            frame_number: 3,
+            channels: 2,
+            opus_data: vec![],
+            is_final: false,
+            sample_rate: 0,
+            total_frames: 0,
+            bpm: 0.0,
+            quantum: 0.0,
+            bars: 0,
+        };
+
+        let encoded = AudioFrameWire::encode(&frame);
+        // Header only, no opus bytes: 21 bytes
+        assert_eq!(encoded.len(), FRAME_HEADER_SIZE);
+
+        let decoded = AudioFrameWire::decode(&encoded).unwrap();
+        assert_eq!(decoded.interval_index, 5);
+        assert_eq!(decoded.stream_id, 1);
+        assert_eq!(decoded.frame_number, 3);
+        assert_eq!(decoded.channels, 2);
+        assert!(decoded.opus_data.is_empty());
+        assert!(!decoded.is_final);
+    }
 }
