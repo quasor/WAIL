@@ -4,6 +4,10 @@
 # It is copied automatically to the MostDistant/homebrew-wail tap on each release.
 # The `url` and `sha256` fields below are updated by the release workflow.
 #
+# Architecture: Go/Wails desktop app + Rust CLAP/VST3 plugins.
+# The app (session orchestration, Link sync, signaling) is built with Go.
+# The audio plugins (Opus encode/decode, DAW integration) remain in Rust.
+#
 # To install:
 #   brew tap MostDistant/wail
 #   brew install MostDistant/wail/wail
@@ -18,10 +22,13 @@ class Wail < Formula
   head "https://github.com/MostDistant/WAIL.git", branch: "main", submodules: true
 
   depends_on "cmake" => :build
+  depends_on "go" => :build
   depends_on "pkg-config" => :build
-  depends_on "rust" => :build
+  depends_on "rust" => :build # needed for CLAP/VST3 plugins only
   depends_on "opus"
-  depends_on :macos # requires macOS WebKit (used by Tauri)
+  depends_on "opusfile"
+  depends_on "rtmidi"
+  depends_on :macos # requires macOS WebKit (used by Wails webview)
 
   def install
     # Homebrew's superenv pkg-config shim references the legacy "pkg-config"
@@ -29,19 +36,32 @@ class Wail < Formula
     # pkg-config crate directly to the real binary so audiopus_sys finds Opus.
     ENV["PKG_CONFIG"] = Formula["pkgconf"].opt_bin/"pkg-config"
 
-    # CMake 4.x rejects old cmake_minimum_required() values in rusty_link's
-    # vendored Ableton Link SDK. This env var tells CMake to accept them.
+    # CMake 4.x rejects old cmake_minimum_required() values in the Ableton
+    # Link SDK. This env var tells CMake to accept them.
     ENV["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
 
-    # Build the main app binary.
-    # Note: this produces the raw wail-tauri binary, not a full .app bundle.
-    # For the polished macOS .app, use the DMG from the Releases page instead.
-    system "cargo", "build", "--release", "--package", "wail-tauri", "--locked"
-    system "cargo", "build", "--release", "--package", "wail-test-client", "--locked"
-    bin.install "target/release/wail-tauri" => "wail"
-    bin.install "target/release/wail-test-client"
+    # --- Go app (session orchestration, Link sync, signaling) ---
 
-    # Build plugin libraries first (separate --locked invocations, no nested cargo).
+    # Clone and build the abletonlink-go CGo dependency (Ableton Link 4 SDK).
+    # The package bundles Link as a git submodule and builds via CMake.
+    system "git", "clone", "--recursive",
+           "https://github.com/DatanoiseTV/abletonlink-go.git",
+           buildpath/"abletonlink-go-build"
+    system "bash", (buildpath/"abletonlink-go-build/build.sh").to_s
+
+    # Build the Go/Wails desktop app.
+    cd "wail-app" do
+      # Point the go.mod replace directive to the local abletonlink-go clone.
+      inreplace "go.mod",
+        /replace github\.com\/DatanoiseTV\/abletonlink-go\s*=>\s*.*/,
+        "replace github.com/DatanoiseTV/abletonlink-go => #{buildpath}/abletonlink-go-build"
+      system "go", "build", "-o", "wail", "."
+    end
+    bin.install "wail-app/wail"
+
+    # --- Rust plugins (CLAP/VST3 audio plugins for DAW integration) ---
+
+    # Build plugin libraries (separate invocations, no nested cargo).
     system "cargo", "build", "--release", "--locked", "--package", "wail-plugin-send", "--lib"
     system "cargo", "build", "--release", "--locked", "--package", "wail-plugin-recv", "--lib"
 
@@ -79,7 +99,6 @@ class Wail < Formula
   test do
     assert_predicate bin/"wail", :exist?
     assert_predicate bin/"wail-install-plugins", :exist?
-    assert_predicate bin/"wail-test-client", :exist?
     assert_predicate lib/"wail-plugin-send.clap", :exist?
     assert_predicate lib/"wail-plugin-recv.clap", :exist?
     assert_predicate lib/"wail-plugin-send.vst3", :exist?
