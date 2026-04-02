@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.26.2 (2026-04-02)
+
+### Fixes
+
+- add frame loss concealment when Opus encode/decode fails (#286)
+- upgrade sccache-action from v0.0.7 to v0.0.9 (#290)
+- auto-evict stale pending remote intervals in ring buffer (#269) (#289)
+
 ## 1.26.1 (2026-04-02)
 
 ### Fixes
