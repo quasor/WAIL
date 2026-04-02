@@ -1,6 +1,6 @@
 {
   "productName": "WAIL",
-  "version": "1.25.1",
+  "version": "1.26.0",
   "identifier": "com.wail.desktop",
   "build": {
     "frontendDist": "ui"

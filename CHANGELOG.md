@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.26.0 (2026-04-02)
+
+### Features
+
+- skip force_beat for same-LAN peers using public IP fingerprint (#260)
+- lock-free audio broadcast + docs cleanup (#277)
+
+### Fixes
+
+- remove unused reset_added_at method from PeerRegistry (#261)
+- surface audio frame drops from send_audio() backpressure (#278)
+- resolve P0 bugs — IPC OOM, reconnect hang, empty median (#262, #263, #264) (#279)
+- validate BPM and atomize peer identity reassignment (#281)
+
 ## 1.25.1 (2026-04-02)
 
 ### Fixes
