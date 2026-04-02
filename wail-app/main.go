@@ -72,7 +72,7 @@ func main() {
 		Title:  title,
 		Width:  480,
 		Height: 640,
-		URL:    "/frontend/index.html",
+		URL:    "/",
 	})
 
 	// Auto-join test room if requested

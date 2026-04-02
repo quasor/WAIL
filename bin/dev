@@ -2,4 +2,4 @@
 export RUST_LOG="${RUST_LOG:-info}"
 cargo xtask build-plugin
 cargo xtask install-plugin --debug
-exec cargo tauri dev -c crates/wail-tauri/tauri.conf.json "$@"
+cd wail-app && exec go run . "$@"

@@ -13,6 +13,21 @@
 (function() {
     'use strict';
 
+    // The Wails v3 runtime is injected via WebViewDidFinishNavigation, which fires
+    // AFTER all page scripts have executed. We need to wait for it before making calls.
+    let _wailsReady = null;
+    const wailsReady = new Promise(resolve => { _wailsReady = resolve; });
+
+    function pollForWails() {
+        if (typeof wails !== 'undefined' && wails.Call) {
+            console.log('[wails-adapter] Wails runtime detected');
+            _wailsReady();
+        } else {
+            setTimeout(pollForWails, 10);
+        }
+    }
+    pollForWails();
+
     // Map Tauri snake_case command names to Wails PascalCase method names on App.
     const commandMap = {
         'list_public_rooms': 'main.App.ListPublicRooms',
@@ -34,16 +49,16 @@
     // Wails Call.ByName takes positional args matching the Go method signature.
     // This mapping converts named args to positional for each command.
     const argOrder = {
-        'join_room': ['room', 'password', 'display_name', 'bpm', 'bars', 'quantum',
-                       'recording_enabled', 'recording_directory', 'recording_stems',
-                       'recording_retention_days', 'stream_count', 'test_mode'],
+        'join_room': ['room', 'password', 'displayName', 'bpm', 'bars', 'quantum',
+                       'recordingEnabled', 'recordingDirectory', 'recordingStems',
+                       'recordingRetentionDays', 'streamCount', 'testMode'],
         'change_bpm': ['bpm'],
         'send_chat': ['text'],
-        'set_test_tone': ['stream_index'],
+        'set_test_tone': ['streamIndex'],
         'set_telemetry': ['enabled'],
         'set_log_sharing': ['enabled'],
-        'cleanup_recordings': ['directory', 'retention_days'],
-        'rename_stream': ['stream_index', 'name'],
+        'cleanup_recordings': ['directory', 'retentionDays'],
+        'rename_stream': ['streamIndex', 'name'],
     };
 
     async function invoke(command, args) {
@@ -52,6 +67,9 @@
             console.warn('[wails-adapter] Unknown command:', command);
             throw new Error('Unknown command: ' + command);
         }
+
+        // Wait for Wails runtime to be injected
+        await wailsReady;
 
         // Convert named args to positional
         const order = argOrder[command];
@@ -74,13 +92,15 @@
     }
 
     function listen(eventName, callback) {
-        const cancel = wails.Events.On(eventName, function(event) {
-            // Wails CustomEvent has .data array; Tauri passes {payload: data}
-            const payload = event.data && event.data.length > 0 ? event.data[0] : null;
-            callback({ payload });
+        // Queue listener registration until Wails runtime is available
+        wailsReady.then(() => {
+            wails.Events.On(eventName, function(event) {
+                // Wails event.data is the payload directly (not an array)
+                callback({ payload: event.data });
+            });
         });
-        // Return a promise that resolves to an unlisten function (Tauri convention)
-        return Promise.resolve(cancel);
+        // Return a promise that resolves to a no-op unlisten (simplified)
+        return Promise.resolve(() => {});
     }
 
     // Provide __TAURI__ compatibility
@@ -94,5 +114,5 @@
         }
     };
 
-    console.log('[wails-adapter] Tauri API shim loaded');
+    console.log('[wails-adapter] Tauri API shim loaded (waiting for Wails runtime)');
 })();
