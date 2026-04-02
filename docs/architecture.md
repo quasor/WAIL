@@ -298,6 +298,8 @@ Two independent time domains exist in the system:
 
 12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
 
+13. **Lock-free audio broadcast via copy-on-write**: The signaling server uses per-room `atomic.Pointer[[]connEntry]` snapshots so the audio hot path (~50 frames/sec/peer) iterates the connection list without holding any lock. Mutations (join/leave) acquire the per-room `r.mu`, rebuild the slice, and store it atomically. To avoid data races on `conn.room`/`conn.peerID` fields (which are cleared during eviction and leave), broadcast functions receive `room` and `peerID` as value parameters captured once per join in `readPump`, rather than reading them from the shared `conn` struct.
+
 ## Session Metrics and Live Dashboard
 
 The signaling server tracks aggregate session metrics to monitor whether audio is flowing between peers.

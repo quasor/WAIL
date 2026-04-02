@@ -384,8 +384,7 @@ func (h *hub) archiveSession(roomName string, s *session) {
 // Hub methods
 // ---------------------------------------------------------------------------
 
-func (h *hub) join(c *conn, msg clientMsg) {
-	if c.room != "" { h.leave(c) }
+func (h *hub) join(c *conn, msg clientMsg) (string, string) {
 
 	roomName := msg.Room
 	peerID := msg.PeerID
@@ -394,7 +393,7 @@ func (h *hub) join(c *conn, msg clientMsg) {
 
 	if semverLess(msg.ClientVersion, minVersion) {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "version_outdated", "min_version": minVersion})
-		return
+		return "", ""
 	}
 
 	// DB queries BEFORE any room lock
@@ -406,7 +405,7 @@ func (h *hub) join(c *conn, msg clientMsg) {
 	if roomExists && storedHash.Valid && storedHash.String != "" {
 		if hashPassword(msg.Password) != storedHash.String {
 			c.sendJSON(map[string]any{"type": "join_error", "code": "unauthorized"})
-			return
+			return "", ""
 		}
 	}
 
@@ -415,7 +414,7 @@ func (h *hub) join(c *conn, msg clientMsg) {
 	h.db.QueryRow("SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ?", roomName).Scan(&usedSlots)
 	if usedSlots+streamCount > roomCapacity {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "room_full", "slots_available": roomCapacity - usedSlots})
-		return
+		return "", ""
 	}
 
 	if !roomExists {
@@ -496,51 +495,54 @@ func (h *hub) join(c *conn, msg clientMsg) {
 		"type": "join_ok", "peers": peers, "peer_display_names": peerDisplayNames,
 		"lan_peer_present": lanPeerPresent,
 	})
+	return roomName, peerID
 }
 
-func (h *hub) signal(c *conn, msg clientMsg) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+func (h *hub) signal(room, peerID string, c *conn, msg clientMsg) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
 	for _, e := range r.loadConns() {
 		if e.peerID == msg.To {
-			e.c.sendJSON(map[string]any{"type": "signal", "to": msg.To, "from": c.peerID, "payload": msg.Payload})
+			e.c.sendJSON(map[string]any{"type": "signal", "to": msg.To, "from": peerID, "payload": msg.Payload})
 			return
 		}
 	}
 }
 
-func (h *hub) broadcastSync(c *conn, msg clientMsg) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
-	raw, err := json.Marshal(map[string]any{"type": "sync", "from": c.peerID, "payload": msg.Payload})
+	raw, err := json.Marshal(map[string]any{"type": "sync", "from": peerID, "payload": msg.Payload})
 	if err != nil { return }
 	wsMsg := wsMessage{websocket.TextMessage, raw}
 	for _, e := range r.loadConns() {
-		if e.peerID != c.peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID { e.c.sendWS(wsMsg) }
 	}
 }
 
-func (h *hub) syncTo(c *conn, msg clientMsg) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+func (h *hub) syncTo(room, peerID string, c *conn, msg clientMsg) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
 	for _, e := range r.loadConns() {
 		if e.peerID == msg.To {
-			e.c.sendJSON(map[string]any{"type": "sync", "from": c.peerID, "payload": msg.Payload})
+			e.c.sendJSON(map[string]any{"type": "sync", "from": peerID, "payload": msg.Payload})
 			return
 		}
 	}
 }
 
 // broadcastAudioBinary is the hot path (~50 calls/sec/peer). No locks held during iteration.
-func (h *hub) broadcastAudioBinary(c *conn, data []byte) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+// room and peerID are passed as value parameters captured by readPump at join time,
+// avoiding unsynchronized reads of c.room/c.peerID (which may be cleared by eviction/leave).
+func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
 
-	pidBytes := []byte(c.peerID)
+	pidBytes := []byte(peerID)
 	frame := make([]byte, 1+len(pidBytes)+len(data))
 	frame[0] = byte(len(pidBytes))
 	copy(frame[1:1+len(pidBytes)], pidBytes)
@@ -548,28 +550,28 @@ func (h *hub) broadcastAudioBinary(c *conn, data []byte) {
 
 	wsMsg := wsMessage{websocket.BinaryMessage, frame}
 	for _, e := range r.loadConns() {
-		if e.peerID != c.peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID { e.c.sendWS(wsMsg) }
 	}
 }
 
-func (h *hub) broadcastLog(c *conn, msg clientMsg) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
 	raw, err := json.Marshal(map[string]any{
-		"type": "log", "from": c.peerID, "level": msg.Level,
+		"type": "log", "from": peerID, "level": msg.Level,
 		"target": msg.Target, "message": msg.Message, "timestamp_us": msg.TimestampUs,
 	})
 	if err != nil { return }
 	wsMsg := wsMessage{websocket.TextMessage, raw}
 	for _, e := range r.loadConns() {
-		if e.peerID != c.peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID { e.c.sendWS(wsMsg) }
 	}
 }
 
-func (h *hub) metricsReport(c *conn, msg clientMsg) {
-	if c.room == "" { return }
-	r := h.getRoom(c.room)
+func (h *hub) metricsReport(room, peerID string, c *conn, msg clientMsg) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil { return }
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -579,19 +581,17 @@ func (h *hub) metricsReport(c *conn, msg clientMsg) {
 	if msg.DcOpen != nil { dcOpen = *msg.DcOpen }
 	pluginConnected := false
 	if msg.PluginConnected != nil { pluginConnected = *msg.PluginConnected }
-	s.updateMetrics(c.peerID, dcOpen, pluginConnected, msg.PerPeer)
+	s.updateMetrics(peerID, dcOpen, pluginConnected, msg.PerPeer)
 }
 
-func (h *hub) leave(c *conn) {
-	roomName := c.room
-	if roomName == "" { return }
-	r := h.getRoom(roomName)
+func (h *hub) leave(room, peerID string, c *conn) {
+	if room == "" { return }
+	r := h.getRoom(room)
 	if r == nil {
 		c.room = ""
 		c.peerID = ""
 		return
 	}
-	peerID := c.peerID
 
 	r.mu.Lock()
 	if cur, ok := r.connMap[peerID]; ok && cur == c {
@@ -608,7 +608,7 @@ func (h *hub) leave(c *conn) {
 				log.Printf("[metrics] session %s ended (peer %s left, %d remaining)", s.ID, peerID, peerCountAfter)
 				r.activeSession = nil
 				r.mu.Unlock()
-				h.archiveSession(roomName, s)
+				h.archiveSession(room, s)
 			} else {
 				r.mu.Unlock()
 			}
@@ -619,7 +619,7 @@ func (h *hub) leave(c *conn) {
 		r.mu.Unlock()
 	}
 
-	h.db.Exec("DELETE FROM peers WHERE room = ? AND peer_id = ?", roomName, peerID)
+	h.db.Exec("DELETE FROM peers WHERE room = ? AND peer_id = ?", room, peerID)
 	c.room = ""
 	c.peerID = ""
 
@@ -627,8 +627,8 @@ func (h *hub) leave(c *conn) {
 	empty := len(r.connMap) == 0
 	r.mu.Unlock()
 	if empty {
-		h.deleteRoom(roomName)
-		h.db.Exec("DELETE FROM rooms WHERE room = ?", roomName)
+		h.deleteRoom(room)
+		h.db.Exec("DELETE FROM rooms WHERE room = ?", room)
 	}
 }
 
@@ -678,8 +678,12 @@ func (c *conn) writePump() {
 }
 
 func (c *conn) readPump(h *hub) {
+	// room and peerID are cached locally after join so that broadcast functions
+	// never read c.room/c.peerID directly — avoiding a data race with the
+	// eviction path in join() and the cleanup in leave().
+	var room, peerID string
 	defer func() {
-		h.leave(c)
+		h.leave(room, peerID, c)
 		func() { defer func() { recover() }(); close(c.send) }()
 		c.ws.Close()
 	}()
@@ -687,8 +691,8 @@ func (c *conn) readPump(h *hub) {
 	c.ws.SetReadDeadline(time.Now().Add(pongWait))
 	c.ws.SetPongHandler(func(string) error {
 		c.ws.SetReadDeadline(time.Now().Add(pongWait))
-		if c.room != "" {
-			h.db.Exec("UPDATE peers SET last_seen = ? WHERE room = ? AND peer_id = ?", time.Now().Unix(), c.room, c.peerID)
+		if room != "" {
+			h.db.Exec("UPDATE peers SET last_seen = ? WHERE room = ? AND peer_id = ?", time.Now().Unix(), room, peerID)
 		}
 		return nil
 	})
@@ -696,26 +700,28 @@ func (c *conn) readPump(h *hub) {
 		msgType, raw, err := c.ws.ReadMessage()
 		if err != nil { return }
 		if msgType == websocket.BinaryMessage {
-			h.broadcastAudioBinary(c, raw)
+			h.broadcastAudioBinary(room, peerID, c, raw)
 			continue
 		}
 		var msg clientMsg
 		if err := json.Unmarshal(raw, &msg); err != nil { continue }
 		switch msg.Type {
 		case "join":
-			h.join(c, msg)
+			if room != "" { h.leave(room, peerID, c) }
+			room, peerID = h.join(c, msg)
 		case "signal":
-			h.signal(c, msg)
+			h.signal(room, peerID, c, msg)
 		case "sync":
-			h.broadcastSync(c, msg)
+			h.broadcastSync(room, peerID, c, msg)
 		case "sync_to":
-			h.syncTo(c, msg)
+			h.syncTo(room, peerID, c, msg)
 		case "log":
-			h.broadcastLog(c, msg)
+			h.broadcastLog(room, peerID, c, msg)
 		case "leave":
-			h.leave(c)
+			h.leave(room, peerID, c)
+			room, peerID = "", ""
 		case "metrics_report":
-			h.metricsReport(c, msg)
+			h.metricsReport(room, peerID, c, msg)
 		}
 	}
 }
