@@ -1,0 +1,289 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sync"
+)
+
+const signalingURL = "wss://wail-signal.fly.dev"
+
+// App is the Wails application backend. All exported methods are callable from the frontend.
+type App struct {
+	mu           sync.Mutex
+	session      *SessionHandle
+	emitter      EventEmitter
+	identity     string
+	ipcPort      uint16
+	streamNames  map[uint16]string
+	dataDir      string
+}
+
+// NewApp creates a new App instance.
+func NewApp() *App {
+	dataDir := defaultDataDir()
+	os.MkdirAll(dataDir, 0o755)
+	identity := getOrCreateIdentity(dataDir)
+
+	return &App{
+		ipcPort:     9191,
+		streamNames: make(map[uint16]string),
+		dataDir:     dataDir,
+		identity:    identity,
+	}
+}
+
+// SetEmitter sets the event emitter (called during Wails setup).
+func (a *App) SetEmitter(emitter EventEmitter) {
+	a.emitter = emitter
+}
+
+// --- Frontend-callable methods (Wails bindings) ---
+
+type JoinResult struct {
+	PeerID string  `json:"peer_id"`
+	Room   string  `json:"room"`
+	BPM    float64 `json:"bpm"`
+}
+
+type PublicRoomInfo struct {
+	Room         string   `json:"room"`
+	PeerCount    uint32   `json:"peer_count"`
+	BPM          *float64 `json:"bpm,omitempty"`
+	DisplayNames []string `json:"display_names"`
+	CreatedAt    int64    `json:"created_at"`
+}
+
+// ListPublicRooms fetches public rooms from the signaling server.
+func (a *App) ListPublicRooms() ([]PublicRoomInfo, error) {
+	rooms, err := ListPublicRooms(signalingURL)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]PublicRoomInfo, len(rooms))
+	for i, r := range rooms {
+		result[i] = PublicRoomInfo{
+			Room: r.Room, PeerCount: r.PeerCount, BPM: r.BPM,
+			DisplayNames: r.DisplayNames, CreatedAt: r.CreatedAt,
+		}
+	}
+	return result, nil
+}
+
+// JoinRoom joins a room and starts a session.
+func (a *App) JoinRoom(
+	room string,
+	password *string,
+	displayName string,
+	bpm *float64,
+	bars *uint32,
+	quantum *float64,
+	recordingEnabled *bool,
+	recordingDirectory *string,
+	recordingStems *bool,
+	recordingRetentionDays *uint32,
+	streamCount *uint16,
+	testMode *bool,
+) (*JoinResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.session != nil {
+		return nil, fmt.Errorf("already in a session — disconnect first")
+	}
+
+	actualBPM := 120.0
+	if bpm != nil {
+		actualBPM = *bpm
+	}
+	actualBars := uint32(4)
+	if bars != nil {
+		actualBars = *bars
+	}
+	actualQuantum := 4.0
+	if quantum != nil {
+		actualQuantum = *quantum
+	}
+	actualStreamCount := uint16(1)
+	if streamCount != nil {
+		actualStreamCount = *streamCount
+	}
+	actualTestMode := false
+	if testMode != nil {
+		actualTestMode = *testMode
+	}
+
+	var recording *RecordingConfig
+	if recordingEnabled != nil && *recordingEnabled {
+		dir := ""
+		if recordingDirectory != nil {
+			dir = *recordingDirectory
+		} else {
+			if d, err := DefaultRecordingDir(); err == nil {
+				dir = d
+			}
+		}
+		stems := false
+		if recordingStems != nil {
+			stems = *recordingStems
+		}
+		retention := uint32(30)
+		if recordingRetentionDays != nil {
+			retention = *recordingRetentionDays
+		}
+		recording = &RecordingConfig{
+			Enabled: true, Directory: dir, Stems: stems, RetentionDays: retention,
+		}
+	}
+
+	config := SessionConfig{
+		Server:      signalingURL,
+		Room:        room,
+		Password:    password,
+		DisplayName: displayName,
+		Identity:    a.identity,
+		BPM:         actualBPM,
+		Bars:        actualBars,
+		Quantum:     actualQuantum,
+		IPCPort:     a.ipcPort,
+		Recording:   recording,
+		StreamCount: actualStreamCount,
+		TestMode:    actualTestMode,
+	}
+
+	handle, err := SpawnSession(a.emitter, config)
+	if err != nil {
+		return nil, err
+	}
+	a.session = handle
+
+	return &JoinResult{PeerID: handle.PeerID, Room: handle.Room, BPM: actualBPM}, nil
+}
+
+// Disconnect ends the current session.
+func (a *App) Disconnect() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "Disconnect"}
+		a.session = nil
+		log.Println("[app] Disconnect command sent")
+	}
+	return nil
+}
+
+// ChangeBPM sends a BPM change command.
+func (a *App) ChangeBPM(bpm float64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "ChangeBpm", BPM: bpm}
+	}
+	return nil
+}
+
+// SendChat sends a chat message.
+func (a *App) SendChat(text string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SendChat", Text: text}
+	}
+	return nil
+}
+
+// SetTestTone controls the test tone generator.
+func (a *App) SetTestTone(streamIndex *uint16) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetTestTone", StreamIndex: streamIndex}
+	}
+	return nil
+}
+
+// GetDefaultRecordingDir returns the default recording directory.
+func (a *App) GetDefaultRecordingDir() (string, error) {
+	return DefaultRecordingDir()
+}
+
+type CleanupResult struct {
+	DeletedCount uint32 `json:"deleted_count"`
+	FreedBytes   uint64 `json:"freed_bytes"`
+}
+
+// CleanupRecordings deletes old recording sessions.
+func (a *App) CleanupRecordings(directory string, retentionDays uint32) (*CleanupResult, error) {
+	deleted, freed, err := CleanupOldSessions(directory, retentionDays)
+	if err != nil {
+		return nil, err
+	}
+	return &CleanupResult{DeletedCount: deleted, FreedBytes: freed}, nil
+}
+
+// GetActiveSession returns the current session info, if any.
+func (a *App) GetActiveSession() *JoinResult {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return nil
+	}
+	return &JoinResult{PeerID: a.session.PeerID, Room: a.session.Room, BPM: 120.0}
+}
+
+// RenameStream updates a stream name.
+func (a *App) RenameStream(streamIndex uint16, name string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	trimmed := name
+	if len(trimmed) > 32 {
+		trimmed = trimmed[:32]
+	}
+	if trimmed == "" {
+		delete(a.streamNames, streamIndex)
+	} else {
+		a.streamNames[streamIndex] = trimmed
+	}
+
+	if a.session != nil {
+		snapshot := make(map[uint16]string, len(a.streamNames))
+		for k, v := range a.streamNames {
+			snapshot[k] = v
+		}
+		a.session.CmdCh <- SessionCommand{Type: "StreamNamesChanged", Names: snapshot}
+	}
+	return nil
+}
+
+// --- Identity management ---
+
+func getOrCreateIdentity(dataDir string) string {
+	idPath := filepath.Join(dataDir, "identity")
+	data, err := os.ReadFile(idPath)
+	if err == nil && len(data) > 0 {
+		return string(data)
+	}
+	// Generate a new identity
+	id := fmt.Sprintf("%x", generateIdentityBytes())
+	os.WriteFile(idPath, []byte(id), 0o644)
+	return id
+}
+
+func generateIdentityBytes() [16]byte {
+	var b [16]byte
+	t := uint64(0)
+	// Simple time-based UUID-ish
+	for i := range b {
+		t = t*6364136223846793005 + 1442695040888963407
+		b[i] = byte(t >> 32)
+	}
+	return b
+}
+
+func defaultDataDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".wail")
+}
