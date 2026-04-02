@@ -194,11 +194,17 @@ impl PeerRegistry {
         }
     }
 
-    /// Re-key all slots assigned under `peer_id` (fallback) to use `identity` (persistent UUID).
-    /// Call after setting peer.identity in the Hello handler to fix slots that were assigned
-    /// via the audio DataChannel before Hello arrived on the sync DataChannel.
-    pub fn rekey_peer_slots(&mut self, peer_id: &str, identity: &str) {
-        self.slots.rekey_client(peer_id, identity);
+    /// Atomically set peer identity and rekey slots in one operation.
+    /// Eliminates the race window where `assign_slot()` could observe identity
+    /// set but slots not yet rekeyed.
+    pub fn update_peer_identity(&mut self, peer_id: &str, identity: &str) -> bool {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.identity = Some(identity.to_string());
+            self.slots.rekey_client(peer_id, identity);
+            true
+        } else {
+            false
+        }
     }
 
     /// Find the peer_id of a peer with the given identity, if any.
@@ -441,21 +447,20 @@ mod tests {
     }
 
     #[test]
-    fn rekey_peer_slots_fixes_audio_before_hello_race() {
+    fn update_peer_identity_atomic_rekey() {
         let mut reg = PeerRegistry::new();
-        // Peer joins; no identity yet (Hello not received)
         reg.add("peer1".to_string(), None);
-
-        // Audio arrives before Hello — slot assigned under peer_id as client_id
+        // Audio arrives before Hello — slot assigned under peer_id
         let slot = reg.assign_slot("peer1", 0).unwrap();
         assert_eq!(slot, 0);
 
-        // Hello arrives — identity now known; rekey fixes the slot
-        reg.get_mut("peer1").unwrap().identity = Some("uuid-alice".to_string());
-        reg.rekey_peer_slots("peer1", "uuid-alice");
-
-        // find_by_identity should now resolve the peer
+        // Atomic identity + rekey
+        assert!(reg.update_peer_identity("peer1", "uuid-alice"));
         assert_eq!(reg.find_by_identity("uuid-alice"), Some("peer1".to_string()));
+        assert_eq!(reg.get("peer1").unwrap().identity.as_deref(), Some("uuid-alice"));
+
+        // Unknown peer returns false
+        assert!(!reg.update_peer_identity("ghost", "uuid-ghost"));
     }
 
     #[test]

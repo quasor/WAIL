@@ -135,6 +135,10 @@ impl LinkBridge {
 
     /// Apply a remote tempo change to the local Link session.
     pub fn set_tempo(&mut self, bpm: f64) {
+        if !bpm.is_finite() || bpm <= 0.0 {
+            warn!(bpm, "Rejecting invalid BPM");
+            return;
+        }
         let time = self.link.clock_micros();
         self.link.capture_app_session_state(&mut self.session_state);
         self.session_state.set_tempo(bpm, time);
