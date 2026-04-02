@@ -73,6 +73,7 @@ func main() {
 		Width:  480,
 		Height: 640,
 		URL:    "/",
+		Icon:   "/logo.png",
 	})
 
 	// Auto-join test room if requested
