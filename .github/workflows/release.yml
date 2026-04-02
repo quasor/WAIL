@@ -51,6 +51,9 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -58,6 +61,8 @@ jobs:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: Swatinem/rust-cache@v2
 
@@ -134,6 +139,9 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -141,6 +149,8 @@ jobs:
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       - uses: Swatinem/rust-cache@v2
 
