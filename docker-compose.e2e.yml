@@ -21,24 +21,6 @@ services:
       timeout: 5s
       retries: 10
 
-  coturn:
-    image: coturn/coturn:latest
-    restart: unless-stopped
-    command: >
-      -n
-      --log-file=stdout
-      --lt-cred-mech
-      --fingerprint
-      --realm=wail-test
-      --user=wail:wail
-      --listening-port=3478
-      --min-port=49152
-      --max-port=49252
-      --no-tls
-      --no-dtls
-    networks:
-      - net-infra
-
   peer-a:
     build:
       context: .
@@ -61,10 +43,6 @@ services:
       --bpm 120
       --bars 4
       --quantum 4.0
-      --relay-only
-      --turn-url turn:coturn:3478
-      --turn-user wail
-      --turn-credential wail
     networks:
       net-a: {}
       net-infra: {}
@@ -94,10 +72,6 @@ services:
       --bpm 120
       --bars 4
       --quantum 4.0
-      --relay-only
-      --turn-url turn:coturn:3478
-      --turn-user wail
-      --turn-credential wail
       --validate
       --validate-intervals ${VALIDATE_INTERVALS:-4}
       --validate-timeout ${VALIDATE_TIMEOUT:-120}

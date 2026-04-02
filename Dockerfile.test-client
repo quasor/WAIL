@@ -5,6 +5,7 @@ FROM rust:1.88-bookworm AS builder
 RUN apt-get update && apt-get install -y cmake g++ libopus-dev pkg-config libclang-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY . .
+ENV RUSTC_WRAPPER=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build -p wail-test-client --release && \
