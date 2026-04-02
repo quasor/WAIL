@@ -543,6 +543,8 @@ func sessionLoop(
 
 			// Track frame metrics
 			if header := PeekWaifHeader(data); header != nil {
+				var dn *string
+				var streamName *string
 				peers.WithPeer(from, func(p *PeerState) {
 					p.TotalFramesReceived++
 					var intervalExpected uint64
@@ -562,6 +564,25 @@ func sessionLoop(
 					if lastIntervalIndex != nil && header.IntervalIndex < *lastIntervalIndex-1 {
 						p.LateFrames++
 					}
+					dn = p.DisplayName
+					if n, ok := p.StreamNames[header.StreamID]; ok {
+						streamName = &n
+					}
+				})
+				var arrivalOffsetMs float64
+				if lastBoundaryTime != nil {
+					arrivalOffsetMs = float64(time.Since(*lastBoundaryTime).Milliseconds())
+				}
+				var totalFrames *uint32
+				if header.IsFinal {
+					tf := header.TotalFrames
+					totalFrames = &tf
+				}
+				emitter.Emit("debug:interval-frame", DebugIntervalFrame{
+					PeerID: from, DisplayName: dn, StreamIndex: header.StreamID,
+					StreamName: streamName, IntervalIndex: header.IntervalIndex,
+					FrameNumber: header.FrameNumber, TotalFrames: totalFrames,
+					IsFinal: header.IsFinal, ArrivalOffsetMs: arrivalOffsetMs,
 				})
 			}
 
@@ -636,6 +657,7 @@ func sessionLoop(
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
 				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh)
+				emitter.Emit("debug:link-tick", LinkTickEvent{BPM: ev.BPM, Beat: ev.Beat, Phase: ev.Phase})
 			}
 
 		// --- Ping timer ---
@@ -786,21 +808,47 @@ func sessionLoop(
 			audioStatusSeq++
 			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, !ipcPool.IsEmpty() || config.TestMode, audioStatusSeq))
 
-			// Send metrics
+			// Send metrics + build network event
 			perPeer := make(map[string]PeerFrameReport)
+			networkInfos := make([]PeerNetworkInfo, 0, len(connected))
 			for _, p := range connected {
 				var fe, fr, lf uint64
+				var audioRecv uint64
 				peers.WithPeer(p, func(ps *PeerState) {
 					fe = ps.TotalFramesExpected
 					fr = ps.TotalFramesReceived
 					lf = ps.LateFrames
+					audioRecv = ps.AudioRecvCount
 				})
 				perPeer[p] = PeerFrameReport{
 					FramesExpected: fe, FramesReceived: fr,
 					RTTUs: clock.RTTUs(p), JitterUs: clock.JitterUs(p),
 					LateFrames: lf,
 				}
+				var dn *string
+				var rttMs *float64
+				var slot *uint32
+				for _, pi := range peerInfos {
+					if pi.PeerID == p {
+						dn = pi.DisplayName
+						rttMs = pi.RTTMs
+						slot = pi.Slot
+						break
+					}
+				}
+				status := peers.DeriveStatus(p)
+				var framePct float64
+				if fe > 0 {
+					framePct = float64(fr) / float64(fe) * 100.0
+				}
+				networkInfos = append(networkInfos, PeerNetworkInfo{
+					PeerID: p, DisplayName: dn, Slot: slot,
+					ICEState: status, DCSyncState: status, DCAudioState: status,
+					RTTMs: rttMs, AudioRecv: audioRecv,
+					FramesExpected: fe, FramesReceived: fr, FramePct: framePct,
+				})
 			}
+			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
 			_ = ipcDropCount.Load()
 			mesh.SendMetricsReport(dcOpen, !ipcPool.IsEmpty() || config.TestMode, perPeer, ipcDropCount.Load(), boundaryDriftUs)
 		}

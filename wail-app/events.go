@@ -127,3 +127,9 @@ type ChatMessageEvent struct {
 type SessionStale struct {
 	Attempts uint32 `json:"attempts"`
 }
+
+type LinkTickEvent struct {
+	BPM   float64 `json:"bpm"`
+	Beat  float64 `json:"beat"`
+	Phase float64 `json:"phase"`
+}
