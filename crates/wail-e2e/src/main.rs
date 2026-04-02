@@ -232,7 +232,7 @@ async fn wait_for_peer(mesh: &mut PeerMesh) -> Result<String> {
                 info!(peer = %rid, name = ?display_name, "Peer joined");
                 return Ok(rid);
             }
-            Ok(Ok(Some(MeshEvent::PeerListReceived(_)))) => {
+            Ok(Ok(Some(MeshEvent::PeerListReceived { .. }))) => {
                 // After join, check if any peers were already in the room
                 if let Some(rid) = mesh.connected_peers().into_iter().next() {
                     return Ok(rid);

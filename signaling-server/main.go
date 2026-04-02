@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,10 +82,11 @@ type wsMessage struct {
 
 // conn wraps a single WebSocket connection that has joined a room.
 type conn struct {
-	ws     *websocket.Conn
-	room   string
-	peerID string
-	send   chan wsMessage
+	ws       *websocket.Conn
+	room     string
+	peerID   string
+	send     chan wsMessage
+	publicIP string // client's public IP for LAN detection
 }
 
 // ---------------------------------------------------------------------------
@@ -480,11 +483,28 @@ func (h *hub) join(c *conn, msg clientMsg) {
 		}
 	}
 
+	// Check if any existing peer shares the joiner's public IP (same LAN)
+	lanPeerPresent := false
+	if roomConns, ok := h.rooms[room]; ok {
+		for id, rc := range roomConns {
+			if id != peerID && rc.publicIP == c.publicIP {
+				lanPeerPresent = true
+				ipPrefix := c.publicIP
+				if len(ipPrefix) > 8 {
+					ipPrefix = ipPrefix[:8]
+				}
+				log.Printf("peer %s shares LAN with existing peer %s (IP prefix: %s…)", peerID, id, ipPrefix)
+				break
+			}
+		}
+	}
+
 	// Send join_ok
 	c.sendJSON(map[string]any{
 		"type":               "join_ok",
 		"peers":              peers,
 		"peer_display_names": peerDisplayNames,
+		"lan_peer_present":   lanPeerPresent,
 	})
 }
 
@@ -806,6 +826,22 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// clientIP extracts the client's public IP from the request, checking
+// proxy headers (fly.io, standard) before falling back to RemoteAddr.
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("Fly-Client-IP"); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 func handleWS(h *hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -814,8 +850,9 @@ func handleWS(h *hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	c := &conn{
-		ws:   ws,
-		send: make(chan wsMessage, 256),
+		ws:       ws,
+		send:     make(chan wsMessage, 256),
+		publicIP: clientIP(r),
 	}
 
 	go c.writePump()

@@ -27,6 +27,8 @@ pub struct PeerMesh {
     initial_peer_names: HashMap<String, Option<String>>,
     /// Cumulative count of audio frames dropped due to outgoing channel backpressure.
     audio_send_drops: Arc<AtomicU64>,
+    /// True if another peer from the same public IP (LAN) is already in the room.
+    lan_peer_present: bool,
 }
 
 impl PeerMesh {
@@ -45,7 +47,7 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        let (signaling, channels, initial_peer_names) = SignalingClient::connect_with_options(
+        let (signaling, channels, initial_peer_names, lan_peer_present) = SignalingClient::connect_with_options(
             server_url, room, peer_id, password, stream_count, display_name,
         ).await?;
 
@@ -57,6 +59,7 @@ impl PeerMesh {
             stream_count,
             initial_peer_names,
             audio_send_drops: Arc::new(AtomicU64::new(0)),
+            lan_peer_present,
         };
 
         Ok((mesh, channels.sync_rx, channels.audio_rx))
@@ -111,7 +114,7 @@ impl PeerMesh {
                         self.peers.insert(remote_id);
                     }
                 }
-                Ok(Some(MeshEvent::PeerListReceived(peer_count)))
+                Ok(Some(MeshEvent::PeerListReceived { count: peer_count, lan_peer_present: self.lan_peer_present }))
             }
 
             SignalMessage::PeerJoined { peer_id: remote_id, display_name } => {
@@ -226,7 +229,7 @@ impl PeerMesh {
         // Suppress the automatic `leave` on the old WebSocket
         self.signaling.suppress_leave_on_close();
 
-        let (new_signaling, channels, initial_peer_names) = SignalingClient::connect_with_options(
+        let (new_signaling, channels, initial_peer_names, _lan_peer_present) = SignalingClient::connect_with_options(
             server_url, room, &self.peer_id, password, self.stream_count, display_name,
         ).await?;
 
@@ -259,7 +262,7 @@ impl PeerMesh {
 /// Events from the peer mesh.
 #[derive(Debug)]
 pub enum MeshEvent {
-    PeerListReceived(usize),
+    PeerListReceived { count: usize, lan_peer_present: bool },
     PeerJoined {
         peer_id: String,
         display_name: Option<String>,

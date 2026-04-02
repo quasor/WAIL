@@ -357,6 +357,7 @@ async fn session_loop(
     let mut last_broadcast_bpm: f64 = bpm;
     let mut initial_beat_synced = false;
     let mut is_joiner = false;
+    let mut skip_force_beat = false;
 
     // One-shot logging flags for audio transmission milestones
     let mut logged_first_frame_sent = false;
@@ -790,12 +791,17 @@ async fn session_loop(
                         remove_peer_fully(&mut peers, &mut ipc_pool, &pid).await;
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
-                    Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
+                    Ok(Some(wail_net::MeshEvent::PeerListReceived { count: n, lan_peer_present })) => {
                         // Seed liveness for initial peers so the watchdog can
                         // detect peers that connect but never send any messages.
                         peers.seed_last_seen();
                         is_joiner = n > 0;
-                        ui_info!(&app, "Joined room with {n} peer(s)");
+                        skip_force_beat = lan_peer_present;
+                        if lan_peer_present {
+                            ui_info!(&app, "Joined room with {n} peer(s) — LAN peer detected, will rely on Link sync");
+                        } else {
+                            ui_info!(&app, "Joined room with {n} peer(s)");
+                        }
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLogBroadcast { from, level, message, .. })) => {
                         if ws_log_handle.is_enabled() {
@@ -981,12 +987,16 @@ async fn session_loop(
                     SyncMessage::StateSnapshot { bpm: remote_bpm, beat: remote_beat, .. } => {
                         if !initial_beat_synced {
                             initial_beat_synced = true;
-                            if is_joiner {
+                            if is_joiner && !skip_force_beat {
                                 ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
                                 let rtt_us = clock.rtt_us(&from);
                                 if link_cmd_tx.send(LinkCommand::ForceBeat { beat: remote_beat, rtt_us }).is_err() {
                                     ui_warn!(&app, "Link bridge stopped — cannot force beat");
                                 }
+                                let new_idx = compute_interval_index(remote_beat, interval_bars, interval_quantum);
+                                last_interval_index = Some(new_idx);
+                            } else if is_joiner && skip_force_beat {
+                                ui_info!(&app, "Beat sync — LAN peer already in room, relying on Link sync");
                                 let new_idx = compute_interval_index(remote_beat, interval_bars, interval_quantum);
                                 last_interval_index = Some(new_idx);
                             } else {

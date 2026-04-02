@@ -212,11 +212,17 @@ App→Recv Plugin: AudioInterval (tag 0x01) with peer_id identifying the remote 
 ```
 1. Peer connects to WebSocket signaling server, sends join (with room password, stream_count, client_version)
    - Server rejects outdated clients with join_error code "version_outdated"
-2. Server replies with join_ok containing list of existing peers
+2. Server replies with join_ok containing list of existing peers and lan_peer_present flag
 3. All sync and audio data flows through the server (no direct P2P connections)
    - Sync: JSON text frames relayed via "sync" / "sync_to" message types
    - Audio: binary WebSocket frames relayed with sender header prepended by server
 ```
+
+### LAN Peer Detection
+
+The signaling server records each client's public IP (from `Fly-Client-IP`, `X-Forwarded-For`, or `RemoteAddr`). When a peer joins a room, the server checks whether any existing peer shares the same public IP — indicating they are on the same LAN. The `join_ok` response includes a `lan_peer_present` boolean.
+
+When `lan_peer_present` is true, the joining peer skips the `ForceBeat` command that normally snaps its beat position to the room owner's. This is because Ableton Link already handles beat/phase synchronization natively over LAN multicast — applying `ForceBeat` on top would conflict with Link's own sync and cause a double-correction.
 
 ## Interval Boundaries
 

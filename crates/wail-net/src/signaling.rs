@@ -107,6 +107,8 @@ enum ServerMsg {
         peers: Vec<String>,
         #[serde(default)]
         peer_display_names: HashMap<String, Option<String>>,
+        #[serde(default)]
+        lan_peer_present: bool,
     },
     #[serde(rename = "join_error")]
     JoinError {
@@ -171,7 +173,7 @@ impl SignalingClient {
         room: &str,
         peer_id: &str,
         password: Option<&str>,
-    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>)> {
+    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>, bool)> {
         Self::connect_with_options(server_url, room, peer_id, password, 1, None).await
     }
 
@@ -186,7 +188,7 @@ impl SignalingClient {
         password: Option<&str>,
         stream_count: u16,
         display_name: Option<&str>,
-    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>)> {
+    ) -> Result<(Self, SignalingChannels, HashMap<String, Option<String>>, bool)> {
         let ws_url = format!("{}/ws", server_url.trim_end_matches('/'));
 
         let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
@@ -226,11 +228,12 @@ impl SignalingClient {
             }
         };
 
-        let (peers, initial_peer_names) = match join_response {
+        let (peers, initial_peer_names, lan_peer_present) = match join_response {
             ServerMsg::JoinOk {
                 peers,
                 peer_display_names,
-            } => (peers, peer_display_names),
+                lan_peer_present,
+            } => (peers, peer_display_names, lan_peer_present),
             ServerMsg::JoinError {
                 code,
                 min_version,
@@ -467,6 +470,7 @@ impl SignalingClient {
             },
             channels,
             initial_peer_names,
+            lan_peer_present,
         ))
     }
 }
