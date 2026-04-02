@@ -3,6 +3,29 @@ pub const IPC_ROLE_SEND: u8 = 0x00;
 /// IPC role byte sent by plugins on connect to identify themselves.
 pub const IPC_ROLE_RECV: u8 = 0x01;
 
+/// Maximum IPC frame payload size (16 MB). Frames declaring a larger payload
+/// are rejected to prevent OOM from malicious or corrupt length prefixes.
+pub const MAX_IPC_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+/// Errors from IPC frame decoding.
+#[derive(Debug, PartialEq)]
+pub enum IpcFrameError {
+    /// Declared payload length exceeds [`MAX_IPC_FRAME_SIZE`].
+    OversizedFrame { declared: usize },
+}
+
+impl std::fmt::Display for IpcFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OversizedFrame { declared } => {
+                write!(f, "IPC frame too large: {declared} bytes (max {MAX_IPC_FRAME_SIZE})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for IpcFrameError {}
+
 /// Length-prefixed IPC framing for Plugin ↔ App communication.
 ///
 /// Frame format over TCP:
@@ -35,20 +58,25 @@ impl IpcFramer {
 
     /// Try to extract a complete frame from a receive buffer.
     ///
-    /// Returns `Some((payload, consumed))` if a complete frame is available,
+    /// Returns `Ok(Some((payload, consumed)))` if a complete frame is available,
     /// where `consumed` is the total bytes used (4-byte header + payload).
-    /// Returns `None` if more data is needed.
-    pub fn decode_frame(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
+    /// Returns `Ok(None)` if more data is needed.
+    /// Returns `Err(IpcFrameError::OversizedFrame)` if the declared payload
+    /// exceeds [`MAX_IPC_FRAME_SIZE`].
+    pub fn decode_frame(buf: &[u8]) -> Result<Option<(Vec<u8>, usize)>, IpcFrameError> {
         if buf.len() < 4 {
-            return None;
+            return Ok(None);
         }
         let payload_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if payload_len > MAX_IPC_FRAME_SIZE {
+            return Err(IpcFrameError::OversizedFrame { declared: payload_len });
+        }
         let total = 4 + payload_len;
         if buf.len() < total {
-            return None;
+            return Ok(None);
         }
         let payload = buf[4..total].to_vec();
-        Some((payload, total))
+        Ok(Some((payload, total)))
     }
 }
 
@@ -79,11 +107,21 @@ impl IpcRecvBuffer {
     }
 
     /// Try to extract the next complete frame.
-    /// Returns `None` if more data is needed.
+    /// Returns `None` if more data is needed or if a corrupt oversized frame
+    /// was detected (logged at warn level, buffer cleared).
     pub fn next_frame(&mut self) -> Option<Vec<u8>> {
-        let (payload, consumed) = IpcFramer::decode_frame(&self.buf)?;
-        self.buf.drain(..consumed);
-        Some(payload)
+        match IpcFramer::decode_frame(&self.buf) {
+            Ok(Some((payload, consumed))) => {
+                self.buf.drain(..consumed);
+                Some(payload)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!("{e} — dropping buffer ({} bytes)", self.buf.len());
+                self.buf.clear();
+                None
+            }
+        }
     }
 
     /// Number of buffered bytes not yet consumed.
@@ -304,14 +342,14 @@ mod tests {
     fn decode_frame_from_complete_buffer() {
         let payload = vec![10u8, 20, 30];
         let frame = IpcFramer::encode_frame(&payload);
-        let (decoded, consumed) = IpcFramer::decode_frame(&frame).unwrap();
+        let (decoded, consumed) = IpcFramer::decode_frame(&frame).unwrap().unwrap();
         assert_eq!(decoded, vec![10, 20, 30]);
         assert_eq!(consumed, 7);
     }
 
     #[test]
     fn decode_returns_none_for_incomplete_header() {
-        assert!(IpcFramer::decode_frame(&[0, 0]).is_none());
+        assert!(IpcFramer::decode_frame(&[0, 0]).unwrap().is_none());
     }
 
     #[test]
@@ -319,7 +357,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&10u32.to_le_bytes());
         buf.extend_from_slice(&[1, 2, 3]);
-        assert!(IpcFramer::decode_frame(&buf).is_none());
+        assert!(IpcFramer::decode_frame(&buf).unwrap().is_none());
     }
 
     #[test]
@@ -329,10 +367,45 @@ mod tests {
         let mut buf = frame1.clone();
         buf.extend_from_slice(&frame2);
 
-        let (payload, consumed) = IpcFramer::decode_frame(&buf).unwrap();
+        let (payload, consumed) = IpcFramer::decode_frame(&buf).unwrap().unwrap();
         assert_eq!(payload, vec![0xAA, 0xBB]);
         assert_eq!(consumed, 6);
         assert_eq!(buf.len() - consumed, 5);
+    }
+
+    #[test]
+    fn decode_rejects_oversized_frame() {
+        // Header claims payload of MAX + 1 bytes
+        let huge_len = (MAX_IPC_FRAME_SIZE as u32) + 1;
+        let buf = huge_len.to_le_bytes();
+        let err = IpcFramer::decode_frame(&buf).unwrap_err();
+        assert_eq!(
+            err,
+            IpcFrameError::OversizedFrame { declared: MAX_IPC_FRAME_SIZE + 1 }
+        );
+    }
+
+    #[test]
+    fn decode_rejects_4gb_frame() {
+        let buf = u32::MAX.to_le_bytes();
+        let err = IpcFramer::decode_frame(&buf).unwrap_err();
+        assert_eq!(
+            err,
+            IpcFrameError::OversizedFrame { declared: u32::MAX as usize }
+        );
+    }
+
+    #[test]
+    fn recv_buffer_clears_on_oversized_frame() {
+        let mut buf = IpcRecvBuffer::new();
+        // Push a header claiming a huge payload
+        let huge_len = (MAX_IPC_FRAME_SIZE as u32) + 1;
+        buf.push(&huge_len.to_le_bytes());
+        buf.push(&[0xAA; 100]); // some junk data
+
+        // next_frame should detect the oversized declaration, clear buffer, return None
+        assert!(buf.next_frame().is_none());
+        assert_eq!(buf.buffered(), 0, "buffer should be cleared after oversized frame");
     }
 
     // --- IpcRecvBuffer ---
