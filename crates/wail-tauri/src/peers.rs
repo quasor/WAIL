@@ -209,15 +209,6 @@ impl PeerRegistry {
             .map(|(id, _)| id.clone())
     }
 
-    /// Reset the added_at clock for a peer, e.g. after a successful reconnect
-    /// attempt so the Hello-completion watchdog gets a fresh window.
-    pub fn reset_added_at(&mut self, peer_id: &str) {
-        if let Some(peer) = self.peers.get_mut(peer_id) {
-            peer.added_at = Instant::now();
-            peer.hello_retry_sent = false;
-        }
-    }
-
     /// Return peer IDs that are active (have received messages) but whose Hello
     /// handshake has not completed (identity still unknown).
     ///
@@ -523,21 +514,6 @@ mod tests {
         );
         assert!(soft.is_empty(), "identified peer must be excluded");
         assert!(hard.is_empty(), "identified peer must be excluded");
-    }
-
-    #[test]
-    fn reset_added_at_refreshes_clock() {
-        let mut reg = PeerRegistry::new();
-        reg.add("peer1".to_string(), None);
-        let peer = reg.get_mut("peer1").unwrap();
-        peer.added_at = Instant::now() - Duration::from_secs(20);
-
-        reg.reset_added_at("peer1");
-
-        assert!(
-            reg.get("peer1").unwrap().added_at.elapsed() < Duration::from_secs(1),
-            "added_at should be reset to now"
-        );
     }
 
 }
