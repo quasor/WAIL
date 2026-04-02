@@ -318,8 +318,12 @@ impl IntervalRing {
     }
 
     /// Take completed intervals that are ready for encoding and transmission.
+    ///
+    /// Uses `drain(..)` instead of `mem::take` to preserve the pre-allocated
+    /// capacity of the internal Vec, avoiding a heap allocation on the next
+    /// `swap_intervals()` push.
     pub fn take_completed(&mut self) -> Vec<CompletedInterval> {
-        std::mem::take(&mut self.completed)
+        self.completed.drain(..).collect()
     }
 
     /// Update interval configuration (bars, quantum).
@@ -739,6 +743,14 @@ impl IntervalRing {
 }
 
 #[cfg(test)]
+impl IntervalRing {
+    /// Expose completed-vec capacity for testing.
+    fn completed_capacity(&self) -> usize {
+        self.completed.capacity()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -829,6 +841,46 @@ mod tests {
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].index, 0);
         assert_eq!(completed[0].samples.len(), 256); // 2 calls * 128 samples
+    }
+
+    #[test]
+    fn take_completed_preserves_vec_capacity() {
+        let mut ring = make_ring();
+        let input = vec![0.3f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Initial capacity should be 2 (pre-allocated in new())
+        assert_eq!(ring.completed_capacity(), 2);
+
+        // Complete interval 0: record some audio then cross boundary
+        ring.process(&input, &mut output, 0.0);
+        ring.process(&input, &mut output, 8.0);
+        ring.process(&input, &mut output, 16.0);
+
+        // Drain completed intervals
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1);
+
+        // Capacity must be preserved — not reset to 0
+        assert!(
+            ring.completed_capacity() >= 2,
+            "take_completed() must preserve Vec capacity; got {}",
+            ring.completed_capacity()
+        );
+
+        // Complete interval 1: record more audio then cross next boundary
+        ring.process(&input, &mut output, 24.0);
+        ring.process(&input, &mut output, 32.0);
+
+        // Second take should also work and capacity should still be preserved
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].index, 1);
+        assert!(
+            ring.completed_capacity() >= 2,
+            "take_completed() must preserve Vec capacity after second drain; got {}",
+            ring.completed_capacity()
+        );
     }
 
     // --- Test: Remote audio playback ---
