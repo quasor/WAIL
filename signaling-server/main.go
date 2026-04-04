@@ -789,6 +789,7 @@ type sessionJSON struct {
 	ID string `json:"id"`; Room string `json:"room"`; StartedAt string `json:"started_at"`
 	EndedAt *string `json:"ended_at,omitempty"`; Duration string `json:"duration"`
 	Phase string `json:"phase"`; Peers []string `json:"peers"`
+	PeerDisplayNames map[string]string `json:"peer_display_names,omitempty"`
 	Joining map[string]*directionMetrics `json:"joining"`
 	Playing map[string]*directionMetrics `json:"playing"`
 }
@@ -808,10 +809,18 @@ func sessionToJSON(s *session) sessionJSON {
 	return sj
 }
 
-func (h *hub) isPrivateRoom(roomName string) bool {
-	var pwHash sql.NullString
-	h.db.QueryRow("SELECT password_hash FROM rooms WHERE room = ?", roomName).Scan(&pwHash)
-	return pwHash.Valid && pwHash.String != ""
+func (h *hub) lookupDisplayNames(sj *sessionJSON) {
+	names := make(map[string]string)
+	for _, pid := range sj.Peers {
+		var dn sql.NullString
+		h.db.QueryRow("SELECT display_name FROM peers WHERE room = ? AND peer_id = ?", sj.Room, pid).Scan(&dn)
+		if dn.Valid && dn.String != "" {
+			names[pid] = dn.String
+		}
+	}
+	if len(names) > 0 {
+		sj.PeerDisplayNames = names
+	}
 }
 
 func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
@@ -823,17 +832,23 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 	h.mu.RUnlock()
 	for i, name := range roomNames {
 		if roomFilter != "" && name != roomFilter { continue }
-		if h.isPrivateRoom(name) { continue }
 		r := roomPtrs[i]
 		r.mu.Lock()
-		if s := r.activeSession; s != nil { active = append(active, sessionToJSON(s)) }
+		if s := r.activeSession; s != nil {
+			sj := sessionToJSON(s)
+			h.lookupDisplayNames(&sj)
+			active = append(active, sj)
+		}
 		r.mu.Unlock()
 	}
 	h.completedMu.Lock()
 	for rn, sessions := range h.completedSessions {
 		if roomFilter != "" && rn != roomFilter { continue }
-		if h.isPrivateRoom(rn) { continue }
-		for _, s := range sessions { completed = append(completed, sessionToJSON(s)) }
+		for _, s := range sessions {
+			sj := sessionToJSON(s)
+			h.lookupDisplayNames(&sj)
+			completed = append(completed, sj)
+		}
 	}
 	h.completedMu.Unlock()
 	sort.Slice(completed, func(i, j int) bool { return completed[i].StartedAt > completed[j].StartedAt })
@@ -900,28 +915,36 @@ const dashboardHTML = `<!DOCTYPE html>
   .phase-label { font-weight: 500; color: var(--fg); margin-top: 8px; margin-bottom: 2px; }
   .drop-ok { color: var(--green); } .drop-warn { color: var(--yellow); } .drop-bad { color: var(--red); }
   .no-data { color: #8b949e; font-size: 0.85em; }
+  .header-row { display: flex; align-items: baseline; gap: 16px; margin-bottom: 4px; }
+  .toggle { background: var(--card); border: 1px solid var(--border); color: var(--fg); padding: 4px 10px; border-radius: 6px; font-size: 0.8em; cursor: pointer; }
+  .toggle:hover { border-color: var(--accent); }
+  .toggle.active { background: rgba(88,166,255,0.15); border-color: var(--accent); color: var(--accent); }
 </style></head><body>
-<h1>WAIL Session Metrics</h1>
+<div class="header-row"><h1>WAIL Session Metrics</h1><button class="toggle" id="name-toggle" onclick="toggleNames()">Show Names</button></div>
 <div class="status" id="status"><span class="dot err"></span>Connecting...</div>
 <div id="active-section"><div class="section-title">Active Sessions</div><div id="active" class="empty">No active sessions</div></div>
 <div id="completed-section"><div class="section-title">Completed Sessions</div><div id="completed" class="empty">No completed sessions</div></div>
 <script>
 const statusEl=document.getElementById('status'),activeEl=document.getElementById('active'),completedEl=document.getElementById('completed');
+let showNames=false;let lastData=null;
+function toggleNames(){showNames=!showNames;document.getElementById('name-toggle').className='toggle'+(showNames?' active':'');document.getElementById('name-toggle').textContent=showNames?'Show IDs':'Show Names';if(lastData)render(lastData)}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function peerLabel(id,names){if(showNames&&names&&names[id])return names[id];return id}
+function dirLabel(dir,names){if(!showNames||!names)return dir;return dir.split('\u2192').map(function(id){return names[id.trim()]||id.trim()}).join('\u2192')}
 function dropClass(e,d){if(e===0)return'no-data';const p=d/e*100;return p<=1?'drop-ok':p<=5?'drop-warn':'drop-bad'}
 function fmtMs(us){return us!=null?(us/1000).toFixed(1)+'ms':'\u2014'}
 function jitterClass(us){if(us==null)return'no-data';return us<=20000?'drop-ok':us<=50000?'drop-warn':'drop-bad'}
 function countClass(n){return n>0?'drop-bad':'drop-ok'}
-function renderDirections(dirs){
+function renderDirections(dirs,names){
   if(!dirs||Object.keys(dirs).length===0)return'<span class="no-data">No data yet</span>';
   let h='<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th><th>RTT</th><th>Jitter</th><th>DC Drops</th><th>Late</th><th>Decode Err</th></tr>';
   for(const[dir,m]of Object.entries(dirs)){const p=m.frames_expected>0?(m.frames_dropped/m.frames_expected*100).toFixed(1):'\u2014';const c=dropClass(m.frames_expected,m.frames_dropped);
-    h+='<tr><td>'+esc(dir)+'</td><td>'+m.frames_expected+'</td><td>'+m.frames_received+'</td><td class="'+c+'">'+m.frames_dropped+'</td><td class="'+c+'">'+p+(m.frames_expected>0?'%':'')+'</td><td>'+fmtMs(m.rtt_us)+'</td><td class="'+jitterClass(m.jitter_us)+'">'+fmtMs(m.jitter_us)+'</td><td class="'+countClass(m.dc_drops||0)+'">'+(m.dc_drops||0)+'</td><td class="'+countClass(m.late_frames||0)+'">'+(m.late_frames||0)+'</td><td class="'+countClass(m.decode_failures||0)+'">'+(m.decode_failures||0)+'</td></tr>'}
+    h+='<tr><td>'+esc(dirLabel(dir,names))+'</td><td>'+m.frames_expected+'</td><td>'+m.frames_received+'</td><td class="'+c+'">'+m.frames_dropped+'</td><td class="'+c+'">'+p+(m.frames_expected>0?'%':'')+'</td><td>'+fmtMs(m.rtt_us)+'</td><td class="'+jitterClass(m.jitter_us)+'">'+fmtMs(m.jitter_us)+'</td><td class="'+countClass(m.dc_drops||0)+'">'+(m.dc_drops||0)+'</td><td class="'+countClass(m.late_frames||0)+'">'+(m.late_frames||0)+'</td><td class="'+countClass(m.decode_failures||0)+'">'+(m.decode_failures||0)+'</td></tr>'}
   return h+'</table>'}
-function renderSession(s){const pc=s.phase==='playing'?'playing':'joining';let h='<div class="session"><div class="session-header"><span class="room">'+esc(s.room)+'</span><span class="badge '+pc+'">'+esc(s.phase)+'</span><span class="meta">'+esc(s.duration)+'</span>';
+function renderSession(s){const pc=s.phase==='playing'?'playing':'joining';const names=s.peer_display_names;let h='<div class="session"><div class="session-header"><span class="room">'+esc(s.room)+'</span><span class="badge '+pc+'">'+esc(s.phase)+'</span><span class="meta">'+esc(s.duration)+'</span>';
   if(s.ended_at)h+='<span class="meta">ended '+esc(new Date(s.ended_at).toLocaleTimeString())+'</span>';
-  h+='</div><div class="peers">Peers: '+s.peers.map(esc).join(', ')+'</div><div class="phase-label">Joining</div>'+renderDirections(s.joining)+'<div class="phase-label">Playing</div>'+renderDirections(s.playing)+'</div>';return h}
-function render(data){
+  h+='</div><div class="peers">Peers: '+s.peers.map(function(p){return esc(peerLabel(p,names))}).join(', ')+'</div><div class="phase-label">Joining</div>'+renderDirections(s.joining,names)+'<div class="phase-label">Playing</div>'+renderDirections(s.playing,names)+'</div>';return h}
+function render(data){lastData=data;
   activeEl.innerHTML=data.active&&data.active.length>0?data.active.map(renderSession).join(''):'<div class="empty">No active sessions</div>';
   completedEl.innerHTML=data.completed&&data.completed.length>0?data.completed.map(renderSession).join(''):'<div class="empty">No completed sessions</div>'}
 function connect(){const proto=location.protocol==='https:'?'wss:':'ws:';const params=new URLSearchParams(location.search);const room=params.get('room');
