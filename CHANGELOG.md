@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.1 (2026-04-04)
+
+### Fixes
+
+- show private rooms on metrics dashboard and add name toggle (#305)
+- use Link-aligned intervals in debug frame visualization (#307)
+
 ## 2.1.0 (2026-04-03)
 
 ### Features
