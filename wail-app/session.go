@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,6 +163,10 @@ func sessionLoop(
 	localSendStreams := make(map[int]uint16) // connID → streamIndex
 	localSendActive := make(map[uint16]bool)
 	loggedFirstFrameSent := false
+
+	// Debug frame tracking (per peer:stream, reset per Link interval)
+	debugFrameCounters := make(map[string]uint32)
+	var debugLastInterval int64 = -1
 
 	// Test tone state
 	var testToneBoundaryCh chan IntervalBoundaryInfo
@@ -573,17 +578,26 @@ func sessionLoop(
 				if lastBoundaryTime != nil {
 					arrivalOffsetMs = float64(time.Since(*lastBoundaryTime).Milliseconds())
 				}
-				var totalFrames *uint32
-				if header.IsFinal {
-					tf := header.TotalFrames
-					totalFrames = &tf
+				// Debug: use receiver's Link-aligned interval + own frame counter
+				// (sender's raw interval_index/frame_number may not match Link)
+				if lastIntervalIndex != nil {
+					if *lastIntervalIndex != debugLastInterval {
+						for k := range debugFrameCounters {
+							delete(debugFrameCounters, k)
+						}
+						debugLastInterval = *lastIntervalIndex
+					}
+					counterKey := from + ":" + strconv.Itoa(int(header.StreamID))
+					debugFrameNum := debugFrameCounters[counterKey]
+					debugFrameCounters[counterKey] = debugFrameNum + 1
+
+					emitter.Emit("debug:interval-frame", DebugIntervalFrame{
+						PeerID: from, DisplayName: dn, StreamIndex: header.StreamID,
+						StreamName: streamName, IntervalIndex: *lastIntervalIndex,
+						FrameNumber: debugFrameNum, TotalFrames: nil,
+						IsFinal: false, ArrivalOffsetMs: arrivalOffsetMs,
+					})
 				}
-				emitter.Emit("debug:interval-frame", DebugIntervalFrame{
-					PeerID: from, DisplayName: dn, StreamIndex: header.StreamID,
-					StreamName: streamName, IntervalIndex: header.IntervalIndex,
-					FrameNumber: header.FrameNumber, TotalFrames: totalFrames,
-					IsFinal: header.IsFinal, ArrivalOffsetMs: arrivalOffsetMs,
-				})
 			}
 
 			audioIntervalsReceived++
