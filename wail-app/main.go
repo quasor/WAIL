@@ -94,7 +94,9 @@ func main() {
 		}()
 	}
 
-	if err := wailsApp.Run(); err != nil {
+	err = wailsApp.Run()
+	appBackend.Shutdown()
+	if err != nil {
 		log.Fatalf("Wails app error: %v", err)
 	}
 }

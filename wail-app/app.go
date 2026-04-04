@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -183,16 +184,38 @@ func (a *App) JoinRoom(
 	return &JoinResult{PeerID: handle.PeerID, Room: handle.Room, BPM: actualBPM}, nil
 }
 
-// Disconnect ends the current session.
+// Disconnect ends the current session and waits for cleanup to finish.
 func (a *App) Disconnect() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.session != nil {
-		a.session.CmdCh <- SessionCommand{Type: "Disconnect"}
-		a.session = nil
-		log.Println("[app] Disconnect command sent")
+	session := a.session
+	a.session = nil
+	a.mu.Unlock()
+
+	if session == nil {
+		return nil
 	}
+
+	session.CmdCh <- SessionCommand{Type: "Disconnect"}
+	session.cancel()
+
+	select {
+	case <-session.done:
+		log.Println("[app] Session goroutine finished cleanly")
+	case <-time.After(5 * time.Second):
+		log.Println("[app] Session goroutine did not finish in 5s, proceeding")
+	}
+
+	log.Println("[app] Disconnect complete")
 	return nil
+}
+
+// Shutdown disconnects any active session and disables frontend event emission.
+// Called after the Wails app exits to ensure clean teardown.
+func (a *App) Shutdown() {
+	if we, ok := a.emitter.(*WailsEmitter); ok {
+		we.Shutdown()
+	}
+	a.Disconnect()
 }
 
 // ChangeBPM sends a BPM change command.

@@ -48,6 +48,7 @@ type SessionHandle struct {
 	PeerID string
 	Room   string
 	cancel context.CancelFunc
+	done   chan struct{} // closed when session goroutine exits
 }
 
 // EventEmitter abstracts frontend event emission.
@@ -61,15 +62,18 @@ func SpawnSession(emitter EventEmitter, config SessionConfig) (*SessionHandle, e
 	peerID := generateShortID()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 
 	handle := &SessionHandle{
 		CmdCh:  cmdCh,
 		PeerID: peerID,
 		Room:   config.Room,
 		cancel: cancel,
+		done:   done,
 	}
 
 	go func() {
+		defer close(done)
 		if err := sessionLoop(ctx, emitter, config, peerID, cmdCh); err != nil {
 			log.Printf("[session] Error: %v", err)
 			emitter.Emit("session:error", SessionError{Message: err.Error()})
