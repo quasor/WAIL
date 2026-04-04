@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0 (2026-04-04)
+
+### Features
+
+- add stream-count-aware rate limiting to signaling server (#309)
+
+### Fixes
+
+- prevent goroutine hang on disconnect and window close (#308)
+- remove vestigial dc_drops metric from protocol and metrics (#311)
+- replay peer state to recv plugin on connect and fix decoder leak (#313)
+- cache display names to remove DB queries under room lock (#312)
+
 ## 2.1.1 (2026-04-04)
 
 ### Fixes
