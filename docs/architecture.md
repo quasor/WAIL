@@ -27,11 +27,11 @@ WAIL bridges Ableton Link sessions across the internet via a WebSocket relay ser
 │  │  Ableton Live / Link app     │    │                    │    │  Ableton Live / Link app     │  │
 │  └──────────────────────────────┘    │                    │    └──────────────────────────────┘  │
 └──────────────────────────────────────┘                    └──────────────────────────────────────┘
-                    │ WebSocket                                             │ WebSocket
+                    │ WebSocket                                              │ WebSocket
                     │                                                        │
                     │              ┌──────────────────┐                      │
                     └─────────────►│ Signaling Server │◄─────────────────────┘
-                                   │  (Go + SQLite)    │
+                                   │  (Go + SQLite)   │
                                    └──────────────────┘
 ```
 
