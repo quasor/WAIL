@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.3.0 (2026-04-05)
+
+### Features
+
+- add headless CLI mode with WAV file sender (#317)
+
+### Fixes
+
+- disable autocomplete on room name input (#315)
+
 ## 2.2.0 (2026-04-04)
 
 ### Features
