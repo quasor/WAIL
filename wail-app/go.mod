@@ -6,6 +6,9 @@ require github.com/gorilla/websocket v1.5.3
 
 require (
 	github.com/DatanoiseTV/abletonlink-go v0.0.0-20260221181029-2b72c552081d
+	github.com/go-audio/audio v1.0.0
+	github.com/go-audio/riff v1.0.0 // indirect
+	github.com/go-audio/wav v1.1.0
 	github.com/google/uuid v1.6.0
 )
 

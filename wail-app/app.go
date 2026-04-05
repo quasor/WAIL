@@ -248,6 +248,16 @@ func (a *App) SetTestTone(streamIndex *uint16) error {
 	return nil
 }
 
+// SetWavSender starts or stops the WAV file sender on a stream.
+func (a *App) SetWavSender(streamIndex *uint16, wavFile string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetWavSender", StreamIndex: streamIndex, WavFile: wavFile}
+	}
+	return nil
+}
+
 // GetDefaultRecordingDir returns the default recording directory.
 func (a *App) GetDefaultRecordingDir() (string, error) {
 	return DefaultRecordingDir()

@@ -35,11 +35,12 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
+	WavFile     string
 }
 
 // SessionHandle represents a running session.
@@ -177,6 +178,11 @@ func sessionLoop(
 	var testToneCancelFn context.CancelFunc
 	var testToneStream *uint16
 
+	// WAV sender state
+	var wavSenderBoundaryCh chan IntervalBoundaryInfo
+	var wavSenderCancelFn context.CancelFunc
+	var wavSenderStream *uint16
+
 	// IPC
 	ipcFromPluginCh := make(chan ipcFrame, 64)
 	ipcDisconnectCh := make(chan int, 16)
@@ -303,6 +309,41 @@ func sessionLoop(
 					logInfo("[TEST] Test tone started on Send %d", si)
 				} else {
 					logInfo("[TEST] Test tone stopped")
+				}
+				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+			case "SetWavSender":
+				// Stop existing WAV sender
+				if wavSenderCancelFn != nil {
+					wavSenderCancelFn()
+					wavSenderCancelFn = nil
+				}
+				wavSenderBoundaryCh = nil
+				if wavSenderStream != nil {
+					delete(localStreamNames, *wavSenderStream)
+				}
+				wavSenderStream = nil
+
+				if cmd.StreamIndex != nil && cmd.WavFile != "" {
+					si := *cmd.StreamIndex
+					wavCtx, cancelFn := context.WithCancel(ctx)
+					wavSenderCancelFn = cancelFn
+					boundaryCh := make(chan IntervalBoundaryInfo, 4)
+					wavSenderBoundaryCh = boundaryCh
+					wavSenderStream = &si
+
+					connID := int(^uint(0)>>1) - 100 - int(si) // offset from test tone connIDs
+					localSendStreams[connID] = si
+
+					wavName := "WAV Sender"
+					if displayName != "" {
+						wavName = displayName + "'s WAV"
+					}
+					localStreamNames[si] = wavName
+
+					go WavSenderTask(wavCtx, si, connID, ipcFromPluginCh, boundaryCh, cmd.WavFile)
+					logInfo("[WAV] WAV sender started on Send %d: %s", si, cmd.WavFile)
+				} else {
+					logInfo("[WAV] WAV sender stopped")
 				}
 				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
 			case "Disconnect":
@@ -670,11 +711,11 @@ func sessionLoop(
 					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh, wavSenderBoundaryCh)
 
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh, wavSenderBoundaryCh)
 				emitter.Emit("debug:link-tick", LinkTickEvent{BPM: ev.BPM, Beat: ev.Beat, Phase: ev.Phase})
 			}
 
@@ -1019,6 +1060,7 @@ func handleIntervalBoundary(
 	totalSent, totalRecv *uint64,
 	lastIntervalIndex **int64, lastBoundaryTime **time.Time,
 	testToneBoundaryCh chan IntervalBoundaryInfo,
+	wavSenderBoundaryCh chan IntervalBoundaryInfo,
 ) {
 	idx := computeIntervalIndex(beat, bars, quantum)
 	if lastIdx != nil && idx <= *lastIdx {
@@ -1048,9 +1090,16 @@ func handleIntervalBoundary(
 
 	mesh.Broadcast(NewIntervalBoundary(idx))
 
+	info := IntervalBoundaryInfo{Index: idx, BPM: bpm, Bars: bars, Quantum: quantum}
 	if testToneBoundaryCh != nil {
 		select {
-		case testToneBoundaryCh <- IntervalBoundaryInfo{Index: idx, BPM: bpm, Bars: bars, Quantum: quantum}:
+		case testToneBoundaryCh <- info:
+		default:
+		}
+	}
+	if wavSenderBoundaryCh != nil {
+		select {
+		case wavSenderBoundaryCh <- info:
 		default:
 		}
 	}

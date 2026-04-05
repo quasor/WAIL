@@ -45,6 +45,25 @@ Then rescan plugins in your DAW.
 
 6. **Play.** Audio is recorded for the duration of each interval (default: 4 bars), then transmitted to all connected peers. Playback runs one interval behind — this latency-by-design is how NINJAM-style sync works.
 
+## Headless CLI Mode
+
+WAIL can run without the GUI for scripted or automated use. The `-headless` flag starts the app in CLI mode, and `-wav` streams a WAV file to peers in the room, looping continuously until stopped.
+
+```sh
+./wail-app -headless -room=myroom -wav=song.wav -bpm=120 -name="wav-bot"
+```
+
+| Flag | Description |
+|------|-------------|
+| `-headless` | Run without GUI (required for CLI mode) |
+| `-room` | Room to join (required in headless mode) |
+| `-wav` | WAV file to send (loaded into memory, resampled to 48kHz stereo) |
+| `-bpm` | Tempo in BPM (default: 120) |
+| `-name` | Display name (auto-generated if empty) |
+| `-password` | Room password (optional) |
+
+Stop with Ctrl+C or SIGTERM for clean shutdown.
+
 ## Components
 
 WAIL has three components that work together:

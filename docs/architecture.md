@@ -300,6 +300,8 @@ Two independent time domains exist in the system:
 
 14. **Lock-free audio broadcast via copy-on-write**: The signaling server uses per-room `atomic.Pointer[[]connEntry]` snapshots so the audio hot path (~50 frames/sec/peer) iterates the connection list without holding any lock. Mutations (join/leave) acquire the per-room `r.mu`, rebuild the slice, and store it atomically. To avoid data races on `conn.room`/`conn.peerID` fields (which are cleared during eviction and leave), broadcast functions receive `room` and `peerID` as value parameters captured once per join in `readPump`, rather than reading them from the shared `conn` struct.
 
+15. **Headless CLI mode with pluggable emitter**: The WAIL app supports a `-headless` flag that bypasses the Wails GUI entirely. A `NoopEmitter` satisfies the `EventEmitter` interface (logging events instead of dispatching to a webview), decoupling session orchestration from the frontend. The `WavSenderTask` goroutine provides a built-in audio source that reads a WAV file, resamples to 48kHz stereo, Opus-encodes in 20ms frames, and feeds WAIF frames into the same interval-boundary pipeline used by the DAW plugins — enabling automated/scripted participation in a room without a DAW.
+
 ## Session Metrics and Live Dashboard
 
 The signaling server tracks aggregate session metrics to monitor whether audio is flowing between peers.
