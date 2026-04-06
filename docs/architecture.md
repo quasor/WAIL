@@ -97,8 +97,10 @@ Interval N+1: [RECORD local audio] ──→ on boundary ──→ encode + tran
 
 At each interval boundary:
 - The record slot moves to the completed queue (for Opus encoding + transmission)
-- Pending remote intervals are mixed (summed) into the playback slot
+- The pre-mixed playback buffer swaps into the active playback slot (O(1) pointer swap)
 - Record and playback positions reset to zero
+
+**Pre-mix double buffer:** Remote audio is summed incrementally into a `next_playback_slot` during `feed_remote()` calls (amortized across process callbacks). At the boundary, `swap_intervals()` swaps `next_playback_slot` into the active `playback_slot` via `std::mem::swap` — eliminating the O(interval_length × peers) CPU spike that occurred when all mixing happened at the boundary. Entries that were pre-mixed skip the traditional summation; only late-arriving (non-pre-mixed) entries are summed at swap time.
 
 Late-arriving frames (remote audio for the current playback interval that arrives after the swap) are **live-appended** directly to the active playback slot rather than queued for the next boundary. This eliminates the "2 bars sound, 2 bars silence" dropout that occurs at real-time network pacing.
 
@@ -121,9 +123,9 @@ DAW Track A
   → IPC TCP frame (tag 0x01 with peer_id) to Recv Plugin B
   → FrameAssembler collects WAIF frames, assembles on final frame
   → AudioDecoder.decode_interval() — Opus decode to f32
-  → IntervalRing.feed_remote() — live-append if interval is currently playing,
-                                  otherwise queue for next playback slot
-  → Next boundary: queued remote audio becomes playback slot
+  → IntervalRing.feed_remote() — pre-mix into next_playback_slot if matching
+                                  current interval, otherwise queue for later
+  → Next boundary: pre-mixed next_playback_slot swaps into active playback (O(1))
   → WAIL Recv plugin process() — IntervalRing reads playback to output
 DAW Track B hears Peer A's previous interval
 ```
@@ -132,7 +134,8 @@ DAW Track B hears Peer A's previous interval
 
 `AudioBridge` wraps the full encode/decode pipeline in a single struct:
 
-- `process(input, output, beat_position)` → drives IntervalRing, returns wire bytes for completed intervals
+- `process_rt(input, output, beat_position)` → drives IntervalRing from DAW beat position (used by Send plugin), returns completed intervals
+- `process_rt_with_interval(input, output, interval_index)` → drives IntervalRing from an externally-provided interval index (used by Recv plugin, where the interval comes from the Go app's Link session via incoming audio frames)
 - `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `ClientChannelMapping`)
 - `update_config(bars, quantum, bpm)` → updates interval parameters from DAW transport
 
@@ -230,6 +233,8 @@ interval_index = floor(beat_position / (bars × quantum))
 ```
 
 Example: 4 bars × 4.0 quantum = 16 beats per interval. Beat 15.9 → interval 0. Beat 16.0 → interval 1.
+
+**Send vs Recv boundary driving:** The Send plugin derives its interval index from the DAW's beat position (via `process_rt`). The Recv plugin instead tracks the latest interval index carried in incoming audio frames from the Go app's Link session (via `process_rt_with_interval`). This decouples Recv from the DAW's transport position, which may not match Link's beat timeline (e.g., when the DAW isn't providing Link-aligned transport).
 
 **WAN peers' boundaries are NOT synchronized.** Peer A might cross into interval 1 while Peer B is still in interval 0. This is fine for NINJAM semantics — you always play the _previous_ interval, so drift up to 1 full interval is tolerable. As long as the wire data arrives before the receiver's _next_ boundary, it gets played on time.
 
