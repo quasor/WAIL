@@ -172,6 +172,12 @@ impl Plugin for WailSendPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        // egui + baseview crashes in debug builds (likely OpenGL context issue
+        // in the nih_plug_egui baseview backend). Keep the GUI disabled until
+        // we find the root cause or switch to a different windowing backend.
+        if cfg!(debug_assertions) {
+            return None;
+        }
         create_egui_editor(
             self.editor_state.clone(),
             (),
