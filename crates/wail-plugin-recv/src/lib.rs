@@ -209,10 +209,6 @@ impl Plugin for WailRecvPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Disable GUI in debug builds to avoid crashes during development.
-        if cfg!(debug_assertions) {
-            return None;
-        }
         let data = self.editor_data.clone();
         create_egui_editor(
             self.editor_state.clone(),

@@ -172,10 +172,6 @@ impl Plugin for WailSendPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Disable GUI in debug builds to avoid crashes during development.
-        if cfg!(debug_assertions) {
-            return None;
-        }
         create_egui_editor(
             self.editor_state.clone(),
             (),
