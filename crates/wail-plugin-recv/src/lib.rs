@@ -631,7 +631,13 @@ fn ipc_thread_recv(
                                                         }
                                                     }
                                                 });
-                                                match dec.decode_frame(&frame.opus_data) {
+                                                if frame.opus_data.is_empty() {
+                                                    // Empty final-marker frame: sender uses it to
+                                                    // signal interval completion for stats, no PCM
+                                                    // to decode. Running PLC here would synthesise
+                                                    // 20 ms of silence at the interval tail.
+                                                } else {
+                                                    match dec.decode_frame(&frame.opus_data) {
                                                     Ok(samples) => {
                                                         if let Err(e) = incoming_tx.try_send((
                                                             peer_id.clone(),
@@ -677,6 +683,7 @@ fn ipc_thread_recv(
                                                                 "IPC recv: failed to send PLC frame to audio thread (channel full)"
                                                             );
                                                         }
+                                                    }
                                                     }
                                                 }
                                             }

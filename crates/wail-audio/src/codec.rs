@@ -107,25 +107,48 @@ impl AudioEncoder {
         Ok(output)
     }
 
-    /// Encode a single 20ms frame of interleaved f32 audio into raw Opus bytes.
+    /// Encode a frame of interleaved f32 audio into raw Opus bytes.
     ///
-    /// Input: interleaved f32 samples for one frame (frame_size * channels samples).
-    /// Zero-pads if the input is shorter than one full frame.
-    /// Returns raw Opus packet bytes (no length prefix).
+    /// For full 20ms input, encodes a 20ms Opus packet. For shorter input,
+    /// picks the smallest valid Opus frame size (2.5/5/10/20 ms) that fits
+    /// and zero-pads to that size. Smaller sizes avoid emitting silence when
+    /// a partial "final" frame is flushed at an interval boundary — a full
+    /// 20ms pad on a 1 ms remainder would decode as ~19 ms of silence
+    /// appended to the interval.
+    ///
+    /// Returns raw Opus packet bytes (no length prefix). The decoder
+    /// autodetects the packet's frame size, so `decode_frame` returns
+    /// exactly the encoded number of samples per channel.
     pub fn encode_frame(&mut self, samples: &[f32]) -> Result<Vec<u8>> {
         let ch = self.channels as usize;
-        let frame_samples = self.frame_size * ch;
+        let full_per_ch = self.frame_size;
+        let input_per_ch = samples.len() / ch;
+
+        // Choose smallest Opus frame size that fits. At any supported sample
+        // rate, valid sizes are frame_size * {1/8, 1/4, 1/2, 1} (= 2.5/5/10/20 ms).
+        let target_per_ch = if input_per_ch >= full_per_ch {
+            full_per_ch
+        } else if input_per_ch > full_per_ch / 2 {
+            full_per_ch
+        } else if input_per_ch > full_per_ch / 4 {
+            full_per_ch / 2
+        } else if input_per_ch > full_per_ch / 8 {
+            full_per_ch / 4
+        } else {
+            full_per_ch / 8
+        };
+        let target_total = target_per_ch * ch;
 
         let padded;
-        let frame = if samples.len() < frame_samples {
+        let frame = if samples.len() < target_total {
             padded = {
                 let mut p = samples.to_vec();
-                p.resize(frame_samples, 0.0);
+                p.resize(target_total, 0.0);
                 p
             };
-            &padded
+            &padded[..]
         } else {
-            &samples[..frame_samples]
+            &samples[..target_total]
         };
 
         let mut opus_buf = vec![0u8; 4000];
@@ -358,6 +381,54 @@ mod tests {
         let samples = vec![0.5f32; 100];
         let opus_bytes = encoder.encode_frame(&samples).unwrap();
         assert!(!opus_bytes.is_empty());
+    }
+
+    // A 1 ms remainder used to be zero-padded to a full 20 ms Opus packet, so
+    // every interval's final frame decoded as ~19 ms of trailing silence.
+    // encode_frame now picks the smallest supported packet size, capping the
+    // silence tail at ≤ 1.5 ms for a 1 ms input.
+    #[test]
+    fn encode_frame_partial_input_uses_smaller_packet_size() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        // 1 ms of stereo at 48 kHz = 48 samples per channel.
+        let samples_per_ch = (sample_rate as f64 * 0.001) as usize;
+        let total = samples_per_ch * channels as usize;
+        let samples: Vec<f32> = (0..total)
+            .map(|i| {
+                let t = (i / channels as usize) as f32 / sample_rate as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        let decoded = decoder.decode_frame(&opus_bytes).unwrap();
+
+        // 2.5 ms frame at 48 kHz stereo = 120 samples per channel × 2.
+        let expected_max = 120 * channels as usize;
+        assert_eq!(
+            decoded.len(),
+            expected_max,
+            "1 ms input should produce a 2.5 ms Opus packet, not 20 ms",
+        );
+    }
+
+    #[test]
+    fn encode_frame_full_input_still_emits_20ms_packet() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        let frame_samples = encoder.frame_size() * channels as usize;
+        let samples = vec![0.0f32; frame_samples];
+
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        let decoded = decoder.decode_frame(&opus_bytes).unwrap();
+        assert_eq!(decoded.len(), frame_samples);
     }
 
     #[test]
